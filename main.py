@@ -7,7 +7,7 @@ import hashlib
 import json
 import requests
 from flask import Flask, request, jsonify
-from dotenv import load_doten
+from dotenv import load_dotenv
 from bot_logic import BotEngine
 
 load_dotenv()
