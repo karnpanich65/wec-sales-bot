@@ -39,10 +39,7 @@ class BotEngine:
         if self._should_qualify(user_message):
             state["qualify_step"] = 1
             _lead_states[user_id] = state
-            intro = (
-                "ดีใจที่สนใจครับ! เพื่อแนะนำให้ตรงที่สุด\n"
-                "ขอถาม 4 ข้อสั้นๆ นะครับ 😊\n\n" + QUALIFY_QUESTIONS[0]
-            )
+            intro = QUALIFY_QUESTIONS[0]
             self._log(user_id, user_message, intro)
             return intro, None
 
@@ -52,11 +49,7 @@ class BotEngine:
 
     # --------------------------------------------------
     def _welcome(self) -> str:
-        return (
-            "สวัสดีครับ! 😊 ผมน้องคุ้มค่า ผู้ช่วยส่วนตัวของ อสังหาคุ้มค่า\n\n"
-            "ยินดีช่วยเรื่องการลงทุนคอนโดปล่อยเช่าในกรุงเทพฯ ครับ\n"
-            "มีอะไรสงสัยถามได้เลยนะครับ หรือพิมพ์ 'สนใจลงทุน' เพื่อให้ประเมินความพร้อมครับ 🏠"
-        )
+        return "สวัสดีครับ Wealth Estate : อสังหาคุ้มค่า ยินดีให้คำปรึกษาครับ"
 
     def _check_faq(self, message: str) -> str | None:
         msg = message.lower().strip()
@@ -107,45 +100,26 @@ class BotEngine:
         return reply, None
 
     def _grade(self, data: dict) -> str:
-        income = data.get("income", "").lower()
-        budget = data.get("budget", "").lower()
-        high_income = any(x in income for x in ["แสน", "100,", "150,", "200,", "100000", "150000"])
-        med_income = any(x in income for x in ["3", "4", "5", "สาม", "สี่", "ห้า", "30,", "40,", "50,"])
-        high_budget = any(x in budget for x in ["2 ล้าน", "3 ล้าน", "4 ล้าน", "5 ล้าน", "2ล้าน", "3ล้าน"])
-        med_budget = any(x in budget for x in ["1.5", "ล้านครึ่ง", "ล้านกว่า", "1,500"])
-        if (high_income or med_income) and (high_budget or med_budget):
+        # Q2 answer (employment + income) is stored in 'budget' key
+        income_ans = data.get("budget", "").lower()
+        high_income = any(x in income_ans for x in ["แสน", "100,", "150,", "200,", "100000", "150000"])
+        med_income = any(x in income_ans for x in ["3", "4", "5", "สาม", "สี่", "ห้า", "30,", "40,", "50,"])
+        if high_income:
             return "A"
-        elif high_income or med_income or high_budget or med_budget:
+        elif med_income:
             return "B"
         return "C"
 
     def _grade_reply(self, grade: str) -> str:
         if grade == "A":
-            return (
-                "ขอบคุณมากครับ! 🙏\n\n"
-                "จากที่บอกมา ดูเหมือนมีความพร้อมสูงในการลงทุนครับ\n"
-                "ทีมที่ปรึกษาจะ contact กลับภายใน 30 นาทีครับ 📞\n\n"
-                "ช่วยแจ้งชื่อและเบอร์โทรด้วยได้ไหมครับ? 😊"
-            )
+            return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับหาลูกค้าภายใน 30 นาทีครับ"
         elif grade == "B":
-            return (
-                "ขอบคุณมากครับ! 🙏\n\n"
-                "น่าสนใจมากครับ ที่ปรึกษาจะโทรกลับประเมินวงเงินให้ละเอียด\n"
-                "ภายใน 1-2 ชั่วโมง (09:00-18:00) ครับ\n\n"
-                "ช่วยแจ้งชื่อและเบอร์โทรด้วยได้ไหมครับ? 📞"
-            )
-        return (
-            "ขอบคุณครับ! เข้าใจเลยครับ 🙏\n\n"
-            "มีคำถามเรื่องการลงทุนคอนโดอะไรเพิ่มเติมถามได้เลยนะครับ 😊\n"
-            "เราพร้อมให้ข้อมูลฟรีเสมอครับ"
-        )
+            return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับภายใน 1-2 ชั่วโมง (09:00-18:00 น.) ครับ"
+        return "ขอบคุณครับ ทีมงานจะติดต่อกลับหาลูกค้าในเร็วๆ นี้ครับ"
 
     def _claude(self, user_message: str, user_id: str) -> str:
         if not ANTHROPIC_API_KEY:
-            return (
-                "ขอบคุณที่ถามครับ! คำถามนี้ขอให้ที่ปรึกษาตอบตรงๆ จะดีกว่าครับ\n"
-                "พิมพ์ 'นัด' หรือ 'ติดต่อ' เพื่อให้ทีมงานโทรกลับได้เลยครับ 😊"
-            )
+            return "ขอบคุณที่ถามครับ คำถามนี้ขอให้ที่ปรึกษาตอบตรงๆ จะดีกว่าครับ พิมพ์ 'ติดต่อ' เพื่อให้ทีมงานโทรกลับได้เลยครับ"
 
         history = _conversations.get(user_id, [])
         history.append({"role": "user", "content": user_message})
@@ -162,7 +136,7 @@ class BotEngine:
                 },
                 json={
                     "model": "claude-haiku-4-5",
-                    "max_tokens": 400,
+                    "max_tokens": 150,
                     "system": WEC_SYSTEM_PROMPT,
                     "messages": history,
                 },
@@ -172,10 +146,7 @@ class BotEngine:
             reply = data["content"][0]["text"]
         except Exception as e:
             print(f"Claude API error: {e}")
-            reply = (
-                "ขออภัยครับ ระบบมีปัญหาชั่วคราว\n"
-                "กรุณาทักใหม่ หรือพิมพ์ 'ติดต่อ' ให้ทีมโทรกลับครับ 🙏"
-            )
+            reply = "ขออภัยครับ ระบบมีปัญหาชั่วคราว กรุณาทักใหม่ หรือพิมพ์ 'ติดต่อ' ให้ทีมโทรกลับครับ"
 
         history.append({"role": "assistant", "content": reply})
         _conversations[user_id] = history
