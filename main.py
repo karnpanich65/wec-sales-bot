@@ -7,7 +7,7 @@ import hashlib
 import json
 import requests
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
+from dotenv import load_doten
 from bot_logic import BotEngine
 
 load_dotenv()
@@ -20,7 +20,7 @@ FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
 FB_APP_SECRET = os.environ.get("FB_APP_SECRET", "")
 GIFT_FB_PSID = os.environ.get("GIFT_FB_PSID", "")
 
-app = Flash(__name__)
+app = Flask(__name__)
 bot = BotEngine()
 
 GRAPH_API_URL = "https://graph.facebook.com/v19.0/me/messages"
