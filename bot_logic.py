@@ -44,8 +44,9 @@ class BotEngine:
             self._log(user_id, user_message, intro)
             return intro, None
 
-        # Claude AI fallback
-        reply = self._claude(user_message, user_id)
+        # Fallback: ไม่ว่าจะพูดอะไร → ขอเบอร์ติดต่อทันที (ไม่ใช้ Claude AI)
+        reply = "รบกวนขอเบอร์ติดต่อหรือ ID LINE เพื่อให้ที่ปรึกษาโทรกลับหาลูกค้าโดยตรงครับ"
+        self._log(user_id, user_message, reply)
         return reply, None
 
     # --------------------------------------------------
@@ -119,41 +120,6 @@ class BotEngine:
         elif grade == "B":
             return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับภายใน 1-2 ชั่วโมง (09:00-18:00 น.) ครับ"
         return "ขอบคุณครับ ทีมงานจะติดต่อกลับหาลูกค้าในเร็วๆ นี้ครับ"
-
-    def _claude(self, user_message: str, user_id: str) -> str:
-        if not ANTHROPIC_API_KEY:
-            return "ขอบคุณที่ถามครับ คำถามนี้ขอให้ที่ปรึกษาตอบตรงๆ จะดีกว่าครับ พิมพ์ \'ติดต่อ\' เพื่อให้ทีมงานโทรกลับได้เลยครับ"
-
-        history = _conversations.get(user_id, [])
-        history.append({"role": "user", "content": user_message})
-        if len(history) > 20:
-            history = history[-20:]
-
-        try:
-            resp = requests.post(
-                ANTHROPIC_URL,
-                headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": "claude-haiku-4-5",
-                    "max_tokens": 150,
-                    "system": WEC_SYSTEM_PROMPT,
-                    "messages": history,
-                },
-                timeout=15,
-            )
-            data = resp.json()
-            reply = data["content"][0]["text"]
-        except Exception as e:
-            print(f"Claude API error: {e}")
-            reply = "ขออภัยครับ ระบบมีปัญหาชั่วคราว กรุณาทักใหม่ หรือพิมพ์ \'ติดต่อ\' ให้ทีมโทรกลับครับ"
-
-        history.append({"role": "assistant", "content": reply})
-        _conversations[user_id] = history
-        return reply
 
     def _send_to_sheets(self, user_id: str, data: dict, grade: str):
         """POST lead data ไป Google Apps Script => Sheets + Calendar"""
