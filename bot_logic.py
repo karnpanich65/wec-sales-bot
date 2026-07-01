@@ -8,6 +8,7 @@ from faq_data import FAQ_DATABASE, WEC_SYSTEM_PROMPT, QUALIFY_QUESTIONS, QUALIFY
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
 
 # In-memory state (resets on server restart — Phase 2: use Redis)
 _conversations: dict[str, list] = {}
@@ -81,13 +82,15 @@ class BotEngine:
             state["qualify_step"] = 4
             reply = QUALIFY_QUESTIONS[3]
         elif step == 4:
-            data["debt"] = user_message
+            data["debt"] = user_message  # Q4 = contact (phone / LINE ID)
             state["qualify_step"] = 0
             state["data"] = {}
             _lead_states[user_id] = state
             grade = self._grade(data)
             reply = self._grade_reply(grade)
             self._log(user_id, user_message, reply)
+            # ส่งข้อมูล Lead ไป Google Sheets + สร้าง Calendar event
+            self._send_to_sheets(user_id, data, grade)
             return reply, grade
         else:
             state["qualify_step"] = 0
@@ -119,7 +122,7 @@ class BotEngine:
 
     def _claude(self, user_message: str, user_id: str) -> str:
         if not ANTHROPIC_API_KEY:
-            return "ขอบคุณที่ถามครับ คำถามนี้ขอให้ที่ปรึกษาตอบตรงๆ จะดีกว่าครับ พิมพ์ 'ติดต่อ' เพื่อให้ทีมงานโทรกลับได้เลยครับ"
+            return "ขอบคุณที่ถามครับ คำถามนี้ขอให้ที่ปรึกษาตอบตรงๆ จะดีกว่าครับ พิมพ์ \'ติดต่อ\' เพื่อให้ทีมงานโทรกลับได้เลยครับ"
 
         history = _conversations.get(user_id, [])
         history.append({"role": "user", "content": user_message})
@@ -146,11 +149,30 @@ class BotEngine:
             reply = data["content"][0]["text"]
         except Exception as e:
             print(f"Claude API error: {e}")
-            reply = "ขออภัยครับ ระบบมีปัญหาชั่วคราว กรุณาทักใหม่ หรือพิมพ์ 'ติดต่อ' ให้ทีมโทรกลับครับ"
+            reply = "ขออภัยครับ ระบบมีปัญหาชั่วคราว กรุณาทักใหม่ หรือพิมพ์ \'ติดต่อ\' ให้ทีมโทรกลับครับ"
 
         history.append({"role": "assistant", "content": reply})
         _conversations[user_id] = history
         return reply
+
+    def _send_to_sheets(self, user_id: str, data: dict, grade: str):
+        """POST lead data ไป Google Apps Script => Sheets + Calendar"""
+        if not APPS_SCRIPT_URL:
+            print("APPS_SCRIPT_URL not set — skipping Sheets/Calendar")
+            return
+        payload = {
+            "facebook_psid": user_id,
+            "objective": data.get("objective", ""),  # Q1: ลงทุนปล่อยเช่า / อยู่เอง
+            "income":    data.get("budget", ""),     # Q2: อาชีพ + รายได้/เดือน
+            "debt":      data.get("income", ""),     # Q3: ภาระหนี้ / บูโร
+            "contact":   data.get("debt", ""),       # Q4: เบอร์โทร / LINE ID
+            "grade":     grade,
+        }
+        try:
+            resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)
+            print(f"Sheets/Calendar: {resp.status_code} {resp.text[:120]}")
+        except Exception as e:
+            print(f"Sheets/Calendar error: {e}")
 
     def _log(self, user_id: str, user_msg: str, reply: str):
         h = _conversations.get(user_id, [])
