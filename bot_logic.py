@@ -1,12 +1,15 @@
-# bot_logic.py — WEC Sales Bot Phase 3 (Rebuild)
+# bot_logic.py — WEC Sales Bot Phase 3.1
 # Core engine: FAQ -> Qualification (Q1-Q4) -> Grading (A/B/C) -> Claude AI fallback
 #
-# สิ่งที่แก้จาก Phase 2:
+# Phase 3 changes:
 # 1. Claude API fallback ทำงานจริง (Phase 2 ประกาศ key ไว้แต่ไม่เคยเรียกใช้)
 # 2. ชื่อ key ข้อมูลชัดเจน: objective / income / debt / contact
-#    (Phase 2 ใช้ budget เก็บรายได้, income เก็บหนี้ — สับสน)
 # 3. ตัด emoji ออกทั้งหมดตาม TONE_RULES.md ล่าสุด
 # 4. รับ referral (ad_id / ref) จาก main.py และส่งต่อไป Google Sheets
+#
+# Phase 3.1 changes:
+# 5. รองรับ Instagram DM — platform tag ("facebook" / "instagram")
+#    ส่ง source เข้า Google Sheets + ดึงชื่อ IG (name/username)
 
 import os
 import re
@@ -38,18 +41,22 @@ class BotEngine:
     # Entry point
     # --------------------------------------------------
     def process(self, user_message: str, user_id: str,
-                referral: dict | None = None) -> tuple[str, str | None]:
-        """คืนค่า (ข้อความตอบ, grade หรือ None)"""
+                referral: dict | None = None,
+                platform: str = "facebook") -> tuple[str, str | None]:
+        """คืนค่า (ข้อความตอบ, grade หรือ None) — platform: facebook / instagram"""
         referral = referral or {}
 
         # ทักครั้งแรก
         if user_id not in _conversations:
             _conversations[user_id] = []
-            _lead_states[user_id] = {"qualify_step": 0, "data": {}, "referral": referral}
+            _lead_states[user_id] = {"qualify_step": 0, "data": {},
+                                     "referral": referral, "platform": platform}
             self._log(user_id, user_message, WELCOME_MSG)
             return WELCOME_MSG, None
 
-        state = _lead_states.setdefault(user_id, {"qualify_step": 0, "data": {}, "referral": {}})
+        state = _lead_states.setdefault(
+            user_id, {"qualify_step": 0, "data": {}, "referral": {}, "platform": platform})
+        state["platform"] = platform
         # อัพเดต referral ถ้าเพิ่งได้มา (เช่น กดโฆษณาหลังคุยไปแล้ว)
         if referral:
             state["referral"] = referral
@@ -133,9 +140,10 @@ class BotEngine:
             reply = self._grade_reply(grade, user_message)
 
             # ส่ง Lead เข้า Google Sheets + Calendar
-            fb_name = self._get_fb_name(user_id)
+            fb_name = self._get_fb_name(user_id, state.get("platform", "facebook"))
             self._send_to_sheets(user_id, data, grade, fb_name,
-                                 state.get("referral", {}))
+                                 state.get("referral", {}),
+                                 state.get("platform", "facebook"))
 
             state["qualify_step"] = 0
             state["data"] = {}
@@ -231,24 +239,28 @@ class BotEngine:
         return text.strip()
 
     # --------------------------------------------------
-    # Facebook / Google Sheets
+    # Facebook / Instagram / Google Sheets
     # --------------------------------------------------
-    def _get_fb_name(self, user_id: str) -> str:
+    def _get_fb_name(self, user_id: str, platform: str = "facebook") -> str:
+        """ดึงชื่อจาก Graph API — Facebook PSID หรือ Instagram IGSID"""
         if not FB_PAGE_ACCESS_TOKEN:
             return ""
+        fields = "name,username" if platform == "instagram" else "name"
         try:
             resp = requests.get(
                 f"{FB_GRAPH_URL}/{user_id}",
-                params={"fields": "name", "access_token": FB_PAGE_ACCESS_TOKEN},
+                params={"fields": fields, "access_token": FB_PAGE_ACCESS_TOKEN},
                 timeout=5,
             )
-            return resp.json().get("name", "")
+            j = resp.json()
+            return j.get("name") or j.get("username") or ""
         except Exception as e:
-            print(f"[FB NAME ERROR] {e}")
+            print(f"[NAME ERROR] ({platform}) {e}")
             return ""
 
     def _send_to_sheets(self, user_id: str, data: dict, grade: str,
-                        fb_name: str = "", referral: dict | None = None):
+                        fb_name: str = "", referral: dict | None = None,
+                        platform: str = "facebook"):
         """POST lead ไป Google Apps Script -> Sheets + Calendar (schema เดิม)"""
         if not APPS_SCRIPT_URL:
             print("[SHEETS] APPS_SCRIPT_URL not set — skipped")
@@ -264,6 +276,8 @@ class BotEngine:
             "grade":         grade,
             "ad_id":         referral.get("ad_id", ""),  # จากโฆษณา (ถ้ามี)
             "ref":           referral.get("ref", ""),
+            # แหล่งที่มา — Apps Script v3 ใช้ field นี้ (v2 จะ ignore ไม่พัง)
+            "source":        "Instagram DM" if platform == "instagram" else "Facebook Messenger",
         }
         try:
             resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)
