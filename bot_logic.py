@@ -1,4 +1,4 @@
-# bot_logic.py — WEC Sales Bot Phase 3.1
+# bot_logic.py — WEC Sales Bot Phase 3.2
 # Core engine: FAQ -> Qualification (Q1-Q4) -> Grading (A/B/C) -> Claude AI fallback
 #
 # Phase 3 changes:
@@ -10,6 +10,10 @@
 # Phase 3.1 changes:
 # 5. รองรับ Instagram DM — platform tag ("facebook" / "instagram")
 #    ส่ง source เข้า Google Sheets + ดึงชื่อ IG (name/username)
+#
+# Phase 3.2 changes:
+# 6. ทักครั้งแรกไม่ทิ้งคำถามลูกค้า — welcome + ตอบ/เริ่ม Q1 ทันที
+#    (แก้ปัญหา ลูกค้าจากแอดถามแล้วบอทตอบแค่สวัสดี)
 
 import os
 import re
@@ -46,13 +50,26 @@ class BotEngine:
         """คืนค่า (ข้อความตอบ, grade หรือ None) — platform: facebook / instagram"""
         referral = referral or {}
 
-        # ทักครั้งแรก
+        # ทักครั้งแรก — ต้อนรับ + ตอบคำถามแรกทันที (ไม่ทิ้งคำถามลูกค้า)
         if user_id not in _conversations:
             _conversations[user_id] = []
-            _lead_states[user_id] = {"qualify_step": 0, "data": {},
-                                     "referral": referral, "platform": platform}
-            self._log(user_id, user_message, WELCOME_MSG)
-            return WELCOME_MSG, None
+            state = {"qualify_step": 0, "data": {},
+                     "referral": referral, "platform": platform}
+            _lead_states[user_id] = state
+
+            # ข้อความแรกมีเนื้อหา -> ตอบต่อท้าย welcome เลย
+            if self._should_qualify(user_message):
+                state["qualify_step"] = 1
+                _lead_states[user_id] = state
+                reply = WELCOME_MSG + "\n\n" + QUALIFY_QUESTIONS[0]
+            else:
+                faq = self._check_faq(user_message)
+                if faq and "สวัสดี" not in user_message:
+                    reply = WELCOME_MSG + "\n\n" + faq
+                else:
+                    reply = WELCOME_MSG
+            self._log(user_id, user_message, reply)
+            return reply, None
 
         state = _lead_states.setdefault(
             user_id, {"qualify_step": 0, "data": {}, "referral": {}, "platform": platform})
