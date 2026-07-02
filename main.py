@@ -1,7 +1,7 @@
-# main.py — WEC Sales Bot Phase 3 (Rebuild)
-# Flask webhook server for Facebook Page Messenger + Click-to-Messenger Ads
+# main.py — WEC Sales Bot Phase 3.1
+# Flask webhook server: Facebook Page Messenger + Instagram DM + Click-to-Messenger/IG Ads
 #
-# สิ่งที่แก้จาก Phase 2:
+# Phase 3 changes:
 # 1. รองรับ event จาก Ads ครบทุกรูปแบบ:
 #    - messaging_referrals  (ลูกค้าเดิมกดโฆษณา)
 #    - postback + referral  (ลูกค้าใหม่กด Get Started จากโฆษณา)
@@ -10,6 +10,10 @@
 #    จะ log เตือนให้เห็นใน Railway logs (สาเหตุหลักที่แชทจาก ads หาย)
 # 3. Log ทุก event แบบละเอียด เพื่อ debug ง่าย
 # 4. เก็บ ad_id + ref parameter ส่งต่อไป bot engine
+#
+# Phase 3.1 changes:
+# 5. รองรับ Instagram DM (object = "instagram") — IG ที่ผูกกับเพจ
+#    ใช้ flow เดียวกับ Facebook ทุกอย่าง + tag แหล่งที่มาใน Google Sheets
 
 import os
 import hmac
@@ -79,7 +83,7 @@ def send_message(recipient_id: str, text: str):
 
 
 def alert_gift(sender_id: str, user_text: str, ad_id: str = ""):
-    """แจ้งเตือน Gift เมื่อได้ Lead Grade A"""
+    """แจ้งเตือน Gift เมื่อได้ Lead Grade A (ปิดได้โดยลบ GIFT_FB_PSID)"""
     if not GIFT_FB_PSID:
         return
     alert = (
@@ -119,13 +123,13 @@ def extract_referral(event: dict) -> dict:
 # ======================================================
 # Event processing
 # ======================================================
-def process_event(event: dict):
-    """ประมวลผล messaging event 1 รายการ"""
+def process_event(event: dict, platform: str = "facebook"):
+    """ประมวลผล messaging event 1 รายการ (platform: facebook / instagram)"""
     sender_id = event.get("sender", {}).get("id", "")
     if not sender_id:
         return
 
-    # ข้าม echo (ข้อความที่เพจส่งเอง)
+    # ข้าม echo (ข้อความที่เพจ/IG ส่งเอง)
     if event.get("message", {}).get("is_echo"):
         return
 
@@ -133,16 +137,17 @@ def process_event(event: dict):
     referral = extract_referral(event)
     if referral.get("ad_id") or referral.get("ref"):
         _pending_referrals[sender_id] = referral
-        print(f"[REFERRAL] {sender_id[:10]}... ad_id={referral.get('ad_id') or '-'} "
+        print(f"[REFERRAL] ({platform}) {sender_id[:10]}... ad_id={referral.get('ad_id') or '-'} "
               f"ref={referral.get('ref') or '-'} source={referral.get('source') or '-'}")
 
     # --- 2) postback (เช่น Get Started) — ทักทายลูกค้าทันที ---
     if event.get("postback") and not event.get("message"):
         reply_text, lead_grade = bot.process(
-            "สวัสดี", sender_id, referral=_pending_referrals.get(sender_id, {})
+            "สวัสดี", sender_id,
+            referral=_pending_referrals.get(sender_id, {}), platform=platform,
         )
         send_message(sender_id, reply_text)
-        print(f"[POSTBACK] {sender_id[:10]}... -> welcomed")
+        print(f"[POSTBACK] ({platform}) {sender_id[:10]}... -> welcomed")
         return
 
     # --- 3) ข้อความ text ปกติ ---
@@ -154,13 +159,15 @@ def process_event(event: dict):
     user_text = message["text"]
     lead_referral = referral or _pending_referrals.pop(sender_id, {})
 
-    reply_text, lead_grade = bot.process(user_text, sender_id, referral=lead_referral)
+    reply_text, lead_grade = bot.process(
+        user_text, sender_id, referral=lead_referral, platform=platform,
+    )
     send_message(sender_id, reply_text)
 
     if lead_grade == "A":
         alert_gift(sender_id, user_text, lead_referral.get("ad_id", ""))
 
-    print(f"[MSG] {sender_id[:10]}... Grade={lead_grade or '-'} "
+    print(f"[MSG] ({platform}) {sender_id[:10]}... Grade={lead_grade or '-'} "
           f"| Q={user_text[:40]!r} | ad_id={lead_referral.get('ad_id') or '-'}")
 
 
@@ -169,7 +176,7 @@ def process_event(event: dict):
 # ======================================================
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"status": "WEC Facebook Bot v3 — Running"})
+    return jsonify({"status": "WEC Facebook+IG Bot v3.1 — Running"})
 
 
 @app.route("/health", methods=["GET"])
@@ -192,7 +199,7 @@ def verify_webhook():
 
 @app.route("/webhook", methods=["POST"])
 def receive_webhook():
-    """รับ event จาก Facebook"""
+    """รับ event จาก Facebook Page + Instagram"""
     body = request.get_data()
     signature = request.headers.get("X-Hub-Signature-256", "")
 
@@ -201,14 +208,16 @@ def receive_webhook():
         return "Unauthorized", 401
 
     data = request.get_json(silent=True)
-    if not data or data.get("object") != "page":
+    obj = (data or {}).get("object", "")
+    if obj not in ("page", "instagram"):
         return jsonify({"status": "ignored"})
+    platform = "instagram" if obj == "instagram" else "facebook"
 
     for entry in data.get("entry", []):
         # กรณีปกติ: แอพเป็น Primary Receiver
         for event in entry.get("messaging", []):
             try:
-                process_event(event)
+                process_event(event, platform)
             except Exception as e:
                 print(f"[EVENT ERROR] {e} | event={json.dumps(event)[:300]}")
 
@@ -229,5 +238,5 @@ def receive_webhook():
 # ======================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    print(f"WEC Bot v3 starting on port {port}")
+    print(f"WEC Bot v3.1 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
