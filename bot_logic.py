@@ -1,4 +1,4 @@
-# bot_logic.py — WEC Sales Bot Phase 3.2
+# bot_logic.py — WEC Sales Bot Phase 3.3
 # Core engine: FAQ -> Qualification (Q1-Q4) -> Grading (A/B/C) -> Claude AI fallback
 #
 # Phase 3 changes:
@@ -14,6 +14,10 @@
 # Phase 3.2 changes:
 # 6. ทักครั้งแรกไม่ทิ้งคำถามลูกค้า — welcome + ตอบ/เริ่ม Q1 ทันที
 #    (แก้ปัญหา ลูกค้าจากแอดถามแล้วบอทตอบแค่สวัสดี)
+#
+# Phase 3.3 changes:
+# 7. รายได้ไม่ชัด/ไม่มีรายได้ประจำ ไม่ทิ้ง Lead อีกต่อไป —
+#    ข้าม Q3 (บูโร) ไปขอ contact แล้วส่งเข้า Sheet เป็นเกรด C
 
 import os
 import re
@@ -135,14 +139,18 @@ class BotEngine:
             reply = QUALIFY_QUESTIONS[1]
 
         elif step == 2:
-            # Q2 = อาชีพ + รายได้ — คัดออกถ้าไม่มีรายได้ประจำ
-            if self._is_disqualified(user_message):
-                state["qualify_step"] = 0
-                state["data"] = {}
-                _lead_states[user_id] = state
-                self._log(user_id, user_message, DISQUALIFY_MSG)
-                return DISQUALIFY_MSG, None
+            # Q2 = อาชีพ + รายได้
+            # กรณีรายได้ไม่ชัด/ไม่มีรายได้ประจำ (นักศึกษา ว่างงาน ฯลฯ):
+            # ไม่ทิ้ง Lead อีกต่อไป — เก็บคำตอบไว้ ข้าม Q3 (บูโร) ไปขอ contact เลย
+            # แล้วส่งเข้า Sheet เป็นเกรด C (ทีมงานคัดกรองเองภายหลัง)
             data["income"] = user_message
+            if self._is_disqualified(user_message):
+                data["income_unknown"] = True
+                state["qualify_step"] = 4          # ข้าม Q3
+                state["data"] = data
+                _lead_states[user_id] = state
+                self._log(user_id, user_message, QUALIFY_QUESTIONS[3])
+                return QUALIFY_QUESTIONS[3], None
             state["qualify_step"] = 3
             reply = QUALIFY_QUESTIONS[2]
 
@@ -153,7 +161,8 @@ class BotEngine:
 
         elif step == 4:
             data["contact"] = user_message
-            grade = self._grade(data)
+            # รายได้ไม่ชัด -> บังคับเกรด C เสมอ
+            grade = "C" if data.get("income_unknown") else self._grade(data)
             reply = self._grade_reply(grade, user_message)
 
             # ส่ง Lead เข้า Google Sheets + Calendar
