@@ -376,6 +376,30 @@ class BotEngine:
     # ==================================================================
     # Entry point
     # ==================================================================
+    @staticmethod
+    def rekey(old_key: str, new_key: str, new_psid: str = ""):
+        """ย้าย state จากคีย์ชั่วคราวไปคีย์จริง
+
+        ใช้กับคอมเมนต์: ตอนประมวลผลเรายังไม่รู้ PSID ของคนคอมเมนต์
+        Facebook ไม่ให้เอา id ของคนคอมเมนต์ไปส่งข้อความตรงๆ
+        จะรู้ PSID ก็ต่อเมื่อยิง Private Reply สำเร็จ แล้ว API คืน recipient_id มา
+        """
+        if old_key == new_key or old_key not in _lead_states:
+            return
+        st = _lead_states.pop(old_key)
+        if new_psid:
+            st["psid"] = new_psid
+        _lead_states[new_key] = st
+        conv = _conversations.pop(old_key, None)
+        if conv is not None:
+            _conversations[new_key] = conv
+
+    @staticmethod
+    def drop(key: str):
+        """ทิ้ง state ที่สร้างไว้แล้วใช้ไม่ได้ (เช่นส่ง Private Reply ไม่สำเร็จ)"""
+        _lead_states.pop(key, None)
+        _conversations.pop(key, None)
+
     def process(self, user_message: str, user_id: str,
                 referral: dict | None = None,
                 platform: str = "facebook",

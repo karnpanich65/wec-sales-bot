@@ -270,6 +270,171 @@ def send_message(recipient_id: str, text: str, page_id: str = ""):
             log_event("SEND_ERROR", f"exception: {e}")
 
 
+# ======================================================
+# Phase 5.4 — คอมเมนต์ใต้โพสต์ (Facebook feed / Instagram comments)
+# ------------------------------------------------------
+# คอมเมนต์ "ไม่ใช่" ข้อความ — ไม่มี PSID ให้ส่งตรง และไม่เข้า webhook messages
+# Meta ให้ตอบได้ 2 ทาง ต่อ 1 คอมเมนต์:
+#   1. ตอบใต้คอมเมนต์ (สาธารณะ)  POST /{comment_id}/comments
+#   2. Private Reply เข้าแชท     POST /{page_id}/messages
+#      recipient = {"comment_id": ...}   ** ได้ครั้งเดียวต่อคอมเมนต์เท่านั้น **
+#      หลังจากนั้นต้องรอลูกค้าตอบก่อนถึงจะส่งเพิ่มได้
+# ======================================================
+COMMENT_REPLY = os.environ.get("COMMENT_REPLY", "1") == "1"       # ปิดได้ทันที
+COMMENT_PUBLIC_REPLY = os.environ.get("COMMENT_PUBLIC_REPLY", "1") == "1"
+
+# ตอบใต้คอมเมนต์ — สั้น สุภาพ ห้ามมีราคา/ส่วนลด/จำนวนห้อง (ข้อมูลชั้น 2)
+# คนอื่นที่ผ่านมาเห็นด้วย เลยต้องไม่มีอะไรที่คู่แข่งเอาไปใช้ได้
+PUBLIC_COMMENT_REPLY = "ขอบคุณที่สนใจครับ ส่งรายละเอียดให้ทางข้อความแล้วนะครับ"
+PUBLIC_COMMENT_REPLY_F = "ขอบคุณที่สนใจค่ะ ส่งรายละเอียดให้ทางข้อความแล้วนะคะ"
+
+_SEEN_COMMENTS: deque = deque(maxlen=500)
+_SEEN_COMMENT_SET: set = set()
+
+
+def _comment_handled(cid: str) -> bool:
+    """Meta ยิง webhook คอมเมนต์ซ้ำได้เหมือน messages — กันตอบซ้ำ"""
+    if not cid:
+        return False
+    if cid in _SEEN_COMMENT_SET:
+        return True
+    if len(_SEEN_COMMENTS) == _SEEN_COMMENTS.maxlen and _SEEN_COMMENTS:
+        _SEEN_COMMENT_SET.discard(_SEEN_COMMENTS[0])
+    _SEEN_COMMENTS.append(cid)
+    _SEEN_COMMENT_SET.add(cid)
+    return False
+
+
+def reply_to_comment(comment_id: str, text: str, page_id: str = "") -> bool:
+    """ตอบใต้คอมเมนต์แบบสาธารณะ (ต้องมีสิทธิ์ pages_manage_engagement)"""
+    token = page_token(page_id)
+    if not token:
+        return False
+    url = f"https://graph.facebook.com/v19.0/{comment_id}/comments"
+    try:
+        resp = requests.post(url, params={"access_token": token},
+                             json={"message": text}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[COMMENT REPLY ERROR] {resp.status_code}: {resp.text[:200]}")
+            return False
+        print(f"[COMMENT REPLY OK] {comment_id[:16]}...")
+        return True
+    except Exception as e:
+        print(f"[COMMENT REPLY EXCEPTION] {e}")
+        return False
+
+
+def private_reply(page_id: str, comment_id: str, text: str) -> str:
+    """ส่งข้อความเข้าแชทหาคนที่คอมเมนต์ — คืน PSID ถ้าสำเร็จ, "" ถ้าไม่
+
+    ข้อจำกัดของ Meta: ยิงได้ครั้งเดียวต่อคอมเมนต์
+    -> ต้องรวมทุกอย่างที่อยากพูดไว้ในข้อความเดียว ห้ามแตกบับเบิล
+    """
+    token = page_token(page_id)
+    if not token or not page_id:
+        return ""
+    url = f"https://graph.facebook.com/v19.0/{page_id}/messages"
+    payload = {
+        "recipient": {"comment_id": comment_id},
+        "message": {"text": text[:1900]},
+    }
+    log_event("SEND_REQUEST", f"private reply -> comment {comment_id[:14]}…",
+              {"endpoint": url, "message.text": text[:300]})
+    try:
+        resp = requests.post(url, params={"access_token": token},
+                             json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"[PRIVATE REPLY ERROR] {resp.status_code}: {resp.text[:250]}")
+            log_event("SEND_ERROR", f"private reply HTTP {resp.status_code}",
+                      {"body": resp.text[:300]})
+            return ""
+        body = resp.json() if resp.content else {}
+        psid = str(body.get("recipient_id", ""))
+        print(f"[PRIVATE REPLY OK] psid={_mask(psid)} "
+              f"message_id={body.get('message_id', '-')}")
+        log_event("SEND_RESPONSE", "private reply HTTP 200",
+                  {"recipient_id": _mask(psid),
+                   "message_id": body.get("message_id", "")})
+        return psid
+    except Exception as e:
+        print(f"[PRIVATE REPLY EXCEPTION] {e}")
+        log_event("SEND_ERROR", f"private reply exception: {e}")
+        return ""
+
+
+def process_comment(page_id: str, platform: str, value: dict):
+    """รับคอมเมนต์ 1 รายการ -> ตอบใต้โพสต์ + ทักเข้าแชท + เปิดเคสในบอท"""
+    if not COMMENT_REPLY:
+        return
+
+    # --- อ่านค่าจาก payload (FB กับ IG คนละรูปแบบ) ---
+    if platform == "instagram":
+        comment_id = str(value.get("id", ""))
+        text = str(value.get("text", "") or "")
+        frm = value.get("from", {}) or {}
+        verb = "add"
+    else:
+        if value.get("item") != "comment":
+            return                      # like / share / โพสต์เอง — ไม่เกี่ยว
+        comment_id = str(value.get("comment_id", ""))
+        text = str(value.get("message", "") or "")
+        frm = value.get("from", {}) or {}
+        verb = str(value.get("verb", "add"))
+
+    if verb not in ("add", "edited"):
+        return                          # ลบคอมเมนต์ — ไม่ต้องทำอะไร
+    if not comment_id:
+        return
+
+    from_id = str(frm.get("id", ""))
+    from_name = str(frm.get("name") or frm.get("username") or "")
+
+    # คอมเมนต์ของเพจเอง (รวมถึงคำตอบที่บอทเพิ่งตอบไป) -> ห้ามตอบ ไม่งั้นวนไม่จบ
+    if from_id and from_id in (str(page_id), str(MAIN_PAGE_ID)):
+        return
+    if _comment_handled(comment_id):
+        print(f"[DUPLICATE COMMENT] ข้าม {comment_id[:16]}...")
+        return
+
+    fb_page_id = resolve_ig_page(page_id) if platform == "instagram" else page_id
+    gender = page_gender(fb_page_id)
+    print(f"[COMMENT] ({platform}) {from_name or '-'} : {text[:60]}")
+    log_event("INBOUND", f"comment ({platform}) from {from_name or '-'}",
+              {"platform": platform, "comment_id": comment_id[:20],
+               "text": text})
+
+    # --- เดินบทสนทนาด้วยคีย์ชั่วคราว (ยังไม่รู้ PSID) ---
+    tmp_key = f"c:{comment_id}"
+    reply_text, _ = bot.process(
+        text or "สนใจ", tmp_key, platform=platform,
+        page_id=fb_page_id, brand=page_brand(fb_page_id),
+        sheet_tab=page_tab(fb_page_id), gender=gender,
+    )
+    # Private Reply ส่งได้ข้อความเดียว -> รวมทุกบับเบิลเป็นก้อนเดียว
+    one_shot = "\n\n".join(p.strip() for p in reply_text.split(MSG_SPLIT)
+                           if p.strip())
+
+    # bot.process เก็บ state ด้วยคีย์ "{page_id}:{user_id}" -> ต้องประกอบให้ตรง
+    tmp_skey = f"{fb_page_id}:{tmp_key}" if fb_page_id else tmp_key
+
+    psid = private_reply(fb_page_id, comment_id, one_shot)
+    if psid:
+        # ย้าย state ไปคีย์จริง -> พอลูกค้าตอบในแชท บอทคุยต่อได้เลย ไม่ทักซ้ำ
+        new_skey = f"{fb_page_id}:{psid}" if fb_page_id else psid
+        bot.rekey(tmp_skey, new_skey, psid)
+    else:
+        bot.drop(tmp_skey)              # ส่งไม่ได้ = อย่าทิ้ง state ค้างไว้
+        print("[COMMENT] ทักแชทไม่สำเร็จ — ข้ามการตอบใต้โพสต์ด้วย")
+        return
+
+    if COMMENT_PUBLIC_REPLY:
+        reply_to_comment(
+            comment_id,
+            PUBLIC_COMMENT_REPLY_F if gender == "female" else PUBLIC_COMMENT_REPLY,
+            fb_page_id,
+        )
+
+
 def page_alert_psid(page_id: str) -> str:
     """ใครควรได้รับแจ้งเตือนลีดของเพจนี้
 
@@ -705,10 +870,25 @@ def receive_webhook():
     for entry in data.get("entry", []):
         # entry.id = เพจที่ลูกค้าทักเข้ามา -> ใช้เลือกโทเค็น/แบรนด์/แท็บชีต
         # หมายเหตุ: ถ้า object = "instagram" entry.id คือ IG account id (คนละตัวกับ Page ID)
-        page_id = str(entry.get("id", ""))
+        raw_entry_id = str(entry.get("id", ""))
+        page_id = raw_entry_id
         if platform == "instagram":
             print(f"[IG ENTRY] ig_account_id={page_id}")
             page_id = resolve_ig_page(page_id)
+
+        # คอมเมนต์ใต้โพสต์ มาคนละช่องกับข้อความ (changes ไม่ใช่ messaging)
+        # FB = field "feed" | IG = field "comments"
+        for change in entry.get("changes", []):
+            field = str(change.get("field", ""))
+            if field not in ("feed", "comments"):
+                continue
+            try:
+                process_comment(raw_entry_id, platform,
+                                change.get("value", {}) or {})
+            except Exception as e:
+                print(f"[COMMENT ERROR] {e} | "
+                      f"change={json.dumps(change, ensure_ascii=False)[:300]}")
+
         # กรณีปกติ: แอพเป็น Primary Receiver
         for event in entry.get("messaging", []):
             try:
