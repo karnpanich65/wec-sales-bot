@@ -100,6 +100,27 @@ log_event("SYSTEM", "server started — WEC Messenger assistant v3.3")
 # (in-memory — รีเซ็ตเมื่อ server restart; Phase 4 ค่อยย้ายไป Redis)
 _pending_referrals: dict[str, dict] = {}
 
+# ------------------------------------------------------
+# กัน event ซ้ำ — Meta ยิง webhook ซ้ำถ้าเราตอบ 200 ช้าเกินไป
+# ผลคือลูกค้าได้ข้อความเดิม 2 รอบ และชีตได้แถวซ้ำ
+# เก็บ message id (mid) ที่ประมวลผลไปแล้ว 500 รายการล่าสุด
+# ------------------------------------------------------
+_SEEN_MIDS: deque = deque(maxlen=500)
+_SEEN_SET: set = set()
+
+
+def _already_handled(mid: str) -> bool:
+    """True = เคยประมวลผล mid นี้แล้ว ให้ข้ามทิ้ง"""
+    if not mid:
+        return False
+    if mid in _SEEN_SET:
+        return True
+    if len(_SEEN_MIDS) == _SEEN_MIDS.maxlen and _SEEN_MIDS:
+        _SEEN_SET.discard(_SEEN_MIDS[0])
+    _SEEN_MIDS.append(mid)
+    _SEEN_SET.add(mid)
+    return False
+
 
 # ======================================================
 # Facebook helpers
@@ -224,6 +245,13 @@ def process_event(event: dict, platform: str = "facebook"):
 
     # ข้าม echo (ข้อความที่เพจ/IG ส่งเอง)
     if event.get("message", {}).get("is_echo"):
+        return
+
+    # ข้าม event ที่เคยประมวลผลแล้ว (Meta ส่งซ้ำเมื่อรอ 200 นานเกินไป)
+    # ต้องเช็คก่อนทุกอย่าง ไม่งั้นลูกค้าได้ข้อความซ้ำ + ชีตได้แถวซ้ำ
+    _mid = event.get("message", {}).get("mid", "") or event.get("postback", {}).get("mid", "")
+    if _already_handled(_mid):
+        print(f"[DUPLICATE] ข้าม event ซ้ำ mid={_mid[:20]}... from {_mask(sender_id)}")
         return
 
     _kind = "postback (Get Started)" if event.get("postback") else "message"

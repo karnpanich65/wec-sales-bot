@@ -258,7 +258,7 @@ class BotEngine:
             r = requests.post(
                 APPS_SCRIPT_URL,
                 json={"action": "get_session", "psid": user_id},
-                timeout=6,
+                timeout=2.5,
             )
             if r.status_code != 200:
                 return None
