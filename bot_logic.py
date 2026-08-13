@@ -38,7 +38,7 @@ import threading
 import requests
 from faq_data import (
     FAQ_DATABASE, WEC_SYSTEM_PROMPT, QUALIFY_QUESTIONS, QUALIFY_TRIGGERS,
-    DISQUALIFY_MSG, DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG,
+    DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG, BRAND_NAME,
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG,
@@ -105,15 +105,60 @@ _EMOJI_RE = re.compile(
 )
 
 # ----------------------------------------------------------------------
+# Phase 5.3 — ตัวจับคำที่รู้จักคำปฏิเสธ
+# ----------------------------------------------------------------------
+# ภาษาไทยไม่เว้นวรรค การเช็ค "คำนี้อยู่ในข้อความไหม" แบบตรงๆ จึงพังเสมอ:
+#   "ไม่กู้"    มีคำว่า "กู้"    -> ระบบนับว่าลูกค้าคุยเรื่องกู้ (+3)
+#   "ไม่สะดวก" มีคำว่า "สะดวก"  -> ระบบนับว่าลูกค้ายอมนัดดูห้อง (+5)
+# ทั้งสองเคสให้คะแนนบวกกับคนที่กำลังปฏิเสธเรา -> เกรด A ผิดตัว
+# แก้ที่รากเดียว: หาคำเจอแล้วต้องมองย้อนหลังก่อนว่ามีคำปฏิเสธนำหน้าอยู่ไหม
+_NEG_PREFIXES = (
+    "ไม่", "ยังไม่", "ไม่ได้", "ไม่ต้อง", "ไม่ค่อย", "ไม่อยาก", "ไม่ขอ",
+    "ไม่ใช่", "เลิก", "หยุด", "งด",
+)
+_NEG_LOOKBACK = 10          # ตัวอักษรที่มองย้อนหลังจากตำแหน่งที่เจอคำ
+
+
+def _hit(msg: str, word: str) -> bool:
+    """เจอคำนี้แบบ "ไม่ถูกปฏิเสธ" ไหม
+    "อยากดูห้อง"     + "ดูห้อง" -> True
+    "ไม่อยากดูห้อง"  + "ดูห้อง" -> False
+    """
+    if not word:
+        return False
+    start = 0
+    while True:
+        i = msg.find(word, start)
+        if i < 0:
+            return False
+        pre = msg[max(0, i - _NEG_LOOKBACK):i]
+        if not any(pre.endswith(n) for n in _NEG_PREFIXES):
+            return True     # เจอแบบไม่มีคำปฏิเสธนำหน้า = ของจริง
+        start = i + 1       # ตัวนี้ถูกปฏิเสธ ไปหาตัวถัดไป
+
+
+def _hit_any(msg: str, words) -> bool:
+    """เจอคำใดคำหนึ่งแบบไม่ถูกปฏิเสธ"""
+    return any(_hit(msg, w) for w in words)
+
+
+# ----------------------------------------------------------------------
 # Phase 4.3 — ชุดคำใบ้
 # ----------------------------------------------------------------------
 # ลูกค้าปฏิเสธการถูกโทร — ไม่ได้ปฏิเสธเรา
 # ต้องยอมรับทันทีและห้ามขอช่องทางซ้ำ (เรามี PSID คุยต่อในแชทได้ตลอด)
+# หมายเหตุ: ลิสต์นี้มีคำว่า "ไม่" อยู่ในตัวอยู่แล้ว -> ใช้ substring ตรงๆ
+#          ห้ามใช้ _hit เด็ดขาด ไม่งั้นจะถูกตัวเองปฏิเสธทิ้ง
 _REFUSE_HINTS = [
     "ไม่สะดวก", "ไม่อยากให้โทร", "ไม่ต้องโทร", "ไม่ขอให้โทร", "ยังไม่โทร",
     "ไม่ให้เบอร์", "ยังไม่ให้เบอร์", "ไม่อยากให้ติดต่อ", "ไม่สะดวกคุย",
-    "ขอรายละเอียดก่อน", "ขอข้อมูลก่อน", "ขอดูข้อมูลก่อน",
 ]
+# เอาออกจากลิสต์ปฏิเสธแล้ว (14 ส.ค. 2026):
+#   "ขอข้อมูลก่อน" / "ขอรายละเอียดก่อน" / "ขอดูข้อมูลก่อน"
+# เหตุผล: คำพวกนี้อยู่ใน QUALIFY_TRIGGERS ด้วย = คนสนใจ
+# โค้ดเช็คลิสต์ปฏิเสธก่อน คนที่แค่อยากดูรายละเอียดก่อนตัดสินใจ
+# (ซึ่งคือคนซื้อจริงส่วนใหญ่) เลยถูกตีตรา "ห้ามขอเบอร์ตลอดกาล"
+# เขาไม่ได้ปฏิเสธการโทร เขาแค่ขอข้อมูล -> ให้ไหลเข้าโหมดถามปกติ
 
 # ซื้อเงินสด = ไม่มีเหตุผลจะถามรายได้/บูโรต่อ
 # ต้องหยุดถามแล้วชวนดูห้องจริง (คนถือเงินสดจริงไม่โอนโดยไม่เห็นของ)
@@ -141,9 +186,10 @@ _TIER2_HINTS = [
 ]
 
 # ศัพท์ฝั่งคนขาย — คนซื้ออยู่เองแทบไม่ใช้
+# ห้ามใส่คำที่มีใน _TIER2_HINTS ซ้ำ ไม่งั้นข้อความเดียวโดนหักคะแนน 2 เด้ง (-6)
 _SELLER_JARGON = [
     "ราคาต่อตาราง", "ต่อตร.ม", "ต่อตรม", "ต่อ ตร.ม", "yield", "occupancy",
-    "เหลือกี่ยูนิต", "เหลือกี่ห้อง", "คอมมิชชั่น", "commission", "ราคาปิด",
+    "gross yield", "net yield", "เรทเช่า", "สต็อก", "ยอดจอง",
 ]
 
 # คำที่คนซื้อจริงเกือบทุกคนพูดถึง (กังวลเรื่องกู้)
@@ -153,9 +199,11 @@ _LOAN_WORDS = [
 ]
 
 # ตอบรับนัดดูห้อง
+# ห้ามใส่ชื่อวันซ้ำกับ _DAY_WORDS — ไม่งั้นพูดชื่อวันคำเดียวจะได้ทั้ง
+# "ยอมนัด" และ "ยืนยันวัน" พร้อมกันในรอบเดียว (+5) ทั้งที่ยังไม่ได้ตอบรับ
+# "ว่าง" เปล่าๆ ก็เอาออก เพราะไปชนกับ "ว่างงาน" และ "ว่างกี่ห้อง"
 _VIEWING_YES = [
-    "ดูห้อง", "นัด", "เสาร์", "อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส",
-    "ศุกร์", "ว่าง", "สะดวก", "ไปดู", "เข้าไปดู",
+    "ดูห้อง", "นัด", "สะดวก", "ไปดู", "เข้าไปดู", "ขอดูจริง", "ว่างวัน",
 ]
 
 # คำที่บอก "วัน" — ใช้ยืนยันว่านัดดูห้องจริง ไม่ใช่แค่พูดว่าสนใจ
@@ -268,7 +316,8 @@ def to_female(text: str) -> str:
 
 
 # ชื่อแบรนด์ที่ฝังอยู่ใน WELCOME_MSG — ใช้แทนที่เมื่อมาจากเพจอื่น
-DEFAULT_BRAND = "Wealth Estate : อสังหาคุ้มค่า"
+# ชื่อแบรนด์มาจาก faq_data ที่เดียว ห้ามพิมพ์ซ้ำ
+DEFAULT_BRAND = BRAND_NAME
 
 # ถามคำถามเดิมได้สูงสุดกี่ครั้ง (กันบอทวนถามจนลูกค้าหนี)
 MAX_ASK_PER_FIELD = 2
@@ -409,7 +458,7 @@ class BotEngine:
             data.setdefault("debt", "-")
             state["awaiting"] = None
             state["cash_invited"] = True
-            self._capture_done(state)
+            self._upsert_lead(state)
             bubbles.append(CASH_BUYER_MSG)
             bubbles.append(CASH_INVITE_MSG)
             return bubbles, None
@@ -435,16 +484,11 @@ class BotEngine:
             # ยื่นเดี่ยวไม่ผ่านอยู่แล้ว เก็บเบอร์ไป = เสียเวลาทั้งสองฝ่าย
             # แต่ยังเก็บลีดไว้ในชีต + เปิดประตูให้กลับมาเมื่อหาผู้กู้ร่วมได้
             if awaiting == "co_borrower" and data.get("co_borrower_none"):
-                data["grade"] = "C"
                 state["contact_refused"] = True   # กันโค้ดส่วนอื่นขอช่องทาง
-                state["score"] = self._intent_score(state)
-                data["score"] = state["score"]
-                state["done"] = True
-                state["awaiting"] = None
-                self._upsert_lead(state)          # ลงชีต แต่ไม่สร้างนัดโทรกลับ
+                grade = self._finish(user_id, state, "-", calendar=False)
                 bubbles.append(NO_COBORROWER_MSG)
                 bubbles.append(COBORROWER_INVITE_MSG)
-                return bubbles, "C"
+                return bubbles, grade
 
         if not consumed:
             faq = self._check_faq(msg)
@@ -546,6 +590,9 @@ class BotEngine:
         state["psid"] = user_id
         # ลูกค้าใหม่ = มาจากเพจ/แอดด้วยเหตุผลบางอย่างเสมอ -> เข้าโหมดถามเลย
         # (ไม่ทิ้งคำถามลูกค้า และไม่ปล่อยให้จบแค่ "สวัสดีครับ")
+        # ตั้งใจให้เป็น True เสมอ -> QUALIFY_TRIGGERS จึงไม่ได้คุมว่า "เริ่มถามเมื่อไหร่"
+        # มันคุมแค่ว่า "ข้อความนี้ต้องส่งให้ AI ตอบไหม"
+        # ใครจะแก้ QUALIFY_TRIGGERS ให้รู้ไว้ว่ามันไม่มีผลกับจังหวะเริ่มถาม
         state["qualifying"] = True
         _lead_states[skey] = state
         _conversations[skey] = []
@@ -725,21 +772,29 @@ class BotEngine:
         m = msg.lower()
         sig = state.setdefault("signals", [])
 
-        if any(k in m for k in _SELLER_JARGON) and "ศัพท์ฝั่งคนขาย" not in sig:
+        # ข้อความที่กำลังปฏิเสธอยู่ ห้ามให้คะแนนบวกใดๆ ในรอบนี้
+        # "วันนี้ไม่สะดวกครับ" เคยได้ทั้ง viewing_ok + viewing_confirmed = +5
+        refusing = self._is_refusal(msg) or any(k in m for k in _REFUSE_HINTS)
+
+        if _hit_any(m, _SELLER_JARGON) and "ศัพท์ฝั่งคนขาย" not in sig:
             sig.append("ศัพท์ฝั่งคนขาย")
 
-        if any(k in m for k in _LOAN_WORDS):
+        # _hit = เจอคำแบบไม่มี "ไม่/ยังไม่/ไม่ได้" นำหน้า
+        # กัน "ไม่กู้" ถูกนับเป็น "คุยเรื่องกู้" (+3) ซึ่งเป็นช่องโหว่ซื้อสดปลอม
+        if not refusing and _hit_any(m, _LOAN_WORDS):
             state["loan_talk"] = True
-        if any(k in m for k in _VIEWING_YES):
+        if not refusing and _hit_any(m, _VIEWING_YES):
             state["viewing_ok"] = True
-        # ยืนยันนัดจริง = ต้องมี "วัน" ไม่ใช่แค่คำว่าสนใจ
-        if state.get("cash_invited") or state.get("viewing_ok"):
-            if any(k in m for k in _DAY_WORDS):
+        # ยืนยันนัดจริง = ต้องเคยตอบรับนัดมาก่อน แล้วรอบนี้ระบุ "วัน"
+        # ต้องเป็นคนละรอบกัน ไม่ใช่รอบเดียวได้ทั้งคู่
+        if not refusing and (state.get("cash_invited") or state.get("viewing_ok")):
+            if _hit_any(m, _DAY_WORDS):
                 state["viewing_confirmed"] = True
         # บอกงบเป็นตัวเลข (ต้องมีหลักแสนขึ้นไป หรือคำว่าล้าน)
-        if any(k in m for k in ["ล้าน", "งบ"]) and any(ch.isdigit() for ch in m):
+        if (not refusing and _hit_any(m, ["ล้าน", "งบ"])
+                and any(ch.isdigit() for ch in m)):
             state["budget_given"] = True
-        if any(k in m for k in _TIMELINE_WORDS):
+        if not refusing and _hit_any(m, _TIMELINE_WORDS):
             state["timeline_given"] = True
 
         if (state.get("data", {}).get("cash") and state.get("contact_refused")
@@ -814,10 +869,6 @@ class BotEngine:
             return WELCOME_MSG
         return WELCOME_MSG.replace(DEFAULT_BRAND, brand)
 
-    def _capture_done(self, state: dict):
-        """ได้ข้อมูลใหม่จากสายพิเศษ -> ยิงเข้าชีตทันที (กันลีดหลุด)"""
-        self._upsert_lead(state)
-
     @staticmethod
     def _is_status_ask(msg: str) -> bool:
         m = msg.lower()
@@ -858,8 +909,8 @@ class BotEngine:
         return None
 
     def _should_qualify(self, message: str) -> bool:
-        msg = message.lower()
-        return any(t in msg for t in QUALIFY_TRIGGERS)
+        # _hit -> "ไม่สนใจแล้วครับ" ไม่ถูกนับว่าสนใจ
+        return _hit_any(message.lower(), QUALIFY_TRIGGERS)
 
     def _is_disqualified(self, message: str) -> bool:
         msg = message.lower()
@@ -868,7 +919,14 @@ class BotEngine:
     # ==================================================================
     # ปิดเคส + เกรด
     # ==================================================================
-    def _finish(self, user_id: str, state: dict, contact: str) -> str:
+    def _finish(self, user_id: str, state: dict, contact: str,
+                calendar: bool = True) -> str:
+        """ปิดเคส -> คิดเกรด + เขียนแถวสมบูรณ์ลงชีต
+        calendar=False -> ลงชีตอย่างเดียว ไม่สร้างนัดโทรกลับ
+                          (เคสที่ไม่มีช่องทางติดต่อ เช่น ไม่มีผู้กู้ร่วม)
+        ทางเข้าปิดเคส "ทุกทาง" ต้องผ่านฟังก์ชันนี้ ห้ามเขียนซ้ำที่อื่น
+        ไม่งั้นจะตกอย่างใดอย่างหนึ่งเสมอ (เคยตก lead_sent + fb_name มาแล้ว)
+        """
         data = state["data"]
         if data.get("income_unknown") or data.get("co_borrower_none"):
             grade = "C"           # ยื่นเดี่ยวไม่ผ่าน = ยังไม่ใช่คิวโทรด่วน
@@ -886,7 +944,10 @@ class BotEngine:
                              state.get("referral", {}),
                              state.get("platform", "facebook"),
                              state.get("page_id", ""),
-                             state.get("sheet_tab", ""))
+                             state.get("sheet_tab", ""),
+                             signals=state.get("signals", []),
+                             contact_refused=state.get("contact_refused", False),
+                             calendar=calendar)
         state["lead_sent"] = True
         return grade
 
@@ -1021,7 +1082,8 @@ class BotEngine:
     def _send_to_sheets(self, user_id: str, data: dict, grade: str,
                         fb_name: str = "", referral: dict | None = None,
                         platform: str = "facebook", page_id: str = "",
-                        sheet_tab: str = ""):
+                        sheet_tab: str = "", signals=None,
+                        contact_refused: bool = False, calendar: bool = True):
         """POST lead ชุดเต็มไป Apps Script -> Sheets + Calendar (schema เดิม)"""
         if not APPS_SCRIPT_URL:
             print("[SHEETS] APPS_SCRIPT_URL not set — skipped")
@@ -1040,10 +1102,12 @@ class BotEngine:
             "source":        "Instagram DM" if platform == "instagram" else "Facebook Messenger",
             "page_id":       page_id,
             "tab":           sheet_tab,
-            "signals":       "",
+            # เดิมส่ง "" ทั้งสองช่อง -> การเขียนรอบสุดท้ายลบธงที่เก็บมาทั้งบทสนทนาทิ้ง
+            "signals":       " | ".join(signals or []),
             "score":         data.get("score", ""),
             "cash":          "ใช่" if data.get("cash") else "",
-            "no_call":       "",
+            "no_call":       "ไม่สะดวกให้โทร" if contact_refused else "",
+            "no_calendar":   "1" if not calendar else "",
         }
         try:
             resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)

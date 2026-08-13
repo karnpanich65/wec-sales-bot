@@ -53,7 +53,8 @@ FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "")
 # โทเค็นแยกคนละตัวแปร (Railway มาสก์ให้) :  PAGE_TOKEN_<page_id>
 # ถ้าไม่ตั้งอะไรเลย -> ใช้ FB_PAGE_ACCESS_TOKEN เดิม = พฤติกรรมเดิมทุกประการ
 # ======================================================
-DEFAULT_BRAND = "Wealth Estate : อสังหาคุ้มค่า"
+# ชื่อแบรนด์มาจาก faq_data ที่เดียว (BRAND_NAME) ห้ามพิมพ์ซ้ำที่นี่
+from faq_data import BRAND_NAME as DEFAULT_BRAND
 DEFAULT_TAB = "Facebook Leads"
 MAIN_PAGE_ID = os.environ.get("MAIN_PAGE_ID", "108248514185091")
 
@@ -71,6 +72,27 @@ def _load_pages() -> dict:
     return {}
 
 PAGES = _load_pages()
+
+# IG account id -> Facebook Page ID
+# webhook ของ Instagram ส่ง entry.id เป็น "IG account id" ไม่ใช่ Page ID
+# ตั้งใน WEC_PAGES ได้: {"<page_id>": {"ig_id": "<ig_account_id>", ...}}
+IG_TO_PAGE = {}
+for _pid, _cfg in (PAGES or {}).items():
+    _ig = str((_cfg or {}).get("ig_id", "")).strip()
+    if _ig:
+        IG_TO_PAGE[_ig] = str(_pid)
+
+
+def resolve_ig_page(ig_id: str) -> str:
+    """แปลง IG account id -> Page ID ที่ผูกกัน
+    ยังไม่ได้ตั้ง ig_id ใน WEC_PAGES -> ถือว่าเป็น IG ของเพจหลัก (ตอนนี้มี IG ตัวเดียว)
+    """
+    ig_id = str(ig_id or "")
+    if ig_id in IG_TO_PAGE:
+        return IG_TO_PAGE[ig_id]
+    if ig_id and os.environ.get(f"PAGE_TOKEN_{ig_id}", "").strip():
+        return ig_id          # ตั้งโทเค็นด้วย IG id ไว้ตรงๆ ก็ใช้ได้
+    return MAIN_PAGE_ID
 
 
 def page_token(page_id: str) -> str:
@@ -280,11 +302,6 @@ def alert_lead(sender_id: str, user_text: str, ad_id: str = "",
         "ติดต่อกลับใน Messenger ด่วนครับ"
     )
     send_message(target, alert, page_id)
-
-
-# ชื่อเดิม — กันโค้ดเก่าที่ยังเรียกอยู่
-def alert_gift(sender_id: str, user_text: str, ad_id: str = ""):
-    alert_lead(sender_id, user_text, ad_id, MAIN_PAGE_ID)
 
 
 def extract_referral(event: dict) -> dict:
@@ -687,7 +704,11 @@ def receive_webhook():
 
     for entry in data.get("entry", []):
         # entry.id = เพจที่ลูกค้าทักเข้ามา -> ใช้เลือกโทเค็น/แบรนด์/แท็บชีต
+        # หมายเหตุ: ถ้า object = "instagram" entry.id คือ IG account id (คนละตัวกับ Page ID)
         page_id = str(entry.get("id", ""))
+        if platform == "instagram":
+            print(f"[IG ENTRY] ig_account_id={page_id}")
+            page_id = resolve_ig_page(page_id)
         # กรณีปกติ: แอพเป็น Primary Receiver
         for event in entry.get("messaging", []):
             try:
