@@ -40,6 +40,7 @@ from faq_data import (
     FAQ_DATABASE, WEC_SYSTEM_PROMPT, QUALIFY_QUESTIONS, QUALIFY_TRIGGERS,
     DISQUALIFY_MSG, DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG,
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
+    CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -69,6 +70,65 @@ FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3}
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF⭐✅❌️]+"
 )
+
+# ----------------------------------------------------------------------
+# Phase 4.3 — ชุดคำใบ้
+# ----------------------------------------------------------------------
+# ลูกค้าปฏิเสธการถูกโทร — ไม่ได้ปฏิเสธเรา
+# ต้องยอมรับทันทีและห้ามขอช่องทางซ้ำ (เรามี PSID คุยต่อในแชทได้ตลอด)
+_REFUSE_HINTS = [
+    "ไม่สะดวก", "ไม่อยากให้โทร", "ไม่ต้องโทร", "ไม่ขอให้โทร", "ยังไม่โทร",
+    "ไม่ให้เบอร์", "ยังไม่ให้เบอร์", "ไม่อยากให้ติดต่อ", "ไม่สะดวกคุย",
+    "ขอรายละเอียดก่อน", "ขอข้อมูลก่อน", "ขอดูข้อมูลก่อน",
+]
+
+# ซื้อเงินสด = ไม่มีเหตุผลจะถามรายได้/บูโรต่อ
+# ต้องหยุดถามแล้วชวนดูห้องจริง (คนถือเงินสดจริงไม่โอนโดยไม่เห็นของ)
+_CASH_HINTS = [
+    "เงินสด", "ซื้อสด", "จ่ายสด", "ไม่กู้", "ไม่ต้องกู้", "ไม่ใช้สินเชื่อ",
+    "ไม่ได้กู้", "cash",
+]
+
+# ข้อมูลชั้น 2 — สิ่งเดียวที่คู่แข่งอยากได้จริง
+# กันไว้ที่บอท = คำโกหก "ซื้อเงินสด" ปลดล็อกอะไรไม่ได้เลย
+_TIER2_HINTS = [
+    "ส่วนลด", "ลดได้", "ลดเท่าไหร่", "ราคาสุทธิ", "ราคาต่ำสุด", "ถูกสุด",
+    "ราคาปิด", "เหลือกี่ห้อง", "เหลือกี่ยูนิต", "ว่างกี่ห้อง", "ว่างกี่ยูนิต",
+    "ห้องเหลือ", "คอมมิชชั่น", "commission",
+]
+
+# ศัพท์ฝั่งคนขาย — คนซื้ออยู่เองแทบไม่ใช้
+_SELLER_JARGON = [
+    "ราคาต่อตาราง", "ต่อตร.ม", "ต่อตรม", "ต่อ ตร.ม", "yield", "occupancy",
+    "เหลือกี่ยูนิต", "เหลือกี่ห้อง", "คอมมิชชั่น", "commission", "ราคาปิด",
+]
+
+# คำที่คนซื้อจริงเกือบทุกคนพูดถึง (กังวลเรื่องกู้)
+_LOAN_WORDS = [
+    "กู้", "ผ่อน", "ธนาคาร", "ดอกเบี้ย", "สินเชื่อ", "บูโร", "วงเงิน",
+    "ดาวน์", "อนุมัติ",
+]
+
+# ตอบรับนัดดูห้อง
+_VIEWING_YES = [
+    "ดูห้อง", "นัด", "เสาร์", "อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส",
+    "ศุกร์", "ว่าง", "สะดวก", "ไปดู", "เข้าไปดู",
+]
+
+# คำที่บอก "วัน" — ใช้ยืนยันว่านัดดูห้องจริง ไม่ใช่แค่พูดว่าสนใจ
+_DAY_WORDS = [
+    "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "เสาร์", "อาทิตย์",
+    "พรุ่งนี้", "มะรืน", "วันนี้", "สุดสัปดาห์", "ต้นเดือน", "สิ้นเดือน",
+]
+
+# กรอบเวลาที่อยากได้ของ — คนไม่ซื้อจริงตอบลอย
+_TIMELINE_WORDS = [
+    "ภายใน", "ไม่เกิน", "ต้องการภายใน", "อยากได้ใน", "ปีนี้", "เดือนหน้า",
+    "รีบ", "ด่วน", "ก่อนสิ้นปี",
+]
+
+# ถามคำถามเดิมได้สูงสุดกี่ครั้ง (กันบอทวนถามจนลูกค้าหนี)
+MAX_ASK_PER_FIELD = 2
 
 # คำที่บอกว่าข้อความนี้ "เป็นคำถาม" ไม่ใช่คำตอบ
 _QUESTION_HINTS = [
@@ -170,6 +230,39 @@ class BotEngine:
         # ---- 2) ลูกค้าพูดอะไร ตอบอันนั้นก่อนเสมอ ----------------------
         # ถ้ากำลังรอคำตอบอยู่ แต่ลูกค้าดันถามคำถามกลับมา
         # ห้ามเอาคำถามของเขาไปนับเป็นคำตอบ — ตอบเขาก่อน แล้วค่อยถามใหม่
+        # ---- 1.5) อ่านเจตนาพิเศษก่อนอย่างอื่น (Phase 4.3) --------------
+        state["turns"] = state.get("turns", 0) + 1
+        self._scan_signals(state, msg)
+
+        # ก) ลูกค้าปฏิเสธการถูกโทร -> ยอมรับทันที ห้ามขอช่องทางซ้ำ
+        #    เขาไม่ได้ปฏิเสธเรา เขาปฏิเสธ "การถูกโทร" ซึ่งเราพูดขึ้นมาเอง
+        if not state.get("done") and self._is_refusal(msg, awaiting):
+            state["contact_refused"] = True
+            state["awaiting"] = None
+            self._upsert_lead(state)
+            bubbles.append(CONTACT_REFUSED_MSG)
+            return bubbles, None
+
+        # ข) ซื้อเงินสด -> หยุดถามเรื่องกู้ทั้งชุด แล้วชวนดูห้องจริง
+        #    คนถือเงินสดจริงไม่มีทางโอนโดยไม่เห็นของ = ด่านที่ฟรีสำหรับคนจริง
+        if not state.get("done") and self._is_cash(msg) and not data.get("cash"):
+            data["cash"] = True
+            data.setdefault("income", "ซื้อเงินสด")
+            data.setdefault("debt", "-")
+            state["awaiting"] = None
+            state["cash_invited"] = True
+            self._capture_done(state)
+            bubbles.append(CASH_BUYER_MSG)
+            bubbles.append(CASH_INVITE_MSG)
+            return bubbles, None
+
+        # ค) ถามข้อมูลชั้น 2 (ราคาสุทธิ/ส่วนลด/ห้องที่เหลือ) -> บอทไม่ตอบเอง
+        #    กันไว้ตรงนี้ = ไม่ต้องจับผิดว่าใครเป็นคู่แข่งเลย
+        if self._is_tier2(msg):
+            state["price_asks"] = state.get("price_asks", 0) + 1
+            bubbles.append(TIER2_GUARD_MSG)
+            return bubbles, None
+
         consumed = False
         if awaiting and not self._is_question(msg) and self._is_valid_answer(awaiting, msg):
             self._capture(state, awaiting, msg)
@@ -201,19 +294,50 @@ class BotEngine:
         if not state.get("done"):
             if self._should_qualify(msg) or state.get("qualifying") or consumed:
                 state["qualifying"] = True
-                field, question = self._next_missing(data)
-                if field:
+                field, question = self._next_missing(data, state)
+                asked = state.setdefault("asked", {})
+                if field and asked.get(field, 0) >= MAX_ASK_PER_FIELD:
+                    # ถามไป 2 ครั้งแล้วยังไม่ได้ -> หยุด อย่าไล่บี้จนลูกค้าหนี
+                    if field == "contact":
+                        state["contact_refused"] = True
+                        bubbles.append(CONTACT_REFUSED_MSG)
+                    field = None
+                elif field:
+                    asked[field] = asked.get(field, 0) + 1
                     state["awaiting"] = field
                     bubbles.append(question)
-                else:
-                    # ข้อมูลครบแต่ยังไม่ได้ปิด (เช่นโหลด state เก่ามา)
-                    grade = self._finish(user_id, state, data.get("contact", ""))
-                    bubbles.append(DONE_MSG)
+
+                if not field and not state.get("done"):
+                    if state.get("contact_refused") and not data.get("contact"):
+                        # ตอบครบทุกข้อยกเว้นช่องทาง -> เก็บลีดไว้ แต่ห้ามพูดว่าจะโทร
+                        grade = self._finish(user_id, state, "-")
+                        bubbles.append("รับทราบครับ ผมส่งเรื่องให้ที่ปรึกษาดูแลแล้ว "
+                                       "สอบถามเพิ่มทางแชทนี้ได้ตลอดเลยครับ")
+                    elif data.get("objective") or data.get("income"):
+                        grade = self._finish(user_id, state, data.get("contact", ""))
+                        bubbles.append(DONE_MSG)
 
         # กันเคสไม่มีอะไรจะพูดเลย
         if not bubbles:
             bubbles.append(FALLBACK_MSG)
+
+        # กันขอช่องทางติดต่อซ้อนกันในข้อความเดียว (เจอหน้างาน 13 ส.ค.)
+        bubbles = self._dedupe_contact_ask(bubbles)
         return bubbles, grade
+
+    @staticmethod
+    def _dedupe_contact_ask(bubbles: list[str]) -> list[str]:
+        """ถ้ามีบับเบิลที่ขอเบอร์/LINE มากกว่า 1 อัน ให้เหลืออันสุดท้ายอันเดียว
+        ลูกค้าเห็นขอเบอร์ 2 รอบติดกัน = รู้สึกโดนบี้ แล้วหนี
+        """
+        def is_ask(x: str) -> bool:
+            return ("ขอเบอร์" in x or "ขอ ID LINE" in x
+                    or ("เบอร์" in x and "LINE" in x))
+        idx = [i for i, b in enumerate(bubbles) if is_ask(b)]
+        if len(idx) <= 1:
+            return bubbles
+        keep = idx[-1]
+        return [b for i, b in enumerate(bubbles) if i not in idx or i == keep]
 
     # ==================================================================
     # State: RAM -> ชีต -> สร้างใหม่
@@ -223,6 +347,8 @@ class BotEngine:
             "data": {}, "awaiting": None, "qualifying": False, "done": False,
             "referral": referral or {}, "platform": platform,
             "last_seen": _now(), "lead_sent": False,
+            "asked": {}, "contact_refused": False,
+            "signals": [], "turns": 0, "price_asks": 0,
         }
 
     def _resolve_state(self, user_id: str, platform: str,
@@ -330,10 +456,16 @@ class BotEngine:
         # ได้ข้อมูลใหม่ -> ส่งเข้าชีตทันที ไม่รอครบ 4 ข้อ (กันลีดหลุด)
         self._upsert_lead(state)
 
-    def _next_missing(self, data: dict) -> tuple[str | None, str | None]:
+    def _next_missing(self, data: dict,
+                      state: dict | None = None) -> tuple[str | None, str | None]:
+        state = state or {}
         for f in FIELD_ORDER:
-            if f == "debt" and data.get("income_unknown"):
+            if f == "debt" and (data.get("income_unknown") or data.get("cash")):
                 continue
+            if f == "income" and data.get("cash"):
+                continue          # ซื้อสด = ไม่มีเหตุผลจะถามรายได้
+            if f == "contact" and state.get("contact_refused"):
+                continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
             if not data.get(f):
                 return f, QUALIFY_QUESTIONS[FIELD_Q_INDEX[f]]
         return None, None
@@ -364,6 +496,108 @@ class BotEngine:
     def _is_question(msg: str) -> bool:
         m = msg.lower()
         return any(k in m for k in _QUESTION_HINTS)
+
+    @staticmethod
+    def _is_refusal(msg: str, awaiting: str | None = None) -> bool:
+        """ลูกค้าไม่สะดวกให้ติดต่อ — ต้องแยกจาก 'วันเสาร์ไม่สะดวก'"""
+        m = msg.lower()
+        if not any(k in m for k in _REFUSE_HINTS):
+            return False
+        ctx = any(k in m for k in
+                  ["โทร", "เบอร์", "line", "ไลน์", "ติดต่อ", "รายละเอียด", "ข้อมูล"])
+        return ctx or awaiting == "contact"
+
+    @staticmethod
+    def _is_cash(msg: str) -> bool:
+        m = msg.lower()
+        if "ไม่มีเงินสด" in m or "ไม่พร้อมเงินสด" in m:
+            return False
+        return any(k in m for k in _CASH_HINTS)
+
+    @staticmethod
+    def _is_tier2(msg: str) -> bool:
+        m = msg.lower()
+        return any(k in m for k in _TIER2_HINTS)
+
+    def _scan_signals(self, state: dict, msg: str):
+        """ติดธงสัญญาณไว้ให้เซลเห็นก่อนโทร — ไม่ใช้ปฏิเสธใครเด็ดขาด
+        ต้นทุนพลาดไม่เท่ากัน: กันคู่แข่งพลาด = เสียข้อมูลที่หาทางอื่นได้อยู่แล้ว
+                              กันลูกค้าจริงพลาด = เสียดีลหลักล้าน
+        """
+        m = msg.lower()
+        sig = state.setdefault("signals", [])
+
+        if any(k in m for k in _SELLER_JARGON) and "ศัพท์ฝั่งคนขาย" not in sig:
+            sig.append("ศัพท์ฝั่งคนขาย")
+
+        if any(k in m for k in _LOAN_WORDS):
+            state["loan_talk"] = True
+        if any(k in m for k in _VIEWING_YES):
+            state["viewing_ok"] = True
+        # ยืนยันนัดจริง = ต้องมี "วัน" ไม่ใช่แค่คำว่าสนใจ
+        if state.get("cash_invited") or state.get("viewing_ok"):
+            if any(k in m for k in _DAY_WORDS):
+                state["viewing_confirmed"] = True
+        # บอกงบเป็นตัวเลข (ต้องมีหลักแสนขึ้นไป หรือคำว่าล้าน)
+        if any(k in m for k in ["ล้าน", "งบ"]) and any(ch.isdigit() for ch in m):
+            state["budget_given"] = True
+        if any(k in m for k in _TIMELINE_WORDS):
+            state["timeline_given"] = True
+
+        if (state.get("data", {}).get("cash") and state.get("contact_refused")
+                and "ซื้อสด+ไม่ให้ช่องทาง" not in sig):
+            sig.append("ซื้อสด+ไม่ให้ช่องทาง")
+
+        if (state.get("price_asks", 0) >= 2 and not state.get("loan_talk")
+                and "ถามราคาแต่ไม่ถามกู้" not in sig):
+            sig.append("ถามราคาแต่ไม่ถามกู้")
+
+        if (state.get("cash_invited") and state.get("turns", 0) >= 4
+                and not state.get("viewing_ok")
+                and "เลี่ยงนัดดูห้อง" not in sig):
+            sig.append("เลี่ยงนัดดูห้อง")
+
+    @staticmethod
+    def _intent_score(state: dict) -> int:
+        """คะแนนความจริงจัง — คิดจากสิ่งที่ลูกค้า "ลงทุนไปแล้ว" ไม่ใช่สิ่งที่เขาพูด
+        >= 6  = เรียกคนทันที
+        3-5   = เข้าคิวปกติ
+        <= 2  = บอทคุยต่อเอง ไม่ต้องรบกวนคน (ยังอยู่ในชีต ไม่หาย)
+        """
+        d = state.get("data", {})
+        sc = 0
+        # --- บวก: ปลอมแล้วเจ็บ ---
+        if state.get("viewing_confirmed"):
+            sc += 5        # ยอมนัดดูห้องจริง + ระบุวัน = แพงที่สุด
+        if state.get("loan_talk"):
+            sc += 3        # คนซื้อจริงเกือบ 100% ถามเรื่องกู้ คู่แข่งไม่ถาม
+        if state.get("budget_given"):
+            sc += 2
+        if state.get("timeline_given"):
+            sc += 2
+        c = str(d.get("contact", ""))
+        if c and c != "-":
+            low = c.lower()
+            sc += 2 if ("line" in low or "ไลน์" in low) else 1   # LINE > เบอร์
+        if state.get("turns", 0) >= 6:
+            sc += 1
+        # --- ลบ: ท่าทางฝั่งคนสืบข้อมูล ---
+        sig = state.get("signals", [])
+        if "ศัพท์ฝั่งคนขาย" in sig:
+            sc -= 3
+        if state.get("price_asks", 0) >= 1 and not d.get("objective"):
+            sc -= 3        # ถามส่วนลด/ห้องเหลือ ก่อนบอกว่าตัวเองอยากได้อะไร
+        if "ซื้อสด+ไม่ให้ช่องทาง" in sig:
+            sc -= 3
+        if "เลี่ยงนัดดูห้อง" in sig:
+            sc -= 2
+        if state.get("turns", 0) >= 5 and not state.get("loan_talk"):
+            sc -= 2
+        return sc
+
+    def _capture_done(self, state: dict):
+        """ได้ข้อมูลใหม่จากสายพิเศษ -> ยิงเข้าชีตทันที (กันลีดหลุด)"""
+        self._upsert_lead(state)
 
     @staticmethod
     def _is_status_ask(msg: str) -> bool:
@@ -405,7 +639,9 @@ class BotEngine:
     # ==================================================================
     def _finish(self, user_id: str, state: dict, contact: str) -> str:
         data = state["data"]
-        grade = "C" if data.get("income_unknown") else self._grade(data)
+        grade = "C" if data.get("income_unknown") else self._grade(data, state)
+        state["score"] = self._intent_score(state)
+        data["score"] = state["score"]
         state["done"] = True
         state["awaiting"] = None
         data["grade"] = grade
@@ -418,7 +654,15 @@ class BotEngine:
         state["lead_sent"] = True
         return grade
 
-    def _grade(self, data: dict) -> str:
+    def _grade(self, data: dict, state: dict | None = None) -> str:
+        # ซื้อเงินสด "อย่างเดียว" ไม่ใช่เกรด A — พิมพ์คำเดียว ต้นทุนศูนย์
+        # ต้องพ่วงสัญญาณที่ปลอมแล้วเจ็บ (เช่นยอมนัดดูห้อง) ถึงจะขึ้น A
+        if state is not None:
+            sc = self._intent_score(state)
+            if sc >= 6:
+                return "A"
+            if sc <= 2:
+                return "C"
         income_ans = data.get("income", "").lower()
         high_income = any(x in income_ans for x in
                           ["แสน", "100,", "150,", "200,", "100000", "150000", "200000"])
@@ -527,6 +771,10 @@ class BotEngine:
             "ref": (state.get("referral") or {}).get("ref", ""),
             "source": ("Instagram DM" if state.get("platform") == "instagram"
                        else "Facebook Messenger"),
+            "signals": " | ".join(state.get("signals", [])),
+            "score": self._intent_score(state),
+            "cash": "ใช่" if data.get("cash") else "",
+            "no_call": "ไม่สะดวกให้โทร" if state.get("contact_refused") else "",
         })
 
     def _send_to_sheets(self, user_id: str, data: dict, grade: str,
@@ -548,6 +796,10 @@ class BotEngine:
             "ad_id":         referral.get("ad_id", ""),
             "ref":           referral.get("ref", ""),
             "source":        "Instagram DM" if platform == "instagram" else "Facebook Messenger",
+            "signals":       "",
+            "score":         data.get("score", ""),
+            "cash":          "ใช่" if data.get("cash") else "",
+            "no_call":       "",
         }
         try:
             resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)
