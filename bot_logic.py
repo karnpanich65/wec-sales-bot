@@ -41,6 +41,7 @@ from faq_data import (
     DISQUALIFY_MSG, DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG,
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
+    LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -64,8 +65,40 @@ GAP_LIVE = 30 * 60          # 30 นาที
 GAP_SAME_DAY = 24 * 60 * 60  # 1 วัน
 
 # ลำดับข้อมูลที่ต้องเก็บ -> index ใน QUALIFY_QUESTIONS
-FIELD_ORDER = ["objective", "income", "debt", "contact"]
-FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3}
+# co_borrower ถามเฉพาะเคสรายได้ต่ำกว่า LOW_INCOME_BAHT (ดู _next_missing)
+FIELD_ORDER = ["objective", "income", "co_borrower", "debt", "contact"]
+FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3,
+                 "co_borrower": 4}
+
+# ----------------------------------------------------------------------
+# อ่านตัวเลขรายได้จากภาษาคนพิมพ์จริง
+# ----------------------------------------------------------------------
+_THAI_DIGIT_WORDS = {
+    "หนึ่ง": 1, "สอง": 2, "สาม": 3, "สี่": 4, "ห้า": 5,
+    "หก": 6, "เจ็ด": 7, "แปด": 8, "เก้า": 9, "สิบ": 10,
+}
+_UNIT_MULT = {"พัน": 1000, "หมื่น": 10000, "แสน": 100000, "ล้าน": 1000000,
+              "k": 1000}
+_NO_COB_HINTS = ("ไม่มี", "ไม่ได้", "ไม่มีใคร", "คนเดียว", "ยื่นเดี่ยว",
+                 "ไม่อยากให้ใคร", "ไม่สะดวกหา", "no")
+
+
+def _parse_income(msg: str) -> int | None:
+    """คืนรายได้ต่อเดือนเป็นบาท — อ่านไม่ออกคืน None (ห้ามเดา)"""
+    m = (msg or "").replace(",", "").replace(" ", "").lower()
+    # "2หมื่น" "18k" "3แสน"
+    mt = re.search(r"(\d+(?:\.\d+)?)(พัน|หมื่น|แสน|ล้าน|k)", m)
+    if mt:
+        return int(float(mt.group(1)) * _UNIT_MULT[mt.group(2)])
+    # "สองหมื่น" "สามหมื่นกว่า"
+    for w, v in _THAI_DIGIT_WORDS.items():
+        for unit, mult in _UNIT_MULT.items():
+            if unit != "k" and (w + unit) in m:
+                return v * mult
+    mt = re.search(r"\d{4,7}", m)
+    if mt:
+        return int(mt.group(0))
+    return None
 
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF⭐✅❌️]+"
@@ -88,6 +121,16 @@ _CASH_HINTS = [
     "เงินสด", "ซื้อสด", "จ่ายสด", "ไม่กู้", "ไม่ต้องกู้", "ไม่ใช้สินเชื่อ",
     "ไม่ได้กู้", "cash",
 ]
+
+# รับ ID LINE ที่ลูกค้าพิมพ์มาเฉยๆ (ไม่มีคำว่า line ไม่มีตัวเลข)
+# LINE ID จริงคือ a-z 0-9 . _ - ยาว 4-20 ตัว ขึ้นต้นด้วยตัวอักษร/ตัวเลข
+_LINE_ID_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._\-]{2,29}$")
+_CONTACT_HINTS = ("line", "ไลน์", "ไอดี", "แอดมา", "แอดไป", "id:", "id ")
+# คำอังกฤษสั้นๆ ที่หน้าตาเหมือนไอดีแต่ไม่ใช่
+_NOT_ID_WORDS = {
+    "ok", "okay", "yes", "no", "yep", "nope", "sure", "hi", "hello", "hey",
+    "thanks", "thank", "cash", "555", "condo", "sale", "test", "none",
+}
 
 # ข้อมูลชั้น 2 — สิ่งเดียวที่คู่แข่งอยากได้จริง
 # กันไว้ที่บอท = คำโกหก "ซื้อเงินสด" ปลดล็อกอะไรไม่ได้เลย
@@ -183,6 +226,16 @@ _FEMALE_EXACT = {
     QUALIFY_QUESTIONS[3]:
         "ขอ ID LINE หรือเบอร์ไว้ส่งห้องที่ตรงงบ พร้อมตารางผ่อนให้ดูค่ะ "
         "คุยทางแชทก่อนได้เลย ไม่ต้องโทรก็ได้ค่ะ",
+    QUALIFY_QUESTIONS[4]:
+        "ถ้ามีผู้กู้ร่วมจะยื่นได้วงเงินสูงขึ้นมากค่ะ ลูกค้าพอจะมีผู้กู้ร่วมไหมคะ "
+        "เช่น คู่สมรส พ่อแม่ หรือพี่น้องคะ",
+    NO_COBORROWER_MSG:
+        "ขอบคุณที่สนใจนะคะ ขอบอกตรงๆ เลยจะได้ไม่เสียเวลาลูกค้าค่ะ "
+        "ยื่นเดี่ยวที่รายได้ระดับนี้ ธนาคารส่วนใหญ่ยังไม่อนุมัติค่ะ",
+    COBORROWER_INVITE_MSG:
+        "วันไหนที่มีผู้กู้ร่วมแล้ว เช่น คู่สมรส พ่อแม่ หรือพี่น้อง "
+        "ทักกลับมาที่เพจนี้ได้เลยนะคะ "
+        "เดี๋ยวจัดห้องที่ตรงงบพร้อมตารางผ่อนให้ดูทันที ยินดีเสมอค่ะ",
 }
 
 
@@ -378,6 +431,20 @@ class BotEngine:
                 grade = self._finish(user_id, state, msg)
                 bubbles.append(self._grade_reply(grade, msg))
                 return bubbles, grade
+            # ไม่มีผู้กู้ร่วม -> จบบทสนทนาตรงนี้เลย ไม่ขอเบอร์ ไม่ถามบูโรต่อ
+            # ยื่นเดี่ยวไม่ผ่านอยู่แล้ว เก็บเบอร์ไป = เสียเวลาทั้งสองฝ่าย
+            # แต่ยังเก็บลีดไว้ในชีต + เปิดประตูให้กลับมาเมื่อหาผู้กู้ร่วมได้
+            if awaiting == "co_borrower" and data.get("co_borrower_none"):
+                data["grade"] = "C"
+                state["contact_refused"] = True   # กันโค้ดส่วนอื่นขอช่องทาง
+                state["score"] = self._intent_score(state)
+                data["score"] = state["score"]
+                state["done"] = True
+                state["awaiting"] = None
+                self._upsert_lead(state)          # ลงชีต แต่ไม่สร้างนัดโทรกลับ
+                bubbles.append(NO_COBORROWER_MSG)
+                bubbles.append(COBORROWER_INVITE_MSG)
+                return bubbles, "C"
 
         if not consumed:
             faq = self._check_faq(msg)
@@ -561,6 +628,18 @@ class BotEngine:
             # รายได้ไม่ชัด -> ข้าม Q3 (บูโร) ไม่ต้องถาม ไม่ทิ้งลีด
             data["income_unknown"] = True
             data.setdefault("debt", "-")
+        if field == "income" and not data.get("income_unknown"):
+            # รายได้ต่ำกว่าเกณฑ์ยื่นเดี่ยว -> ต้องหาผู้กู้ร่วมก่อน
+            # ถามผิดลำดับ = เสียเวลาทั้งสองฝ่าย เพราะยื่นเดี่ยวไม่ผ่านอยู่แล้ว
+            n = _parse_income(msg)
+            if n is not None and 1000 <= n < LOW_INCOME_BAHT:
+                data["income_baht"] = n
+                data["low_income"] = True
+        if field == "co_borrower":
+            low = msg.lower()
+            if any(h in low for h in _NO_COB_HINTS):
+                data["co_borrower_none"] = True
+                self._add_signal(state, "รายได้ต่ำ+ไม่มีผู้กู้ร่วม")
         state["data"] = data
         # ได้ข้อมูลใหม่ -> ส่งเข้าชีตทันที ไม่รอครบ 4 ข้อ (กันลีดหลุด)
         self._upsert_lead(state)
@@ -573,6 +652,10 @@ class BotEngine:
                 continue
             if f == "income" and data.get("cash"):
                 continue          # ซื้อสด = ไม่มีเหตุผลจะถามรายได้
+            if f == "co_borrower" and not data.get("low_income"):
+                continue          # รายได้ถึงเกณฑ์ = ยื่นเดี่ยวได้ ไม่ต้องถาม
+            if f == "co_borrower" and data.get("cash"):
+                continue          # ซื้อสด = ไม่ได้กู้
             if f == "contact" and state.get("contact_refused"):
                 continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
             if not data.get(f):
@@ -627,6 +710,12 @@ class BotEngine:
     def _is_tier2(msg: str) -> bool:
         m = msg.lower()
         return any(k in m for k in _TIER2_HINTS)
+
+    @staticmethod
+    def _add_signal(state: dict, tag: str):
+        sig = state.setdefault("signals", [])
+        if tag not in sig:
+            sig.append(tag)
 
     def _scan_signals(self, state: dict, msg: str):
         """ติดธงสัญญาณไว้ให้เซลเห็นก่อนโทร — ไม่ใช้ปฏิเสธใครเด็ดขาด
@@ -700,7 +789,20 @@ class BotEngine:
             sc -= 3
         if "เลี่ยงนัดดูห้อง" in sig:
             sc -= 2
-        if state.get("turns", 0) >= 5 and not state.get("loan_talk"):
+        # คุยยาวแล้วยังไม่แตะเรื่องกู้เลย — เป็นสัญญาณลบ "เฉพาะตอนที่เขาไล่ถามราคา"
+        # เดิมหักทุกเคสที่ turns>=5 ซึ่งชนบทสนทนาปกติที่ตอบครบ 4 ข้อพอดี
+        # ผลคือทุกคนตกไป C หมด เกรด A/B แทบไม่เคยเกิด (เจอ 14 ส.ค. 2026)
+        if (state.get("turns", 0) >= 5 and not state.get("loan_talk")
+                and state.get("price_asks", 0) >= 1):
+            sc -= 2
+        # รายได้ที่ยื่นเดี่ยวผ่าน = สัญญาณจริง (ตัวเลขปลอมได้ แต่เซลเช็คได้ตอนโทร)
+        n = _parse_income(str(d.get("income", "")))
+        if n is not None and not d.get("income_unknown"):
+            if n >= 50000:
+                sc += 3
+            elif n >= LOW_INCOME_BAHT:
+                sc += 2
+        if d.get("co_borrower_none"):
             sc -= 2
         return sc
 
@@ -728,8 +830,20 @@ class BotEngine:
         if len(m) < 1:
             return False
         if field == "contact":
-            digits = sum(c.isdigit() for c in m)
-            return digits >= 6 or "line" in m.lower() or "ไลน์" in m
+            low = m.lower()
+            # 1) เบอร์โทร
+            if sum(c.isdigit() for c in m) >= 6:
+                return True
+            # 2) บอกมาตรงๆ ว่าเป็นไลน์ / ไอดี
+            if any(h in low for h in _CONTACT_HINTS):
+                return True
+            # 3) ID LINE ล้วนๆ เช่น "Giftdd" "gift_88" "@wealth.estate"
+            #    คนไทยส่วนใหญ่พิมพ์แค่ไอดีมาเฉยๆ ไม่มีคำว่า line และไม่มีตัวเลข
+            #    ของเดิมตกเคสนี้ทั้งหมด -> บอทถามซ้ำ (เจอหน้างาน 14 ส.ค. 2026)
+            if (" " not in m and _LINE_ID_RE.match(m)
+                    and low.lstrip("@") not in _NOT_ID_WORDS):
+                return True
+            return False
         return True
 
     # ==================================================================
@@ -756,7 +870,10 @@ class BotEngine:
     # ==================================================================
     def _finish(self, user_id: str, state: dict, contact: str) -> str:
         data = state["data"]
-        grade = "C" if data.get("income_unknown") else self._grade(data, state)
+        if data.get("income_unknown") or data.get("co_borrower_none"):
+            grade = "C"           # ยื่นเดี่ยวไม่ผ่าน = ยังไม่ใช่คิวโทรด่วน
+        else:
+            grade = self._grade(data, state)
         state["score"] = self._intent_score(state)
         data["score"] = state["score"]
         state["done"] = True
@@ -839,7 +956,8 @@ class BotEngine:
             )
             if resp.status_code != 200:
                 print(f"[CLAUDE ERROR] {resp.status_code}: {resp.text[:200]}")
-                return FALLBACK_MSG
+                # AI ล่ม + ลูกค้าให้ข้อมูลครบแล้ว -> ห้ามถอยไปถามชุดเดิมซ้ำ
+                return STATUS_MSG if done else FALLBACK_MSG
             text = self._sanitize(resp.json()["content"][0]["text"].strip())
             if done and any(k in text for k in ["ขอเบอร์", "ID LINE", "เบอร์ติดต่อ"]):
                 # กัน AI เผลอขอข้อมูลที่ลูกค้าให้ไปแล้ว
