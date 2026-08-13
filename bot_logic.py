@@ -127,6 +127,96 @@ _TIMELINE_WORDS = [
     "รีบ", "ด่วน", "ก่อนสิ้นปี",
 ]
 
+# ----------------------------------------------------------------------
+# น้ำเสียงหญิง (เพจที่แอดมินเป็นผู้หญิง)
+# ----------------------------------------------------------------------
+# สรรพนาม "ผม" -> ตัดทิ้ง (ผู้หญิงไทยมักละสรรพนามในบทสนทนาขาย)
+_FEMALE_PRONOUN = [
+    ("ผมรบกวน", "รบกวน"), ("เดี๋ยวผม", "เดี๋ยว"), ("ผมช่วย", "ช่วย"),
+    ("ผมส่ง", "ส่ง"), ("ผมขอ", "ขอ"), ("ผมจะ", "จะ"), ("ผมคัด", "คัด"),
+]
+
+# ตัดสินว่าเป็นคำถามจาก "คำท้ายประโยค" เท่านั้น
+# (ดูแค่ว่ามีคำถามอยู่ในประโยคไม่พอ — "เช่นบ้าน รถยนต์ หรือบัตรเครดิต" ไม่ใช่คำถาม
+#  และ "ไม่ต้องจ่ายอะไรเพิ่ม" ก็ไม่ใช่ ทั้งที่มีคำว่า หรือ / อะไร อยู่)
+_Q_ENDINGS = [
+    "ไหม", "มั้ย", "หรือเปล่า", "รึเปล่า", "เท่าไหร่", "เท่าไร",
+    "ยังไง", "อย่างไร", "เมื่อไหร่", "ไหน", "บ้าง", "อะไร", "นะ", "?",
+]
+
+# ประโยคเลือก "A หรือ B" = คำถาม  แต่ "เช่น A, B หรือ C" = การยกตัวอย่าง
+_LIST_MARKERS = ["เช่น", "อาทิ", "ได้แก่"]
+
+
+def _is_question_clause(clause: str) -> bool:
+    c = clause.rstrip(" .,\u200b")
+    if any(c.endswith(k) for k in _Q_ENDINGS):
+        return True
+    if "หรือ" in c and not any(k in c for k in _LIST_MARKERS):
+        # "A หรือ B?" = คำถาม (หรือ อยู่ท้ายๆ)
+        # "ขอ A หรือ B ไว้ทำ C" = บอกเล่า (ยังมีเนื้อความยาวต่อท้าย)
+        if len(c) - c.rfind("หรือ") <= 28:
+            return True
+    return False
+
+
+# สั่ง AI ให้เขียนเสียงหญิงตั้งแต่ต้นทาง ดีกว่าไปแปลงทีหลัง
+# (ข้อความที่ AI สร้างสดทุกครั้ง กฎแปลงเดาไม่ได้ 100%)
+FEMALE_VOICE_RULE = (
+    "\n\n[น้ำเสียง] เพจนี้แอดมินเป็นผู้หญิง "
+    "ให้ตอบด้วยสรรพนามผู้หญิงเสมอ ห้ามใช้คำว่า 'ครับ' หรือ 'ผม' เด็ดขาด "
+    "ประโยคบอกเล่าลงท้าย 'ค่ะ' ประโยคคำถามลงท้าย 'คะ' "
+    "ถ้าต้องเรียกตัวเองให้ใช้ 'เรา' หรือละไว้"
+)
+
+# ข้อความที่ลูกค้าเห็นบ่อยที่สุด — เขียนตัวหญิงไว้ตายตัว ไม่ให้กฎเดา
+# (กฎยังดูแลข้อความอื่นๆ รวมถึงคำตอบที่ AI สร้างสดทุกครั้ง)
+_FEMALE_EXACT = {
+    QUALIFY_QUESTIONS[0]:
+        "ลูกค้าสนใจลงทุนคอนโดปล่อยเช่าหรือเพื่ออยู่อาศัยเองคะ",
+    QUALIFY_QUESTIONS[1]:
+        "รบกวนสอบถามข้อมูลเบื้องต้นค่ะลูกค้า เป็นพนักงานประจำหรือเปล่าคะ "
+        "และมีรายได้ต่อเดือนอยู่ที่ประมาณเท่าไหร่คะ",
+    QUALIFY_QUESTIONS[2]:
+        "ปัจจุบันมีผ่อนชำระอะไรในระบบบูโรบ้างไหมคะ "
+        "เช่นบ้าน รถยนต์ หรือบัตรเครดิตคะ",
+    QUALIFY_QUESTIONS[3]:
+        "ขอ ID LINE หรือเบอร์ไว้ส่งห้องที่ตรงงบ พร้อมตารางผ่อนให้ดูค่ะ "
+        "คุยทางแชทก่อนได้เลย ไม่ต้องโทรก็ได้ค่ะ",
+}
+
+
+def to_female(text: str) -> str:
+    """ครับ -> ค่ะ (บอกเล่า) / คะ (คำถาม) · ตัดสรรพนามชาย"""
+    exact = _FEMALE_EXACT.get((text or "").strip())
+    if exact:
+        return exact
+    if not text or ("ครับ" not in text and "ผม" not in text):
+        return text
+    for a, b in _FEMALE_PRONOUN:
+        text = text.replace(a, b)
+    lines = []
+    for line in text.split("\n"):
+        buf, start = "", 0
+        while True:
+            i = line.find("ครับ", start)
+            if i < 0:
+                buf += line[start:]
+                break
+            clause = line[start:i]
+            buf += clause
+            nxt = i + 4
+            if line[nxt:nxt + 2] == "ผม":      # "ครับผม"
+                nxt += 2
+            buf += "คะ" if _is_question_clause(clause) else "ค่ะ"
+            start = nxt
+        lines.append(buf)
+    return "\n".join(lines)
+
+
+# ชื่อแบรนด์ที่ฝังอยู่ใน WELCOME_MSG — ใช้แทนที่เมื่อมาจากเพจอื่น
+DEFAULT_BRAND = "Wealth Estate : อสังหาคุ้มค่า"
+
 # ถามคำถามเดิมได้สูงสุดกี่ครั้ง (กันบอทวนถามจนลูกค้าหนี)
 MAX_ASK_PER_FIELD = 2
 
@@ -186,24 +276,39 @@ class BotEngine:
     # ==================================================================
     def process(self, user_message: str, user_id: str,
                 referral: dict | None = None,
-                platform: str = "facebook") -> tuple[str, str | None]:
+                platform: str = "facebook",
+                page_id: str = "", brand: str = "",
+                sheet_tab: str = "", gender: str = "") -> tuple[str, str | None]:
         """คืนค่า (ข้อความตอบ, grade หรือ None)
 
         ข้อความตอบอาจมี MSG_SPLIT คั่น -> main.py แยกส่งเป็นหลายบับเบิล
         """
         referral = referral or {}
-        state, is_new = self._resolve_state(user_id, platform, referral)
+        skey = f"{page_id}:{user_id}" if page_id else user_id
+        state, is_new = self._resolve_state(user_id, platform, referral, skey)
 
         gap = _now() - state.get("last_seen", _now())
         bucket = self._gap_bucket(gap) if not is_new else "new"
         state["last_seen"] = _now()
         state["platform"] = platform
+        # บริบทเพจ — คนละเพจ = คนละแบรนด์ คนละแท็บชีต (PSID ของ FB ผูกกับเพจ)
+        if page_id:
+            state["page_id"] = page_id
+        if brand:
+            state["brand"] = brand
+        if sheet_tab:
+            state["sheet_tab"] = sheet_tab
+        if gender:
+            state["gender"] = gender
         if referral:
             state["referral"] = referral
 
         bubbles, grade = self._decide(user_message, user_id, state, bucket, is_new)
 
-        reply = MSG_SPLIT.join([b for b in bubbles if b and b.strip()])
+        parts = [b for b in bubbles if b and b.strip()]
+        if state.get("gender") == "female":
+            parts = [to_female(p) for p in parts]
+        reply = MSG_SPLIT.join(parts)
         self._log(user_id, user_message, reply)
         self._persist(user_id, state, user_message, reply, bucket)
         return reply, grade
@@ -220,7 +325,7 @@ class BotEngine:
 
         # ---- 1) เปิดหัวข้อความตามระยะที่หายไป -------------------------
         if is_new:
-            bubbles.append(WELCOME_MSG)
+            bubbles.append(self._welcome(state))
         elif bucket == "cold" and data:
             # หายไปเกิน 1 วัน + เคยให้ข้อมูลไว้ -> ทวนให้ฟังว่าเราจำได้
             recap = self._recap(data)
@@ -281,13 +386,13 @@ class BotEngine:
             elif awaiting:
                 # กำลังรอคำตอบอยู่ แต่ข้อความไม่ใช่ทั้งคำตอบและไม่เข้า FAQ
                 # -> ให้ Claude ตอบ แล้วค่อยถามซ้ำในบับเบิลถัดไป
-                bubbles.append(self._ask_claude(msg, user_id))
+                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", "")))
             elif state.get("done"):
                 # ลูกค้าให้ข้อมูลครบไปแล้ว — ห้ามขอเบอร์/ถามชุดเดิมซ้ำเด็ดขาด
                 bubbles.append(STATUS_MSG if self._is_status_ask(msg)
-                               else self._ask_claude(msg, user_id, done=True))
+                               else self._ask_claude(msg, user_id, state.get("gender", ""), done=True))
             elif not self._should_qualify(msg) and not is_new:
-                bubbles.append(self._ask_claude(msg, user_id))
+                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", "")))
 
         # ---- 3) พ่วงคำถามที่ยังขาด 1 ข้อ (บับเบิลแยก) -----------------
         # เริ่มถามเมื่อ: ลูกค้าแสดงความสนใจ / เคยเข้าโหมดถามแล้ว / เพิ่งตอบไป 1 ข้อ
@@ -352,18 +457,20 @@ class BotEngine:
         }
 
     def _resolve_state(self, user_id: str, platform: str,
-                       referral: dict) -> tuple[dict, bool]:
-        if user_id in _lead_states:
-            return _lead_states[user_id], False
+                       referral: dict,
+                       skey: str = "") -> tuple[dict, bool]:
+        skey = skey or user_id
+        if skey in _lead_states:
+            return _lead_states[skey], False
 
         # RAM ไม่มี — เซิร์ฟเวอร์เพิ่ง restart หรือเป็นลูกค้าใหม่จริง
-        loaded = self._load_session(user_id)
+        loaded = self._load_session(user_id, (referral or {}).get("_page_id", ""))
         if loaded:
             loaded.setdefault("data", {})
             loaded.setdefault("awaiting", None)
             loaded["psid"] = user_id
-            _lead_states[user_id] = loaded
-            _conversations.setdefault(user_id, [])
+            _lead_states[skey] = loaded
+            _conversations.setdefault(skey, [])
             print(f"[SESSION] restored {user_id[:8]}... "
                   f"fields={list(loaded.get('data', {}).keys())}")
             return loaded, False
@@ -373,17 +480,18 @@ class BotEngine:
         # ลูกค้าใหม่ = มาจากเพจ/แอดด้วยเหตุผลบางอย่างเสมอ -> เข้าโหมดถามเลย
         # (ไม่ทิ้งคำถามลูกค้า และไม่ปล่อยให้จบแค่ "สวัสดีครับ")
         state["qualifying"] = True
-        _lead_states[user_id] = state
-        _conversations[user_id] = []
+        _lead_states[skey] = state
+        _conversations[skey] = []
         return state, True
 
-    def _load_session(self, user_id: str) -> dict | None:
+    def _load_session(self, user_id: str, page_id: str = "") -> dict | None:
         if not (FEATURE_PERSIST and APPS_SCRIPT_URL):
             return None
         try:
             r = requests.post(
                 APPS_SCRIPT_URL,
-                json={"action": "get_session", "psid": user_id},
+                json={"action": "get_session", "psid": user_id,
+                      "page_id": page_id},
                 timeout=2.5,
             )
             if r.status_code != 200:
@@ -406,6 +514,7 @@ class BotEngine:
         _enqueue({
             "action": "turn",
             "psid": user_id,
+            "page_id": state.get("page_id", ""),
             "psid_hash": h,
             "platform": state.get("platform", ""),
             "gap_bucket": bucket,
@@ -595,6 +704,14 @@ class BotEngine:
             sc -= 2
         return sc
 
+    @staticmethod
+    def _welcome(state: dict) -> str:
+        """ข้อความทักทาย — เปลี่ยนเฉพาะชื่อแบรนด์ตามเพจ ข้อความอื่นเหมือนกันหมด"""
+        brand = state.get("brand")
+        if not brand or brand == DEFAULT_BRAND:
+            return WELCOME_MSG
+        return WELCOME_MSG.replace(DEFAULT_BRAND, brand)
+
     def _capture_done(self, state: dict):
         """ได้ข้อมูลใหม่จากสายพิเศษ -> ยิงเข้าชีตทันที (กันลีดหลุด)"""
         self._upsert_lead(state)
@@ -650,7 +767,9 @@ class BotEngine:
         # ส่งชุดเต็ม (แถวสมบูรณ์ + สร้างนัดในปฏิทิน) — schema เดิม ไม่แตะ
         self._send_to_sheets(user_id, data, grade, fb_name,
                              state.get("referral", {}),
-                             state.get("platform", "facebook"))
+                             state.get("platform", "facebook"),
+                             state.get("page_id", ""),
+                             state.get("sheet_tab", ""))
         state["lead_sent"] = True
         return grade
 
@@ -694,6 +813,7 @@ class BotEngine:
     # Claude AI Fallback  (เหมือนเดิม)
     # ==================================================================
     def _ask_claude(self, user_message: str, user_id: str,
+                    gender: str = "",
                     done: bool = False) -> str:
         # done=True -> ลูกค้าให้เบอร์ไปแล้ว ห้ามตอบอะไรที่เป็นการขอเบอร์ซ้ำ
         if not ANTHROPIC_API_KEY:
@@ -711,7 +831,8 @@ class BotEngine:
                 json={
                     "model": CLAUDE_MODEL,
                     "max_tokens": 150,
-                    "system": WEC_SYSTEM_PROMPT,
+                    "system": (WEC_SYSTEM_PROMPT + FEMALE_VOICE_RULE)
+                              if gender == "female" else WEC_SYSTEM_PROMPT,
                     "messages": messages,
                 },
                 timeout=15,
@@ -771,6 +892,8 @@ class BotEngine:
             "ref": (state.get("referral") or {}).get("ref", ""),
             "source": ("Instagram DM" if state.get("platform") == "instagram"
                        else "Facebook Messenger"),
+            "page_id": state.get("page_id", ""),
+            "tab": state.get("sheet_tab", ""),
             "signals": " | ".join(state.get("signals", [])),
             "score": self._intent_score(state),
             "cash": "ใช่" if data.get("cash") else "",
@@ -779,7 +902,8 @@ class BotEngine:
 
     def _send_to_sheets(self, user_id: str, data: dict, grade: str,
                         fb_name: str = "", referral: dict | None = None,
-                        platform: str = "facebook"):
+                        platform: str = "facebook", page_id: str = "",
+                        sheet_tab: str = ""):
         """POST lead ชุดเต็มไป Apps Script -> Sheets + Calendar (schema เดิม)"""
         if not APPS_SCRIPT_URL:
             print("[SHEETS] APPS_SCRIPT_URL not set — skipped")
@@ -796,6 +920,8 @@ class BotEngine:
             "ad_id":         referral.get("ad_id", ""),
             "ref":           referral.get("ref", ""),
             "source":        "Instagram DM" if platform == "instagram" else "Facebook Messenger",
+            "page_id":       page_id,
+            "tab":           sheet_tab,
             "signals":       "",
             "score":         data.get("score", ""),
             "cash":          "ใช่" if data.get("cash") else "",

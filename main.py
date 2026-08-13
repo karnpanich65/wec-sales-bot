@@ -43,6 +43,57 @@ load_dotenv()
 # Config — ใช้ Environment Variables ชุดเดิมทั้งหมด
 # ======================================================
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "")
+
+# ======================================================
+# Phase 5.0 — หลายเพจ
+# ------------------------------------------------------
+# WEC_PAGES  = JSON ไม่มีความลับ อ่าน/แก้ง่าย
+#   {"108248514185091": {"brand": "Wealth Estate : อสังหาคุ้มค่า",
+#                        "tab": "Facebook Leads"}, ...}
+# โทเค็นแยกคนละตัวแปร (Railway มาสก์ให้) :  PAGE_TOKEN_<page_id>
+# ถ้าไม่ตั้งอะไรเลย -> ใช้ FB_PAGE_ACCESS_TOKEN เดิม = พฤติกรรมเดิมทุกประการ
+# ======================================================
+DEFAULT_BRAND = "Wealth Estate : อสังหาคุ้มค่า"
+DEFAULT_TAB = "Facebook Leads"
+MAIN_PAGE_ID = os.environ.get("MAIN_PAGE_ID", "108248514185091")
+
+def _load_pages() -> dict:
+    raw = os.environ.get("WEC_PAGES", "").strip()
+    if not raw:
+        return {}
+    try:
+        cfg = json.loads(raw)
+        if isinstance(cfg, dict):
+            return cfg
+        print("[PAGES] WEC_PAGES ต้องเป็น JSON object — ข้าม")
+    except Exception as e:
+        print(f"[PAGES ERROR] อ่าน WEC_PAGES ไม่ได้: {e} — ใช้ค่าเริ่มต้นแทน")
+    return {}
+
+PAGES = _load_pages()
+
+
+def page_token(page_id: str) -> str:
+    """โทเค็นของเพจนั้น — ไม่มีก็ถอยไปใช้ตัวเดิม (กันบอทเงียบ)"""
+    t = os.environ.get(f"PAGE_TOKEN_{page_id}", "").strip()
+    return t or FB_PAGE_ACCESS_TOKEN
+
+
+def page_brand(page_id: str) -> str:
+    return (PAGES.get(str(page_id), {}) or {}).get("brand") or DEFAULT_BRAND
+
+
+def page_tab(page_id: str) -> str:
+    return (PAGES.get(str(page_id), {}) or {}).get("tab") or DEFAULT_TAB
+
+
+def page_gender(page_id: str) -> str:
+    """เพจที่แอดมินเป็นผู้หญิง ตั้ง "gender": "female" ใน WEC_PAGES
+    ไม่ตั้ง = ชาย (ครับ) เหมือนเดิม -> เพจอสังหาคุ้มค่าไม่เปลี่ยนอะไรเลย
+    """
+    return (PAGES.get(str(page_id), {}) or {}).get("gender", "")
+
+
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
 FB_APP_SECRET = os.environ.get("FB_APP_SECRET", "")  # เว้นว่าง = dev mode (ข้าม signature check)
 GIFT_FB_PSID = os.environ.get("GIFT_FB_PSID", "")
@@ -134,7 +185,7 @@ def verify_fb_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def send_reply(recipient_id: str, text: str):
+def send_reply(recipient_id: str, text: str, page_id: str = ""):
     """ส่งคำตอบของบอท — แยกเป็นหลายบับเบิลถ้ามี MSG_SPLIT
 
     เหตุผล: คำถามที่อยู่รวมก้อนเดียวกับข้อความอื่นจะถูกลูกค้าสแกนผ่าน
@@ -143,11 +194,12 @@ def send_reply(recipient_id: str, text: str):
     for part in text.split(MSG_SPLIT):
         part = part.strip()
         if part:
-            send_message(recipient_id, part)
+            send_message(recipient_id, part, page_id)
 
 
-def send_message(recipient_id: str, text: str):
-    if not FB_PAGE_ACCESS_TOKEN:
+def send_message(recipient_id: str, text: str, page_id: str = ""):
+    token = page_token(page_id) if page_id else FB_PAGE_ACCESS_TOKEN
+    if not token:
         print(f"[NO TOKEN] Would send to {recipient_id}: {text[:80]}")
         return
     # Facebook จำกัด 2000 ตัวอักษร/ข้อความ
@@ -172,7 +224,7 @@ def send_message(recipient_id: str, text: str):
         try:
             resp = requests.post(
                 GRAPH_API_URL,
-                params={"access_token": FB_PAGE_ACCESS_TOKEN},
+                params={"access_token": token},
                 json=payload,
                 timeout=10,
             )
@@ -196,18 +248,43 @@ def send_message(recipient_id: str, text: str):
             log_event("SEND_ERROR", f"exception: {e}")
 
 
-def alert_gift(sender_id: str, user_text: str, ad_id: str = ""):
-    """แจ้งเตือน Gift เมื่อได้ Lead Grade A (ปิดได้โดยลบ GIFT_FB_PSID)"""
-    if not GIFT_FB_PSID:
+def page_alert_psid(page_id: str) -> str:
+    """ใครควรได้รับแจ้งเตือนลีดของเพจนี้
+
+    สำคัญ: เพจอื่น Gift เป็นหัวหน้า ไม่ใช่คนตามลีด
+    ถ้าไม่ได้กำหนด alert_psid ของเพจไว้ = ไม่แจ้งเตือนใครเลย
+    (ลีดยังเข้าชีตครบเหมือนเดิม ไม่หาย — แค่ไม่ไปรบกวนคนผิด)
+    """
+    cfg = PAGES.get(str(page_id), {}) or {}
+    psid = str(cfg.get("alert_psid", "")).strip()
+    if psid:
+        return psid
+    # เพจหลักเท่านั้นที่ถอยไปหา Gift
+    if not PAGES or str(page_id) == MAIN_PAGE_ID or not page_id:
+        return GIFT_FB_PSID
+    return ""
+
+
+def alert_lead(sender_id: str, user_text: str, ad_id: str = "",
+               page_id: str = ""):
+    """แจ้งเตือนลีดเกรด A ไปหา 'เจ้าของเพจนั้น' ไม่ใช่ Gift เสมอไป"""
+    target = page_alert_psid(page_id)
+    if not target:
+        print(f"[ALERT] เพจ {page_id} ยังไม่ได้กำหนดผู้รับแจ้งเตือน — ข้าม (ลีดอยู่ในชีตครบ)")
         return
     alert = (
-        "GRADE A LEAD ใหม่ (Facebook Page)\n"
+        f"GRADE A LEAD ใหม่ — {page_brand(page_id)}\n"
         f"Sender: {sender_id}\n"
         f"ข้อความ: {user_text[:100]}\n"
         f"Ad ID: {ad_id or '-'}\n\n"
         "ติดต่อกลับใน Messenger ด่วนครับ"
     )
-    send_message(GIFT_FB_PSID, alert)
+    send_message(target, alert, page_id)
+
+
+# ชื่อเดิม — กันโค้ดเก่าที่ยังเรียกอยู่
+def alert_gift(sender_id: str, user_text: str, ad_id: str = ""):
+    alert_lead(sender_id, user_text, ad_id, MAIN_PAGE_ID)
 
 
 def extract_referral(event: dict) -> dict:
@@ -237,7 +314,7 @@ def extract_referral(event: dict) -> dict:
 # ======================================================
 # Event processing
 # ======================================================
-def process_event(event: dict, platform: str = "facebook"):
+def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
     """ประมวลผล messaging event 1 รายการ (platform: facebook / instagram)"""
     sender_id = event.get("sender", {}).get("id", "")
     if not sender_id:
@@ -278,8 +355,10 @@ def process_event(event: dict, platform: str = "facebook"):
         reply_text, lead_grade = bot.process(
             "สวัสดี", sender_id,
             referral=_pending_referrals.get(sender_id, {}), platform=platform,
+            page_id=page_id, brand=page_brand(page_id), sheet_tab=page_tab(page_id),
+            gender=page_gender(page_id),
         )
-        send_reply(sender_id, reply_text)
+        send_reply(sender_id, reply_text, page_id)
         print(f"[POSTBACK] ({platform}) {sender_id[:10]}... -> welcomed")
         return
 
@@ -294,11 +373,13 @@ def process_event(event: dict, platform: str = "facebook"):
 
     reply_text, lead_grade = bot.process(
         user_text, sender_id, referral=lead_referral, platform=platform,
+        page_id=page_id, brand=page_brand(page_id), sheet_tab=page_tab(page_id),
+            gender=page_gender(page_id),
     )
-    send_reply(sender_id, reply_text)
+    send_reply(sender_id, reply_text, page_id)
 
     if lead_grade == "A":
-        alert_gift(sender_id, user_text, lead_referral.get("ad_id", ""))
+        alert_lead(sender_id, user_text, lead_referral.get("ad_id", ""), page_id)
 
     print(f"[MSG] ({platform}) {sender_id[:10]}... Grade={lead_grade or '-'} "
           f"| Q={user_text[:40]!r} | ad_id={lead_referral.get('ad_id') or '-'}")
@@ -605,10 +686,12 @@ def receive_webhook():
     platform = "instagram" if obj == "instagram" else "facebook"
 
     for entry in data.get("entry", []):
+        # entry.id = เพจที่ลูกค้าทักเข้ามา -> ใช้เลือกโทเค็น/แบรนด์/แท็บชีต
+        page_id = str(entry.get("id", ""))
         # กรณีปกติ: แอพเป็น Primary Receiver
         for event in entry.get("messaging", []):
             try:
-                process_event(event, platform)
+                process_event(event, platform, page_id)
             except Exception as e:
                 print(f"[EVENT ERROR] {e} | event={json.dumps(event)[:300]}")
 
