@@ -35,6 +35,7 @@ import requests
 from flask import Flask, request, jsonify, Response
 from dotenv import load_dotenv
 from bot_logic import BotEngine
+from faq_data import MSG_SPLIT
 
 load_dotenv()
 
@@ -110,6 +111,18 @@ def verify_fb_signature(body: bytes, signature: str) -> bool:
         FB_APP_SECRET.encode(), body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+def send_reply(recipient_id: str, text: str):
+    """ส่งคำตอบของบอท — แยกเป็นหลายบับเบิลถ้ามี MSG_SPLIT
+
+    เหตุผล: คำถามที่อยู่รวมก้อนเดียวกับข้อความอื่นจะถูกลูกค้าสแกนผ่าน
+    ส่งคำถามเป็นบับเบิลสุดท้ายเดี่ยวๆ ได้อัตราตอบกลับสูงกว่าชัดเจน
+    """
+    for part in text.split(MSG_SPLIT):
+        part = part.strip()
+        if part:
+            send_message(recipient_id, part)
 
 
 def send_message(recipient_id: str, text: str):
@@ -238,7 +251,7 @@ def process_event(event: dict, platform: str = "facebook"):
             "สวัสดี", sender_id,
             referral=_pending_referrals.get(sender_id, {}), platform=platform,
         )
-        send_message(sender_id, reply_text)
+        send_reply(sender_id, reply_text)
         print(f"[POSTBACK] ({platform}) {sender_id[:10]}... -> welcomed")
         return
 
@@ -254,7 +267,7 @@ def process_event(event: dict, platform: str = "facebook"):
     reply_text, lead_grade = bot.process(
         user_text, sender_id, referral=lead_referral, platform=platform,
     )
-    send_message(sender_id, reply_text)
+    send_reply(sender_id, reply_text)
 
     if lead_grade == "A":
         alert_gift(sender_id, user_text, lead_referral.get("ad_id", ""))
