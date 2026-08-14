@@ -105,6 +105,58 @@ _EMOJI_RE = re.compile(
 )
 
 # ----------------------------------------------------------------------
+# Phase 5.8 — กันข้อความ AI ถูกตัดกลางประโยค
+# ----------------------------------------------------------------------
+# ภาษาไทยกินโทเคนมากกว่าอังกฤษหลายเท่า max_tokens=150 เดิมจึงตัดกลางคำ
+# ลูกค้าเห็นข้อความค้างแบบ "...แต่ยังกลัวหรือไม่รู้จะเริ่มอย่างไร เราแน"
+# แก้ 2 ชั้น: (1) ขยาย max_tokens  (2) ถ้ายังโดนตัด ถอยไปจบประโยคสมบูรณ์
+_SENT_END_RE = re.compile(r"^.*(?:ครับ|ค่ะ|คะ|[.!?])", re.S)
+# ทักทาย/แนะนำตัวซ้ำ — ระบบส่ง WELCOME_MSG ไปก่อนแล้ว AI ไม่ต้องทักอีกรอบ
+_GREET_RE = re.compile(
+    r"^\s*สวัสดี(?:ครับ|ค่ะ|คะ)?\s*[:\-—]?\s*"
+    r"(?:(?:wealth\s*estate|อสังหาคุ้มค่า)\s*[:\-—]?\s*){0,3}"
+    r"(?:ยินดี\S{0,30}?(?:ครับ|ค่ะ|คะ)\s*)?",
+    re.IGNORECASE,
+)
+
+
+def _trim_to_sentence(text: str) -> str:
+    """AI ถูกตัดกลางประโยค -> ถอยกลับไปจบที่ประโยคสมบูรณ์ล่าสุด
+    ถ้าหาไม่เจอเลย คืนสตริงว่าง ให้ผู้เรียกไปใช้ข้อความสำรองแทน
+    (ส่งข้อความสำรอง ดีกว่าส่งประโยคค้างให้ลูกค้าอ่าน)"""
+    m = _SENT_END_RE.match(text)
+    if m:
+        trimmed = m.group(0).strip()
+        if len(trimmed) >= 20:
+            return trimmed
+    return ""
+
+
+def _strip_dup_greeting(text: str) -> str:
+    """ตัดคำทักทายซ้ำหัวข้อความ ถ้าตัดแล้วเหลือสั้นเกินไปให้คงของเดิมไว้"""
+    stripped = _GREET_RE.sub("", text, count=1).lstrip(" :-—\n")
+    return stripped if len(stripped) >= 15 else text
+
+
+# คอนเซ็ปต์หลักของบอท: ตอบไม่เกิน 2 ประโยค ให้เหมือนคนพิมพ์ ไม่ใช่บอทร่ายยาว
+# system prompt สั่งไว้แล้ว แต่ AI ไม่เชื่อฟัง 100% -> บังคับซ้ำในโค้ดอีกชั้น
+# (max_tokens=400 เป็นแค่เพดานกันข้อความขาด ไม่ใช่เป้าให้ตอบยาว)
+MAX_REPLY_SENTENCES = 2
+# โหลด session จากชีต: ยิง 2 ครั้ง ครั้งหลังใจเย็นขึ้น (Apps Script cold start ช้า)
+SESSION_LOAD_TIMEOUTS = (3.0, 5.0)
+_SENT_BOUND_RE = re.compile(r"(?:ครับ|ค่ะ|คะ|[.!?])(?=\s|$)")
+
+
+def _limit_sentences(text: str, n: int = MAX_REPLY_SENTENCES) -> str:
+    """ตัดให้เหลือไม่เกิน n ประโยค โดยตัดที่ขอบประโยคเท่านั้น
+    ถ้าหาขอบไม่ครบ n ก็ปล่อยผ่าน (ข้อความสั้นอยู่แล้ว)"""
+    bounds = [m.end() for m in _SENT_BOUND_RE.finditer(text)]
+    if len(bounds) <= n:
+        return text.strip()
+    return text[:bounds[n - 1]].strip()
+
+
+# ----------------------------------------------------------------------
 # Phase 5.3 — ตัวจับคำที่รู้จักคำปฏิเสธ
 # ----------------------------------------------------------------------
 # ภาษาไทยไม่เว้นวรรค การเช็ค "คำนี้อยู่ในข้อความไหม" แบบตรงๆ จึงพังเสมอ:
@@ -648,23 +700,33 @@ class BotEngine:
         return state, True
 
     def _load_session(self, user_id: str, page_id: str = "") -> dict | None:
+        """ดึง state เก่าจากชีต — ใช้เฉพาะตอน RAM ไม่มี (เซิร์ฟเวอร์เพิ่ง restart)
+
+        Phase 5.8: เดิม timeout 2.5 วิ ยิงครั้งเดียว Apps Script cold start
+        มักเกิน 2.5 วิ -> โหลดไม่ทัน -> ระบบนึกว่าลูกค้าใหม่ -> ถามซ้ำตั้งแต่ข้อ 1
+        แก้: ยิงซ้ำได้ 1 ครั้งด้วย timeout ที่ยาวขึ้น (รวมแย่สุด ~8 วิ ยังตอบทัน)
+        """
         if not (FEATURE_PERSIST and APPS_SCRIPT_URL):
             return None
-        try:
-            r = requests.post(
-                APPS_SCRIPT_URL,
-                json={"action": "get_session", "psid": user_id,
-                      "page_id": page_id},
-                timeout=2.5,
-            )
-            if r.status_code != 200:
-                return None
-            j = r.json()
-            st = j.get("state")
-            return st if isinstance(st, dict) and st else None
-        except Exception as e:
-            print(f"[SESSION LOAD ERROR] {e}")
-            return None
+        for attempt, tmo in enumerate(SESSION_LOAD_TIMEOUTS, start=1):
+            try:
+                r = requests.post(
+                    APPS_SCRIPT_URL,
+                    json={"action": "get_session", "psid": user_id,
+                          "page_id": page_id},
+                    timeout=tmo,
+                )
+                if r.status_code != 200:
+                    return None
+                j = r.json()
+                st = j.get("state")
+                return st if isinstance(st, dict) and st else None
+            except Exception as e:
+                last = attempt == len(SESSION_LOAD_TIMEOUTS)
+                print(f"[SESSION LOAD {'ERROR' if last else 'RETRY'}] "
+                      f"attempt {attempt}/{len(SESSION_LOAD_TIMEOUTS)} "
+                      f"(timeout={tmo}s): {e}")
+        return None
 
     def _persist(self, user_id: str, state: dict,
                  user_msg: str, reply: str, bucket: str):
@@ -1067,7 +1129,7 @@ class BotEngine:
                 },
                 json={
                     "model": CLAUDE_MODEL,
-                    "max_tokens": 150,
+                    "max_tokens": 400,
                     "system": (WEC_SYSTEM_PROMPT + FEMALE_VOICE_RULE)
                               if gender == "female" else WEC_SYSTEM_PROMPT,
                     "messages": messages,
@@ -1078,7 +1140,17 @@ class BotEngine:
                 print(f"[CLAUDE ERROR] {resp.status_code}: {resp.text[:200]}")
                 # AI ล่ม + ลูกค้าให้ข้อมูลครบแล้ว -> ห้ามถอยไปถามชุดเดิมซ้ำ
                 return STATUS_MSG if done else FALLBACK_MSG
-            text = self._sanitize(resp.json()["content"][0]["text"].strip())
+            data = resp.json()
+            raw = data["content"][0]["text"].strip()
+            # โดนตัดกลางประโยค -> ถอยไปจบประโยคสมบูรณ์ ไม่งั้นใช้ข้อความสำรอง
+            if data.get("stop_reason") == "max_tokens":
+                print(f"[CLAUDE TRUNCATED] {len(raw)} chars -> trimming")
+                raw = _trim_to_sentence(raw)
+                if not raw:
+                    return STATUS_MSG if done else FALLBACK_MSG
+            text = self._sanitize(raw)
+            text = _strip_dup_greeting(text)
+            text = _limit_sentences(text)
             if done and any(k in text for k in ["ขอเบอร์", "ID LINE", "เบอร์ติดต่อ"]):
                 # กัน AI เผลอขอข้อมูลที่ลูกค้าให้ไปแล้ว
                 return STATUS_MSG

@@ -215,15 +215,38 @@ def send_reply(recipient_id: str, text: str, page_id: str = ""):
     """
     for part in text.split(MSG_SPLIT):
         part = part.strip()
-        if part:
-            send_message(recipient_id, part, page_id)
+        if not part:
+            continue
+        if not send_message(recipient_id, part, page_id):
+            # ส่งถึงคนนี้ไม่ได้แล้ว (บล็อกเพจ / ปิดบัญชี / หลุด 24 ชม.)
+            # บับเบิลที่เหลือก็ไม่ถึงเหมือนกัน ยิงต่อได้แค่ error ซ้ำ
+            print(f"[SEND ABORT] {_mask(recipient_id)} ติดต่อไม่ได้ "
+                  f"— ข้ามบับเบิลที่เหลือ")
+            break
 
 
-def send_message(recipient_id: str, text: str, page_id: str = ""):
+# Meta บอกว่า "ส่งถึงคนนี้ไม่ได้อีกแล้ว" — ยิงซ้ำก็ได้ error เดิม
+# 551 = ลูกค้าบล็อกเพจ/ปิดบัญชี · 10 = หลุดหน้าต่าง 24 ชม. · 2018001 = id ใช้ไม่ได้
+_UNREACHABLE_CODES = {551, 10}
+_UNREACHABLE_SUBCODES = {1545041, 2018001, 2018108}
+
+
+def _is_unreachable(resp) -> bool:
+    try:
+        err = (resp.json() or {}).get("error", {}) or {}
+    except Exception:
+        return False
+    return (err.get("code") in _UNREACHABLE_CODES
+            or err.get("error_subcode") in _UNREACHABLE_SUBCODES)
+
+
+def send_message(recipient_id: str, text: str, page_id: str = "") -> bool:
+    """ส่ง 1 บับเบิล — คืน False เมื่อส่งถึงลูกค้าคนนี้ไม่ได้อย่างถาวร
+    (ให้ send_reply หยุดยิงบับเบิลที่เหลือ)"""
     token = page_token(page_id) if page_id else FB_PAGE_ACCESS_TOKEN
     if not token:
         print(f"[NO TOKEN] Would send to {recipient_id}: {text[:80]}")
-        return
+        return True
     # Facebook จำกัด 2000 ตัวอักษร/ข้อความ
     chunks = [text[i:i + 1900] for i in range(0, len(text), 1900)]
     for chunk in chunks:
@@ -254,6 +277,8 @@ def send_message(recipient_id: str, text: str, page_id: str = ""):
                 print(f"[FB SEND ERROR] {resp.status_code}: {resp.text[:200]}")
                 log_event("SEND_ERROR", f"HTTP {resp.status_code}",
                           {"body": resp.text[:300]})
+                if _is_unreachable(resp):
+                    return False
             else:
                 body = resp.json() if resp.content else {}
                 print(f"[FB SEND OK] message_id={body.get('message_id', '-')}")
@@ -268,6 +293,7 @@ def send_message(recipient_id: str, text: str, page_id: str = ""):
         except Exception as e:
             print(f"[FB SEND EXCEPTION] {e}")
             log_event("SEND_ERROR", f"exception: {e}")
+    return True
 
 
 # ======================================================
