@@ -324,7 +324,45 @@ def reply_to_comment(comment_id: str, text: str, page_id: str = "") -> bool:
         return False
 
 
-def private_reply(page_id: str, comment_id: str, text: str) -> str:
+def fetch_comment_text(comment_id: str, page_id: str = "") -> str:
+    """อ่านข้อความคอมเมนต์จาก Graph API เมื่อ webhook ไม่ส่งมาให้"""
+    token = page_token(page_id)
+    if not token or not comment_id:
+        return ""
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/v19.0/{comment_id}",
+            params={"fields": "message,from", "access_token": token},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            print(f"[COMMENT FETCH ERROR] {resp.status_code}: {resp.text[:300]}")
+            return ""
+        return str((resp.json() or {}).get("message", "") or "")
+    except Exception as e:
+        print(f"[COMMENT FETCH EXCEPTION] {e}")
+        return ""
+
+
+def _comment_id_variants(comment_id: str, post_id: str) -> list:
+    """รูปแบบ ID ที่ Meta ยอมรับสำหรับ private reply ต่างกันไปตามชนิดโพสต์
+
+    feed webhook ส่ง comment_id มาได้ 2 แบบ: "123456" หรือ "POSTID_123456"
+    ตัวไหนใช้ได้ขึ้นกับว่าโพสต์เป็นโพสต์ปกติ / โพสต์โฆษณา
+    ลองทีละแบบดีกว่าเดา (error 1893060 = ID ใช้ไม่ได้)
+    """
+    out = [comment_id]
+    if "_" in comment_id:
+        tail = comment_id.split("_")[-1]
+        if tail and tail != comment_id:
+            out.append(tail)
+    elif post_id:
+        out.append(f"{post_id}_{comment_id}")
+    return out
+
+
+def private_reply(page_id: str, comment_id: str, text: str,
+                  post_id: str = "") -> str:
     """ส่งข้อความเข้าแชทหาคนที่คอมเมนต์ — คืน PSID ถ้าสำเร็จ, "" ถ้าไม่
 
     ข้อจำกัดของ Meta: ยิงได้ครั้งเดียวต่อคอมเมนต์
@@ -334,6 +372,17 @@ def private_reply(page_id: str, comment_id: str, text: str) -> str:
     if not token or not page_id:
         return ""
     url = f"https://graph.facebook.com/v19.0/{page_id}/messages"
+    last = ""
+    for cid in _comment_id_variants(comment_id, post_id):
+        psid = _try_private_reply(url, token, cid, text)
+        if psid:
+            return psid
+        last = cid
+    print(f"[PRIVATE REPLY] ลองครบทุกรูปแบบ ID แล้วไม่ผ่าน (ล่าสุด {last[:24]})")
+    return ""
+
+
+def _try_private_reply(url: str, token: str, comment_id: str, text: str) -> str:
     payload = {
         "recipient": {"comment_id": comment_id},
         "message": {"text": text[:1900]},
@@ -344,9 +393,10 @@ def private_reply(page_id: str, comment_id: str, text: str) -> str:
         resp = requests.post(url, params={"access_token": token},
                              json=payload, timeout=10)
         if resp.status_code != 200:
-            print(f"[PRIVATE REPLY ERROR] {resp.status_code}: {resp.text[:250]}")
+            print(f"[PRIVATE REPLY ERROR] id={comment_id[:28]} "
+                  f"{resp.status_code}: {resp.text[:600]}")
             log_event("SEND_ERROR", f"private reply HTTP {resp.status_code}",
-                      {"body": resp.text[:300]})
+                      {"body": resp.text[:400]})
             return ""
         body = resp.json() if resp.content else {}
         psid = str(body.get("recipient_id", ""))
@@ -373,6 +423,7 @@ def process_comment(page_id: str, platform: str, value: dict):
         text = str(value.get("text", "") or "")
         frm = value.get("from", {}) or {}
         verb = "add"
+        post_id = str((value.get("media", {}) or {}).get("id", ""))
     else:
         if value.get("item") != "comment":
             return                      # like / share / โพสต์เอง — ไม่เกี่ยว
@@ -380,6 +431,12 @@ def process_comment(page_id: str, platform: str, value: dict):
         text = str(value.get("message", "") or "")
         frm = value.get("from", {}) or {}
         verb = str(value.get("verb", "add"))
+        post_id = str(value.get("post_id", ""))
+
+    # ดูของจริงที่ Meta ส่งมา — เจอ 14 ส.ค. ว่าข้อความคอมเมนต์มาเป็นค่าว่าง
+    # และ private reply ตอบกลับ error 1893060 (comment id ใช้ไม่ได้)
+    # ต้องเห็น payload ดิบถึงจะรู้ว่าฟิลด์ไหนหาย/ผิดรูป
+    print(f"[COMMENT RAW] {json.dumps(value, ensure_ascii=False)[:600]}")
 
     if verb not in ("add", "edited"):
         return                          # ลบคอมเมนต์ — ไม่ต้องทำอะไร
@@ -398,6 +455,12 @@ def process_comment(page_id: str, platform: str, value: dict):
 
     fb_page_id = resolve_ig_page(page_id) if platform == "instagram" else page_id
     gender = page_gender(fb_page_id)
+
+    # Meta ไม่ส่งข้อความคอมเมนต์มาในบาง payload -> ไปอ่านเอาเองจาก Graph API
+    # ไม่ได้ก็ไม่เป็นไร ใช้ "สนใจ" เป็นตัวตั้งต้นแทน (ลูกค้าคอมเมนต์ = สนใจอยู่แล้ว)
+    if not text:
+        text = fetch_comment_text(comment_id, fb_page_id)
+
     print(f"[COMMENT] ({platform}) {from_name or '-'} : {text[:60]}")
     log_event("INBOUND", f"comment ({platform}) from {from_name or '-'}",
               {"platform": platform, "comment_id": comment_id[:20],
@@ -417,7 +480,7 @@ def process_comment(page_id: str, platform: str, value: dict):
     # bot.process เก็บ state ด้วยคีย์ "{page_id}:{user_id}" -> ต้องประกอบให้ตรง
     tmp_skey = f"{fb_page_id}:{tmp_key}" if fb_page_id else tmp_key
 
-    psid = private_reply(fb_page_id, comment_id, one_shot)
+    psid = private_reply(fb_page_id, comment_id, one_shot, post_id)
     if psid:
         # ย้าย state ไปคีย์จริง -> พอลูกค้าตอบในแชท บอทคุยต่อได้เลย ไม่ทักซ้ำ
         new_skey = f"{fb_page_id}:{psid}" if fb_page_id else psid
