@@ -41,7 +41,7 @@ from faq_data import (
     DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG, BRAND_NAME,
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
-    LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG,
+    LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -141,19 +141,69 @@ def _strip_dup_greeting(text: str) -> str:
 # คอนเซ็ปต์หลักของบอท: ตอบไม่เกิน 2 ประโยค ให้เหมือนคนพิมพ์ ไม่ใช่บอทร่ายยาว
 # system prompt สั่งไว้แล้ว แต่ AI ไม่เชื่อฟัง 100% -> บังคับซ้ำในโค้ดอีกชั้น
 # (max_tokens=400 เป็นแค่เพดานกันข้อความขาด ไม่ใช่เป้าให้ตอบยาว)
+# อาชีพที่ธนาคารไม่นับเป็นรายได้ประจำ — ยื่นกู้ไม่ผ่านแม้ตัวเลขจะดูพอ
+# (ไม่รวม ฟรีแลนซ์ / ธุรกิจส่วนตัว / เจ้าของกิจการ เพราะมีเอกสารยื่นได้จริง)
+_UNBANKABLE_JOBS = (
+    "ว่างงาน", "ตกงาน", "ไม่ได้ทำงาน", "ไม่มีงาน", "ไม่มีรายได้",
+    "แม่บ้าน", "พ่อบ้าน", "เกษตร", "ทำนา", "ทำไร่", "ทำสวน", "ชาวนา", "ชาวสวน",
+    "เกษียณ", "นักเรียน", "นักศึกษา", "รับจ้างทั่วไป", "รับจ้างรายวัน",
+    "ขายของรายวัน", "หาบเร่", "แผงลอย",
+)
+# "สามีให้เงินเดือนละ 30,000" = ไม่ใช่รายได้ตัวเอง ธนาคารไม่นับ
+_DEPENDENT_INCOME = ("สามีให้", "ภรรยาให้", "แฟนให้", "พ่อให้", "แม่ให้",
+                     "ลูกให้", "ครอบครัวให้", "ได้เงินจากสามี")
+
+
+def _is_unbankable_job(msg: str) -> bool:
+    """อาชีพ/ที่มารายได้ที่ธนาคารไม่รับรอง -> ถือว่าไม่ผ่านเกณฑ์รายได้"""
+    m = msg.lower()
+    return (any(j in m for j in _UNBANKABLE_JOBS)
+            or any(d in m for d in _DEPENDENT_INCOME))
+
+
 MAX_REPLY_SENTENCES = 2
+# เพดานตัวอักษร — ด่านที่สำคัญกว่าจำนวนประโยค
+# เจอ 15 ส.ค.: AI เขียน 2 ย่อหน้ายาว จบด้วย "ครับ" แค่ 2 ครั้ง
+# ตัวนับประโยคเลยบอกว่า "2 ประโยค ผ่าน" ทั้งที่ลูกค้าเห็นเป็นโบรชัวร์เต็มจอ
+# ภาษาไทย 2 ประโยคที่คนพิมพ์จริงยาวประมาณ 120-200 ตัวอักษร
+MAX_REPLY_CHARS = 180
+# เพดานแข็ง: ประโยคเดียวยาวเกิน 180 แต่ไม่เกินนี้ ยอมให้ผ่านทั้งประโยค
+# เกินนี้ = ยาวจนอ่านแล้วเป็นโบรชัวร์ ทิ้งไปใช้ข้อความสำรองดีกว่า
+HARD_REPLY_CHARS = 260
 # โหลด session จากชีต: ยิง 2 ครั้ง ครั้งหลังใจเย็นขึ้น (Apps Script cold start ช้า)
 SESSION_LOAD_TIMEOUTS = (3.0, 5.0)
 _SENT_BOUND_RE = re.compile(r"(?:ครับ|ค่ะ|คะ|[.!?])(?=\s|$)")
 
 
-def _limit_sentences(text: str, n: int = MAX_REPLY_SENTENCES) -> str:
-    """ตัดให้เหลือไม่เกิน n ประโยค โดยตัดที่ขอบประโยคเท่านั้น
-    ถ้าหาขอบไม่ครบ n ก็ปล่อยผ่าน (ข้อความสั้นอยู่แล้ว)"""
+def _limit_sentences(text: str, n: int = MAX_REPLY_SENTENCES,
+                     max_chars: int = MAX_REPLY_CHARS) -> str:
+    """บีบคำตอบ AI ให้เหมือนคนพิมพ์: ย่อหน้าเดียว ไม่เกิน n ประโยค และไม่ยาวเกิน max_chars
+
+    ตัดที่ขอบประโยคเสมอ ห้ามค้างกลางคำ
+    """
+    # ย่อหน้าคู่ = ลักษณะโบรชัวร์ ยุบให้เป็นข้อความเดียว
+    text = re.sub(r"\s*\n\s*", " ", text).strip()
+
     bounds = [m.end() for m in _SENT_BOUND_RE.finditer(text)]
-    if len(bounds) <= n:
-        return text.strip()
-    return text[:bounds[n - 1]].strip()
+    if bounds and len(bounds) > n:
+        text = text[:bounds[n - 1]].strip()
+        bounds = bounds[:n]
+
+    if len(text) <= max_chars:
+        return text
+
+    # ยาวเกินเพดาน -> ถอยไปขอบประโยคสุดท้ายที่ยังอยู่ในเพดาน
+    fit = [b for b in bounds if b <= max_chars]
+    if fit:
+        return text[:fit[-1]].strip()
+    # ประโยคแรกยาวเกินเพดานพอดีๆ -> ยอมให้ผ่าน 1 ประโยค
+    # (คำตอบจริงที่ยาวไปนิด ยังมีประโยชน์กว่าข้อความสำรองที่ไม่ตอบอะไรเลย)
+    if bounds and bounds[0] <= HARD_REPLY_CHARS:
+        return text[:bounds[0]].strip()
+    # ไม่มีขอบประโยคเลย = AI เขียนรวดเดียวยาวมาก
+    # ภาษาไทยไม่เว้นวรรค ตัดตรงไหนก็ค้างกลางคำ -> คืนว่าง ให้ไปใช้ข้อความสำรอง
+    # (ส่งข้อความมาตรฐาน ดีกว่าส่งคำที่ขาดครึ่งให้ลูกค้าอ่าน)
+    return ""
 
 
 # ----------------------------------------------------------------------
@@ -521,7 +571,11 @@ class BotEngine:
         grade = None
 
         # ---- 1) เปิดหัวข้อความตามระยะที่หายไป -------------------------
-        if is_new:
+        # ข้อความแรกที่เป็นคำถามจริง -> ไม่ต้องทักทาย ตอบคำถามเขาเลย
+        # เจอ 15 ส.ค.: คนตอบกลับโฆษณาได้ข้อความทักทายไปแล้ว 1 ครั้ง
+        # พอเขาถามต่อ ระบบทักซ้ำอีก + ตอบ + ถาม = 3 บับเบิล ทักทาย 2 รอบ
+        # อ่านแล้วเหมือนบอทค้าง ไม่เหมือนคนคุย
+        if is_new and not self._is_question(msg):
             bubbles.append(self._welcome(state))
         elif bucket == "cold" and data:
             # หายไปเกิน 1 วัน + เคยให้ข้อมูลไว้ -> ทวนให้ฟังว่าเราจำได้
@@ -578,10 +632,15 @@ class BotEngine:
             # ไม่มีผู้กู้ร่วม -> จบบทสนทนาตรงนี้เลย ไม่ขอเบอร์ ไม่ถามบูโรต่อ
             # ยื่นเดี่ยวไม่ผ่านอยู่แล้ว เก็บเบอร์ไป = เสียเวลาทั้งสองฝ่าย
             # แต่ยังเก็บลีดไว้ในชีต + เปิดประตูให้กลับมาเมื่อหาผู้กู้ร่วมได้
-            if awaiting == "co_borrower" and data.get("co_borrower_none"):
+            # ผู้กู้ร่วมช่วยไม่ได้จริง ก็ปิดจบเหมือนไม่มีผู้กู้ร่วม
+            # (รายได้รวมยังไม่ถึงเกณฑ์ / ผู้กู้ร่วมไม่มีรายได้ประจำ)
+            if awaiting == "co_borrower" and (data.get("co_borrower_none")
+                                              or data.get("co_borrower_weak")):
                 state["contact_refused"] = True   # กันโค้ดส่วนอื่นขอช่องทาง
+                state["below_threshold"] = True   # ชีตจะได้รู้ว่าไม่ต้องโทร
                 grade = self._finish(user_id, state, "-", calendar=False)
-                bubbles.append(NO_COBORROWER_MSG)
+                bubbles.append(NO_COBORROWER_MSG if data.get("co_borrower_none")
+                               else WEAK_COBORROWER_MSG)
                 bubbles.append(COBORROWER_INVITE_MSG)
                 return bubbles, grade
 
@@ -640,7 +699,46 @@ class BotEngine:
 
         # กันขอช่องทางติดต่อซ้อนกันในข้อความเดียว (เจอหน้างาน 13 ส.ค.)
         bubbles = self._dedupe_contact_ask(bubbles)
+        bubbles = self._dedupe_greeting(bubbles)
+        bubbles = self._dedupe_question(bubbles)
         return bubbles, grade
+
+    @staticmethod
+    def _dedupe_question(bubbles: list[str]) -> list[str]:
+        """ถามคำถามคัดกรองแล้ว ไม่ต้องมีบับเบิลอื่นที่ถามเรื่องเดียวกันซ้ำ
+
+        เจอ 15 ส.ค.: ทักทาย + 'วันนี้สนใจลงทุนคอนโดปล่อยเช่าไหมครับ'
+        + 'ลูกค้าสนใจลงทุนปล่อยเช่าหรืออยู่อาศัยเองครับ' = ถามซ้ำ 2 รอบติดกัน
+        """
+        if len(bubbles) < 2 or bubbles[-1] not in QUALIFY_QUESTIONS:
+            return bubbles
+        head, tail = bubbles[:-1], bubbles[-1]
+        kept = [b for b in head
+                if not (b.rstrip().endswith(("ไหมครับ", "ไหมคะ", "หรือครับ", "หรือคะ"))
+                        and len(b) <= 90)]
+        return kept + [tail]
+
+    @staticmethod
+    def _dedupe_greeting(bubbles: list[str]) -> list[str]:
+        """ทักทายได้ครั้งเดียวต่อ 1 ชุดข้อความ
+
+        เจอ 15 ส.ค.: ข้อความต้อนรับ + FAQ ทักทาย + คำถาม = ทัก 2 รอบติดกัน
+        ลูกค้าอ่านแล้วเหมือนบอทค้าง บับเบิลถัดมาถ้ามีเนื้อหาอื่นให้ตัดเฉพาะคำทักทาย
+        ถ้าไม่เหลืออะไรเลยก็ทิ้งทั้งบับเบิล
+        """
+        out: list[str] = []
+        greeted = False
+        for b in bubbles:
+            starts_greeting = b.lstrip().startswith("สวัสดี")
+            if starts_greeting and greeted:
+                trimmed = _strip_dup_greeting(b)
+                if trimmed != b and len(trimmed) >= 15:
+                    out.append(trimmed)
+                continue          # ทักทายล้วน -> ทิ้ง
+            if starts_greeting:
+                greeted = True
+            out.append(b)
+        return out
 
     @staticmethod
     def _dedupe_contact_ask(bubbles: list[str]) -> list[str]:
@@ -786,6 +884,14 @@ class BotEngine:
             # รายได้ไม่ชัด -> ข้าม Q3 (บูโร) ไม่ต้องถาม ไม่ทิ้งลีด
             data["income_unknown"] = True
             data.setdefault("debt", "-")
+        if field == "income" and _is_unbankable_job(msg):
+            # อาชีพ/ที่มารายได้ที่ธนาคารไม่รับรอง = ยื่นเดี่ยวไม่ผ่านแน่นอน
+            # ต้องเช็คก่อนดูตัวเลข เพราะ "แม่บ้าน สามีให้เดือนละ 30,000"
+            # ตัวเลขผ่านเกณฑ์ แต่ไม่ใช่รายได้ของตัวเอง ธนาคารไม่นับให้
+            # และต้องอยู่นอกเงื่อนไข income_unknown เพราะ "ว่างงาน" ตกอันนั้นไปแล้ว
+            data["low_income"] = True
+            data["income_unbankable"] = True
+            data.setdefault("income_baht", _parse_income(msg) or 0)
         if field == "income" and not data.get("income_unknown"):
             # รายได้ต่ำกว่าเกณฑ์ยื่นเดี่ยว -> ต้องหาผู้กู้ร่วมก่อน
             # ถามผิดลำดับ = เสียเวลาทั้งสองฝ่าย เพราะยื่นเดี่ยวไม่ผ่านอยู่แล้ว
@@ -793,11 +899,31 @@ class BotEngine:
             if n is not None and 1000 <= n < LOW_INCOME_BAHT:
                 data["income_baht"] = n
                 data["low_income"] = True
+            # อาชีพที่ธนาคารไม่นับเป็นรายได้ประจำ = ยื่นเดี่ยวไม่ผ่านแน่นอน
+            if _is_unbankable_job(msg) and (n is None or n < LOW_INCOME_BAHT):
+                data["income_baht"] = n or 0
+                data["low_income"] = True
+                data["income_unbankable"] = True
         if field == "co_borrower":
             low = msg.lower()
             if any(h in low for h in _NO_COB_HINTS):
                 data["co_borrower_none"] = True
                 self._add_signal(state, "รายได้ต่ำ+ไม่มีผู้กู้ร่วม")
+            else:
+                # มีผู้กู้ร่วม — แต่ "มี" ไม่พอ ต้องดูว่าช่วยได้จริงไหม
+                # เจอ 16 ส.ค.: รายได้ 17,000 ตอบว่า "แม่ ทำเกษตร" ระบบนับว่ามีผู้กู้ร่วม
+                # แล้วเดินหน้าต่อจนได้เกรด B = เซลเสียเวลาโทรหาเคสที่แบงก์ไม่อนุมัติ
+                cob_n = _parse_income(msg)
+                data["co_borrower_income"] = cob_n
+                weak_job = _is_unbankable_job(msg)
+                total = (data.get("income_baht") or 0) + (cob_n or 0)
+                data["income_total"] = total
+                if weak_job or total < LOW_INCOME_BAHT:
+                    data["co_borrower_weak"] = True
+                    self._add_signal(
+                        state,
+                        "ผู้กู้ร่วมรายได้ไม่ประจำ" if weak_job
+                        else f"รายได้รวม {total:,} ไม่ถึงเกณฑ์")
         state["data"] = data
         # ได้ข้อมูลใหม่ -> ส่งเข้าชีตทันที ไม่รอครบ 4 ข้อ (กันลีดหลุด)
         self._upsert_lead(state)
@@ -1150,7 +1276,10 @@ class BotEngine:
                     return STATUS_MSG if done else FALLBACK_MSG
             text = self._sanitize(raw)
             text = _strip_dup_greeting(text)
+            before = len(text)
             text = _limit_sentences(text)
+            if before > len(text):
+                print(f"[CLAUDE TRIMMED] {before} -> {len(text)} chars")
             if done and any(k in text for k in ["ขอเบอร์", "ID LINE", "เบอร์ติดต่อ"]):
                 # กัน AI เผลอขอข้อมูลที่ลูกค้าให้ไปแล้ว
                 return STATUS_MSG
