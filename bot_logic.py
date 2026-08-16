@@ -36,6 +36,7 @@ import queue
 import hashlib
 import threading
 import requests
+from datetime import datetime, timedelta, timezone
 from faq_data import (
     FAQ_DATABASE, WEC_SYSTEM_PROMPT, QUALIFY_QUESTIONS, QUALIFY_TRIGGERS,
     DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG, BRAND_NAME,
@@ -99,6 +100,156 @@ def _parse_income(msg: str) -> int | None:
     if mt:
         return int(mt.group(0))
     return None
+
+# ----------------------------------------------------------------------
+# Phase 5.9 — เกรดลีดตามกำลังกู้จริง (Gift เคาะ 16 ส.ค. 2026)
+# ----------------------------------------------------------------------
+#   A = กู้ได้เลย ไม่ต้องปิดภาระ
+#   B = ปิดหนี้ก่อน แล้วกู้ได้ 1 ห้อง  (= เคสบริดจ์ งานหลักของ WEC)
+#   C = DSR ไม่เกิน 100%
+#   D = DSR เกิน 100%  -> เก็บชีตปกติ แต่ "ไม่นัดโทร"
+#
+# ตัวเลขทั้งหมดยกมาจาก Calculate from Document/_engine/rules.json (bank-loan-rules v2.6)
+# ห้ามตั้งเกณฑ์ใหม่ที่นี่ — ถ้าเรตเปลี่ยน ให้แก้ที่ rules.json แล้วซิงก์มา
+UNIT_PRICE_BAHT = 2_300_000          # "ซื้อ 1 ห้อง" = ทรัพย์ถูกสุดในลิสต์ (KB)
+_LOAN_TERM_YEARS = "30"              # บอทไม่ถามอายุ -> สมมุติ 30 ปี
+_BANK_RATE_30Y = {"KTB": 5900, "GSB": 6303, "TTB": 6500}
+_BANK_DSR_TIERS = {
+    "KTB": [(0, 60), (30000, 70), (100000, 80)],
+    "GSB": [(0, 60), (30000, 70), (100000, 80)],
+    "TTB": [(30000, 70), (80000, 80)],   # รายได้ <30,000 TTB ไม่รับ
+}
+
+
+def _dsr_for(bank: str, income: int) -> int | None:
+    tiers = _BANK_DSR_TIERS.get(bank) or []
+    dsr = None
+    for min_income, pct in tiers:
+        if income >= min_income:
+            dsr = pct
+    return dsr
+
+
+def _capacity(income: int, debt_monthly: int) -> int:
+    """วงเงินกู้ประมาณการ (บาท) — เลือกแบงก์ที่ให้ดีที่สุด เหมือน engine
+    ใช้จัดลำดับลีดเท่านั้น **ห้ามบอกตัวเลขนี้กับลูกค้า** (กฎข้อมูลชั้น 2)
+    """
+    best = 0
+    for bank, rate in _BANK_RATE_30Y.items():
+        dsr = _dsr_for(bank, income)
+        if not dsr:
+            continue
+        room = income * dsr / 100 - max(0, debt_monthly)
+        if room <= 0:
+            continue
+        best = max(best, int(room / rate * 1_000_000))
+    return best
+
+
+# ----------------------------------------------------------------------
+# ถามรายได้ซ้ำแบบละมุน — ถามได้ "ครั้งเดียว" (Gift สั่ง 16 ส.ค. 2026)
+# ลูกค้าตอบ "พนักงานประจำครับ" เฉยๆ = ยังคำนวณวงเงิน/ตีเกรดไม่ได้
+# แต่ห้ามบี้ ถามซ้ำเกิน 1 ครั้งแล้วต้องปล่อย ไม่งั้นลูกค้าหนี
+# ----------------------------------------------------------------------
+# ถามได้สูงสุด 2 รอบ และ "ต้องบอกเหตุผลทุกรอบ" (Gift สั่ง 16 ส.ค. 2026)
+# — คนส่วนใหญ่ไม่ได้หวง แค่ลืมตอบ/ตอบไม่ครบ
+# — แต่ถ้าเขาปฏิเสธชัดเจน ต้องหยุดทันที ห้ามถามต่อ
+INCOME_REASK_MSGS = [
+    # รอบที่ 1 — เหตุผล: เอาไปเลือกห้องให้ตรงงบ
+    "ขอบคุณครับ รบกวนอีกนิดเดียวครับ รายได้ต่อเดือนประมาณเท่าไหร่ครับ "
+    "บอกเป็นช่วงก็ได้ครับ เช่น 3-4 หมื่น "
+    "ผมจะได้ประเมินให้ว่าห้องแบบไหนผ่อนสบาย และธนาคารไหนอนุมัติง่ายที่สุดสำหรับลูกค้าครับ",
+    # รอบที่ 2 — เหตุผลใหม่ + เปิดทางออกให้ ไม่บี้
+    "ขอโทษที่ถามซ้ำนะครับ ตัวเลขรายได้เป็นตัวเดียวที่ใช้คำนวณวงเงินกู้ได้ครับ "
+    "ถ้าไม่มีตัวเลข เดี๋ยวผมเสนอห้องไปแล้วไม่ตรงงบลูกค้า เสียเวลาทั้งสองฝ่ายครับ "
+    "บอกคร่าวๆ ก็พอครับ เช่น \"ประมาณ 3 หมื่น\" "
+    "หรือถ้าไม่สะดวกบอกในแชท เดี๋ยวให้ที่ปรึกษาคุยกับลูกค้าโดยตรงก็ได้ครับ",
+]
+INCOME_REASK_MAX = len(INCOME_REASK_MSGS)
+
+# ปฏิเสธชัดเจน -> หยุดถามทันที (กติกาเดียวกับตอนขอเบอร์)
+_INCOME_REFUSE_WORDS = (
+    "ไม่สะดวกบอก", "ขอไม่บอก", "ไม่อยากบอก", "ไม่ขอบอก", "ไม่บอก",
+    "เป็นความลับ", "ส่วนตัว", "ยังไม่บอก", "ไม่สะดวก",
+)
+
+
+def _refuses_income(msg: str) -> bool:
+    m = (msg or "").replace(" ", "")
+    return any(w.replace(" ", "") in m for w in _INCOME_REFUSE_WORDS)
+
+# ----------------------------------------------------------------------
+# เวลาโทรกลับ — Gift เคาะ 16 ส.ค. 2026 : คุยได้ 09:00-20:00 น.
+# เลยเวลา -> นัดวันถัดไป ห้ามสัญญาว่าจะโทรตอนดึก
+# ----------------------------------------------------------------------
+CALL_START_HOUR, CALL_START_MIN = 9, 30     # เริ่มโทรได้ 09:30
+CALL_END_HOUR = 20                          # หยุดโทร 20:00
+CALL_START_TXT = f"{CALL_START_HOUR:02d}.{CALL_START_MIN:02d}"
+CALL_WINDOW_TXT = f"{CALL_START_TXT}-{CALL_END_HOUR:02d}.00 น."
+_BKK_TZ = timezone(timedelta(hours=7))
+
+
+def _bkk_now():
+    """เวลาไทยเสมอ — Railway รันเป็น UTC ถ้าไม่ตรึงจะเพี้ยน 7 ชั่วโมง"""
+    return datetime.now(_BKK_TZ)
+
+
+def _call_window(now=None) -> str:
+    """'in' = โทรได้ · 'early' = ยังไม่ถึง 09:30 · 'late' = เลย 20:00"""
+    t = now or _bkk_now()
+    if (t.hour, t.minute) < (CALL_START_HOUR, CALL_START_MIN):
+        return "early"
+    if t.hour >= CALL_END_HOUR:
+        return "late"
+    return "in"
+
+
+# ยอดที่ "เกินจริงสำหรับค่างวดต่อเดือน" = น่าจะเป็นยอดคงเหลือ ไม่ใช่ค่างวด
+_DEBT_MAX_MONTHLY = 200_000
+_NO_DEBT_WORDS = ("ไม่มี", "ไม่ได้ผ่อน", "ปลอดหนี้", "เคลียร์แล้ว", "ปิดหมดแล้ว",
+                  "ไม่ติดอะไร", "ไม่เคยกู้", "ว่าง")
+
+
+def _parse_debt_monthly(msg: str) -> int | None:
+    """อ่าน 'ผ่อนรวมเดือนละเท่าไหร่' จากคำตอบข้อ 3
+    คืน 0 = ยืนยันว่าไม่มีภาระ · None = ตอบมาแต่ยังไม่รู้ยอด (เซลต้องถามตอนโทร)
+
+    ระวังกับดัก: ลูกค้ามักพิมพ์ 'ยอดคงเหลือ' ปนมากับค่างวด
+    เช่น "เหลืออยู่ 104,053 ผ่อน 8,125/เดือน" -> ต้องได้ 8,125 ไม่ใช่ 112,178
+    """
+    m = (msg or "").strip()
+    if not m:
+        return None
+    low = m.replace(" ", "").lower()
+    if any(w in low for w in _NO_DEBT_WORDS) and not re.search(r"\d", low):
+        return 0
+
+    def _ok(n: int) -> bool:
+        return 300 <= n <= _DEBT_MAX_MONTHLY
+
+    # 1) ตัวเลขที่ "ระบุว่าเป็นต่อเดือน" ชัดเจน -> เชื่อชุดนี้ก่อนเสมอ
+    monthly = [int(x.replace(",", "")) for x in re.findall(
+        r"(\d[\d,]{2,})\s*(?:บาท)?\s*(?:/|ต่อ\s*)?เดือน", m)]
+    monthly += [int(x.replace(",", "")) for x in re.findall(
+        r"เดือนละ\s*(\d[\d,]{2,})", m)]
+    monthly = [n for n in monthly if _ok(n)]
+    if monthly:
+        return sum(monthly)
+
+    # 2) ตัดตัวเลขที่เป็น "ยอดคงเหลือ/ยอดหนี้" ออกก่อน แล้วค่อยรวมที่เหลือ
+    cleaned = re.sub(r"(?:คงเหลือ|เหลือ(?:อยู่|ยุ)?|ยอดหนี้|ยอดคงค้าง|ราคา)\s*"
+                     r"(?:อีก)?\s*\d[\d,]*", " ", m)
+    nums = [int(x.replace(",", "")) for x in re.findall(r"\d[\d,]{2,}", cleaned)]
+    nums = [n for n in nums if _ok(n)]
+    if nums:
+        return sum(nums)
+
+    # 3) "ผ่อนรถ 8 พัน" / "เดือนละ 2 หมื่น"
+    n = _parse_income(m)
+    if n is not None and _ok(n):
+        return n
+    return None
+
 
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF⭐✅❌️]+"
@@ -387,7 +538,7 @@ _FEMALE_EXACT = {
         "และมีรายได้ต่อเดือนอยู่ที่ประมาณเท่าไหร่คะ",
     QUALIFY_QUESTIONS[2]:
         "ปัจจุบันมีผ่อนชำระอะไรในระบบบูโรบ้างไหมคะ "
-        "เช่นบ้าน รถยนต์ หรือบัตรเครดิตคะ",
+        "เช่นบ้าน รถยนต์ หรือบัตรเครดิต ถ้ามี รวมแล้วผ่อนเดือนละประมาณเท่าไหร่คะ",
     QUALIFY_QUESTIONS[3]:
         "ขอ ID LINE หรือเบอร์ไว้ส่งห้องที่ตรงงบ พร้อมตารางผ่อนให้ดูค่ะ "
         "คุยทางแชทก่อนได้เลย ไม่ต้องโทรก็ได้ค่ะ",
@@ -880,6 +1031,9 @@ class BotEngine:
     def _capture(self, state: dict, field: str, msg: str):
         data = state["data"]
         data[field] = msg
+        if field == "debt":
+            # ยอดผ่อนรวมต่อเดือน — ตัวตั้งของเกรด A/B/C/D และของ engine โหมด A
+            data["debt_baht"] = _parse_debt_monthly(msg)
         if field == "income" and self._is_disqualified(msg):
             # รายได้ไม่ชัด -> ข้าม Q3 (บูโร) ไม่ต้องถาม ไม่ทิ้งลีด
             data["income_unknown"] = True
@@ -892,6 +1046,24 @@ class BotEngine:
             data["low_income"] = True
             data["income_unbankable"] = True
             data.setdefault("income_baht", _parse_income(msg) or 0)
+        if (field == "income" and not data.get("income_unknown")
+                and not data.get("income_unbankable") and not data.get("cash")
+                and _parse_income(msg) is None):
+            # ตอบมาแล้วแต่ยังไม่มีตัวเลข -> ถามใหม่แบบละมุน ครั้งเดียวเท่านั้น
+            n_ask = state.get("income_reask", 0) + 1
+            state["income_reask"] = n_ask
+            note = (data.get("income_note", "") + " " + msg).strip()
+            if _refuses_income(msg):
+                # ปฏิเสธชัดเจน = หยุดทันที ไม่ว่าถามไปกี่รอบ
+                data["income"] = note
+                data["income_refused"] = True
+                self._add_signal(state, "ลูกค้าไม่สะดวกบอกรายได้")
+            elif n_ask <= INCOME_REASK_MAX:
+                data["income_note"] = note     # เก็บทุกคำตอบไว้ ไม่ทิ้ง
+                data.pop("income", None)       # ให้ _next_missing ถามอีกรอบ
+            else:
+                data["income"] = note
+                self._add_signal(state, "ไม่ให้ตัวเลขรายได้ (ถาม 3 รอบแล้ว)")
         if field == "income" and not data.get("income_unknown"):
             # รายได้ต่ำกว่าเกณฑ์ยื่นเดี่ยว -> ต้องหาผู้กู้ร่วมก่อน
             # ถามผิดลำดับ = เสียเวลาทั้งสองฝ่าย เพราะยื่นเดี่ยวไม่ผ่านอยู่แล้ว
@@ -943,6 +1115,10 @@ class BotEngine:
             if f == "contact" and state.get("contact_refused"):
                 continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
             if not data.get(f):
+                if f == "income":
+                    k = state.get("income_reask", 0)
+                    if 1 <= k <= INCOME_REASK_MAX:
+                        return f, INCOME_REASK_MSGS[k - 1]
                 return f, QUALIFY_QUESTIONS[FIELD_Q_INDEX[f]]
         return None, None
 
@@ -1181,9 +1357,30 @@ class BotEngine:
             grade = self._grade(data, state)
         state["score"] = self._intent_score(state)
         data["score"] = state["score"]
+        # เหตุผลของเกรด ให้เซลเห็นในชีต (คอลัมน์สัญญาณ) — ห้ามส่งให้ลูกค้า
+        if grade == "N":
+            self._add_signal(state, "⚠️ ยังไม่ได้ตัวเลขรายได้ — โทรถามก่อนตีเกรด")
+        cap_now, cap_clear = data.get("capacity_now"), data.get("capacity_clear")
+        if cap_now is not None:
+            d_baht = data.get("debt_baht")
+            if d_baht:
+                self._add_signal(state, f"ผ่อน/เดือน {d_baht:,}")
+            elif d_baht == 0:
+                self._add_signal(state, "ไม่มีภาระผ่อน")
+            else:
+                # ลูกค้าบอกว่ามีหนี้แต่ไม่ให้ยอด -> คิดวงเงินแบบไม่มีภาระไว้ก่อน
+                # (ห้ามฝังลีดดีเพราะข้อมูลขาด) แต่ต้องติดธงให้เซลถามตอนโทร
+                self._add_signal(state, "⚠️ ยังไม่ได้ยอดผ่อน/เดือน — เกรดยังไม่ยืนยัน")
+            self._add_signal(state, f"วงเงินตอนนี้ {cap_now/1e6:.1f}M")
+            if grade == "B":
+                self._add_signal(state, f"ปิดภาระแล้วได้ {cap_clear/1e6:.1f}M = เคสบริดจ์")
         state["done"] = True
         state["awaiting"] = None
         data["grade"] = grade
+        if grade == "D":
+            # DSR เกิน 100% -> ลงชีตครบเหมือนเดิม แต่ไม่จองคิวโทร
+            # (Gift เคาะ 16 ส.ค. 2026) ลีดไม่หาย เซลหยิบเองได้จากชีต
+            calendar = False
         fb_name = self._get_fb_name(user_id, state.get("platform", "facebook"))
         state["fb_name"] = fb_name
         # ส่งชุดเต็ม (แถวสมบูรณ์ + สร้างนัดในปฏิทิน) — schema เดิม ไม่แตะ
@@ -1199,26 +1396,44 @@ class BotEngine:
         return grade
 
     def _grade(self, data: dict, state: dict | None = None) -> str:
-        # ซื้อเงินสด "อย่างเดียว" ไม่ใช่เกรด A — พิมพ์คำเดียว ต้นทุนศูนย์
-        # ต้องพ่วงสัญญาณที่ปลอมแล้วเจ็บ (เช่นยอมนัดดูห้อง) ถึงจะขึ้น A
-        if state is not None:
-            sc = self._intent_score(state)
-            if sc >= 6:
+        """เกรดลีดตามกำลังกู้จริง (Gift เคาะ 16 ส.ค. 2026)
+
+        A = กู้ได้เลย ไม่ต้องปิดภาระ
+        B = ปิดหนี้ก่อน แล้วกู้ได้ 1 ห้อง  (เคสบริดจ์ = งานหลักของ WEC)
+        C = DSR ไม่เกิน 100%
+        D = DSR เกิน 100%
+        อ่านไม่ออก (ไม่รู้รายได้) -> C ไว้ก่อน ให้คนเช็ค ไม่ทิ้งลีด
+        """
+        income = (data.get("income_total") or data.get("income_baht")
+                  or _parse_income(str(data.get("income", ""))))
+        if not income or data.get("income_unknown"):
+            # ไม่มีตัวเลขรายได้ = คำนวณวงเงินไม่ได้
+            # สายซื้อเงินสดที่จริงจังมาก (ยอมนัดดูห้อง ฯลฯ) ยังขึ้น A ได้เหมือนเดิม
+            if state is not None and self._intent_score(state) >= 6:
                 return "A"
-            if sc <= 2:
-                return "C"
-        income_ans = data.get("income", "").lower()
-        high_income = any(x in income_ans for x in
-                          ["แสน", "100,", "150,", "200,", "100000", "150000", "200000"])
-        med_income = any(x in income_ans for x in
-                         ["3", "4", "5", "6", "7", "8", "9",
-                          "สาม", "สี่", "ห้า", "หก", "เจ็ด", "แปด", "เก้า",
-                          "30,", "40,", "50,", "60,", "70,", "80,", "90,"])
-        if high_income:
+            # ที่เหลือ = "N ข้อมูลไม่พอ" ไม่ใช่ C (Gift เคาะ 16 ส.ค. 2026)
+            # C แปลว่า "คำนวณแล้วยังไม่ไหว" · N แปลว่า "ยังคำนวณไม่ได้ ต้องโทรถาม"
+            # ห้ามปนกัน ไม่งั้นลีดดีที่แค่ไม่บอกตัวเลขจะจมไปกับเคสที่ไปต่อไม่ได้
+            return "N"
+
+        debt = data.get("debt_baht")
+        if debt is None:
+            debt = _parse_debt_monthly(str(data.get("debt", "")))
+        debt = 0 if debt is None else max(0, int(debt))
+
+        cap_now = _capacity(income, debt)
+        cap_clear = _capacity(income, 0)
+        # เก็บไว้ให้เซล/ชีตเห็นเหตุผลของเกรด (ห้ามส่งให้ลูกค้า)
+        data["capacity_now"] = cap_now
+        data["capacity_clear"] = cap_clear
+
+        if cap_now >= UNIT_PRICE_BAHT:
             return "A"
-        elif med_income:
-            return "B"
-        return "C"
+        if cap_clear >= UNIT_PRICE_BAHT:
+            return "B"          # ปิดภาระแล้วไปได้ = ลีดของทีมบริดจ์
+        if debt <= income:      # DSR <= 100%
+            return "C"
+        return "D"
 
     def _grade_reply(self, grade: str, contact: str = "") -> str:
         time_keywords = [
@@ -1228,10 +1443,33 @@ class BotEngine:
         ]
         if any(kw in contact for kw in time_keywords):
             return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับตามเวลาที่นัดหมายครับ"
+        win = _call_window()
+        if win == "late":
+            # เลย 20:00 แล้ว — ห้ามสัญญาว่าจะโทรคืนนี้ (Gift เคาะ 16 ส.ค. 2026)
+            if grade in ("A", "B"):
+                return ("ขอบคุณครับ ตอนนี้เลยเวลาทำการแล้ว "
+                        f"ที่ปรึกษาจะโทรกลับพรุ่งนี้ตั้งแต่ {CALL_START_TXT} น. ครับ")
+            if grade == "D":
+                return ("ขอบคุณที่ให้ข้อมูลครับ ทีมงานขอนำไปดูรายละเอียดก่อน "
+                        "แล้วจะติดต่อกลับเมื่อมีทางที่เหมาะกับลูกค้าครับ")
+            return ("ขอบคุณครับ ทีมงานจะติดต่อกลับหาลูกค้าในเวลาทำการ "
+                    f"({CALL_WINDOW_TXT}) ครับ")
+        if win == "early" and grade in ("A", "B"):
+            return ("ขอบคุณครับ ที่ปรึกษาจะโทรกลับหาลูกค้าตั้งแต่ "
+                    f"{CALL_START_TXT} น. เป็นต้นไปครับ")
         if grade == "A":
             return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับหาลูกค้าภายใน 30 นาทีครับ"
         elif grade == "B":
-            return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับภายใน 1-2 ชั่วโมง (09:00-18:00 น.) ครับ"
+            return ("ขอบคุณครับ ที่ปรึกษาจะโทรกลับภายใน 1-2 ชั่วโมง "
+                    f"({CALL_WINDOW_TXT}) ครับ")
+        elif grade == "N":
+            # ข้อมูลไม่พอ — ยังต้องโทรไปเก็บ ให้ตอบเหมือนเกรด C
+            return "ขอบคุณครับ ทีมงานจะติดต่อกลับหาลูกค้าในเร็วๆ นี้ครับ"
+        elif grade == "D":
+            # DSR เกิน 100% — ยังไม่นัดโทร (Gift เคาะ 16 ส.ค. 2026)
+            # จบให้สวย ไม่ปิดประตู ลีดยังอยู่ในชีตครบ
+            return ("ขอบคุณที่ให้ข้อมูลครับ ทีมงานขอนำไปดูรายละเอียดก่อน "
+                    "แล้วจะติดต่อกลับเมื่อมีทางที่เหมาะกับลูกค้าครับ")
         return "ขอบคุณครับ ทีมงานจะติดต่อกลับหาลูกค้าในเร็วๆ นี้ครับ"
 
     # ==================================================================
