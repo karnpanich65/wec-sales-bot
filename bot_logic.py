@@ -147,6 +147,44 @@ def _capacity(income: int, debt_monthly: int) -> int:
 
 
 # ----------------------------------------------------------------------
+# ผู้เช่า (Gift สั่ง 16 ส.ค. 2026) — "อยากเช่า/หาห้องเช่า" ≠ ลูกค้าลงทุน
+# คนกลุ่มนี้ไม่ต้องถามรายได้/บูโรเลย ผิดกลุ่ม เสียเวลาทั้งสองฝ่าย
+# เก็บ 4 อย่างแล้วโยนให้ทีมห้องเช่า: ทำเล · งบค่าเช่า · แพลนเข้าอยู่ · เบอร์
+# ลงชีตคนละแท็บ: RENTER_TAB
+# ----------------------------------------------------------------------
+RENTER_TAB = "หาห้องเช่า"
+RENTER_FIELDS = ["rent_zone", "rent_budget", "move_in", "rent_contact"]
+RENTER_Q = {
+    "rent_zone": "ลูกค้าอยากได้ทำเลไหนครับ หรือใกล้อะไรเป็นหลักครับ เช่น ใกล้ที่ทำงาน หรือใกล้รถไฟฟ้าสถานีไหนครับ",
+    "rent_budget": "งบค่าเช่าต่อเดือนประมาณเท่าไหร่ครับ",
+    "move_in": "แพลนเข้าอยู่ประมาณช่วงไหนครับ",
+    "rent_contact": "ขอเบอร์หรือ ID LINE ไว้ให้ทีมดูแลห้องเช่าติดต่อกลับพร้อมห้องที่ตรงงบครับ",
+}
+RENTER_ACK_MSG = (
+    "เข้าใจแล้วครับ ลูกค้ากำลังหาห้องเช่าอยู่ใช่ไหมครับ "
+    "เดี๋ยวผมส่งต่อให้ทีมที่ดูแลห้องเช่าโดยตรงครับ"
+)
+RENTER_DONE_MSG = (
+    "ขอบคุณครับ เดี๋ยวทีมดูแลห้องเช่าจะติดต่อกลับพร้อมห้องที่ตรงกับที่ลูกค้าบอกไว้ครับ"
+)
+
+# "ปล่อยเช่า/ให้เช่า" = นักลงทุน ไม่ใช่ผู้เช่า -> ต้องกันก่อนเสมอ
+_INVESTOR_RENT_WORDS = ("ปล่อยเช่า", "ให้เช่า", "ลงทุน", "ซื้อคอนโด", "ซื้อห้อง",
+                        "ปล่อยให้เช่า", "เก็บค่าเช่า")
+_RENTER_WORDS = ("อยากเช่า", "หาห้องเช่า", "หาเช่า", "ต้องการเช่า", "ขอเช่า",
+                 "เช่าอยู่เอง", "อยากได้ห้องเช่า", "มีห้องเช่าไหม",
+                 "มีห้องให้เช่าไหม", "หาห้องพัก", "เช่าห้อง", "จะเช่า",
+                 "อยากเช่าห้อง", "สนใจเช่า")
+
+
+def _is_renter(msg: str) -> bool:
+    m = (msg or "").replace(" ", "")
+    if any(w in m for w in _INVESTOR_RENT_WORDS):
+        return False
+    return any(w.replace(" ", "") in m for w in _RENTER_WORDS)
+
+
+# ----------------------------------------------------------------------
 # ถามรายได้ซ้ำแบบละมุน — ถามได้ "ครั้งเดียว" (Gift สั่ง 16 ส.ค. 2026)
 # ลูกค้าตอบ "พนักงานประจำครับ" เฉยๆ = ยังคำนวณวงเงิน/ตีเกรดไม่ได้
 # แต่ห้ามบี้ ถามซ้ำเกิน 1 ครั้งแล้วต้องปล่อย ไม่งั้นลูกค้าหนี
@@ -763,6 +801,37 @@ class BotEngine:
             bubbles.append(CASH_INVITE_MSG)
             return bubbles, None
 
+        # ข.2) ผู้เช่า -> ออกจากสายลงทุนทันที ห้ามถามรายได้/บูโร (Gift 16 ส.ค. 2026)
+        if not state.get("done") and not state.get("renter") and _is_renter(msg):
+            state["renter"] = True
+            data["objective"] = "หาห้องเช่า (ผู้เช่า ไม่ใช่นักลงทุน)"
+            data.setdefault("income", "-")
+            data.setdefault("debt", "-")
+            state["sheet_tab"] = RENTER_TAB
+            state["awaiting"] = RENTER_FIELDS[0]
+            self._add_signal(state, "ผู้เช่า — ส่งต่อทีมห้องเช่า")
+            self._upsert_lead(state)
+            bubbles.append(RENTER_ACK_MSG)
+            bubbles.append(RENTER_Q[RENTER_FIELDS[0]])
+            return bubbles, None
+
+        # ข.3) อยู่ในสายผู้เช่าแล้ว -> เดินเก็บ 4 ข้อ ทีละข้อ ไม่เร่ง
+        if (state.get("renter") and not state.get("done")
+                and awaiting in RENTER_FIELDS and not self._is_question(msg)):
+            data[awaiting] = msg
+            state["data"] = data
+            i = RENTER_FIELDS.index(awaiting)
+            if i + 1 < len(RENTER_FIELDS):
+                nxt = RENTER_FIELDS[i + 1]
+                state["awaiting"] = nxt
+                self._upsert_lead(state)
+                bubbles.append(RENTER_Q[nxt])
+                return bubbles, None
+            state["awaiting"] = None
+            grade = self._finish(user_id, state, msg, calendar=False)
+            bubbles.append(RENTER_DONE_MSG)
+            return bubbles, grade
+
         # ค) ถามข้อมูลชั้น 2 (ราคาสุทธิ/ส่วนลด/ห้องที่เหลือ) -> บอทไม่ตอบเอง
         #    กันไว้ตรงนี้ = ไม่ต้องจับผิดว่าใครเป็นคู่แข่งเลย
         if self._is_tier2(msg):
@@ -1351,13 +1420,21 @@ class BotEngine:
         ไม่งั้นจะตกอย่างใดอย่างหนึ่งเสมอ (เคยตก lead_sent + fb_name มาแล้ว)
         """
         data = state["data"]
-        if data.get("income_unknown") or data.get("co_borrower_none"):
+        if state.get("renter"):
+            grade = "R"           # ผู้เช่า — คนละกลุ่ม ไม่เข้าเกณฑ์ A/B/C/D
+        elif data.get("income_unknown") or data.get("co_borrower_none"):
             grade = "C"           # ยื่นเดี่ยวไม่ผ่าน = ยังไม่ใช่คิวโทรด่วน
         else:
             grade = self._grade(data, state)
         state["score"] = self._intent_score(state)
         data["score"] = state["score"]
         # เหตุผลของเกรด ให้เซลเห็นในชีต (คอลัมน์สัญญาณ) — ห้ามส่งให้ลูกค้า
+        if grade == "R":
+            # ผู้เช่า — ยัดรายละเอียดลงช่องที่ชีตมีอยู่แล้ว ไม่ต้องแก้ Apps Script
+            data["income"] = f"งบค่าเช่า {self._tidy(data.get('rent_budget', '-'))}"
+            data["debt"] = (f"ทำเล {self._tidy(data.get('rent_zone', '-'))} · "
+                            f"เข้าอยู่ {self._tidy(data.get('move_in', '-'))}")
+            self._add_signal(state, "ผู้เช่า (ไม่ใช่นักลงทุน) — ทีมห้องเช่ารับช่วง")
         if grade == "N":
             self._add_signal(state, "⚠️ ยังไม่ได้ตัวเลขรายได้ — โทรถามก่อนตีเกรด")
         cap_now, cap_clear = data.get("capacity_now"), data.get("capacity_clear")
@@ -1593,7 +1670,7 @@ class BotEngine:
             "objective":     data.get("objective", ""),
             "income":        data.get("income", ""),
             "debt":          data.get("debt", ""),
-            "contact":       data.get("contact", ""),
+            "contact":       (data.get("rent_contact") or data.get("contact", "")),
             "grade":         grade,
             "ad_id":         referral.get("ad_id", ""),
             "ref":           referral.get("ref", ""),
