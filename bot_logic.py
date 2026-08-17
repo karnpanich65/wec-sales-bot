@@ -869,7 +869,8 @@ class BotEngine:
         """
         referral = referral or {}
         skey = f"{page_id}:{user_id}" if page_id else user_id
-        state, is_new = self._resolve_state(user_id, platform, referral, skey)
+        state, is_new = self._resolve_state(user_id, platform, referral,
+                                            skey, page_id)
 
         gap = _now() - state.get("last_seen", _now())
         bucket = self._gap_bucket(gap) if not is_new else "new"
@@ -1215,13 +1216,19 @@ class BotEngine:
 
     def _resolve_state(self, user_id: str, platform: str,
                        referral: dict,
-                       skey: str = "") -> tuple[dict, bool]:
+                       skey: str = "",
+                       page_id: str = "") -> tuple[dict, bool]:
         skey = skey or user_id
         if skey in _lead_states:
             return _lead_states[skey], False
 
         # RAM ไม่มี — เซิร์ฟเวอร์เพิ่ง restart หรือเป็นลูกค้าใหม่จริง
-        loaded = self._load_session(user_id, (referral or {}).get("_page_id", ""))
+        # 17 ส.ค. 2026 — บั๊กจริง: ของเดิมส่ง page_id จาก referral._page_id เท่านั้น
+        # ข้อความปกติ (ไม่ได้มาจากแอด) ไม่มีคีย์นั้น -> ส่ง "" ไปหา session
+        # แต่ตอนบันทึกใช้ page_id จริง -> คีย์ไม่ตรง -> หาไม่เจอ -> นึกว่าลูกค้าใหม่
+        # ผลคือ "ทุกครั้งที่ deploy บอททักทายใหม่ + ถามข้อ 1 ซ้ำ" ทั้งที่คุยไปครึ่งทางแล้ว
+        _pid = page_id or (referral or {}).get("_page_id", "") or ""
+        loaded = self._load_session(user_id, _pid)
         if loaded:
             loaded.setdefault("data", {})
             loaded.setdefault("awaiting", None)
