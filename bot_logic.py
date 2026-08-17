@@ -1,5 +1,13 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r4 — 2026-08-18)
 # Core engine: FAQ -> Qualification (Q1-Q4) -> Grading (A/B/C) -> Claude AI fallback
+#
+# v67 r4 (18 ส.ค. 2026 — อ่าน Chat_Log ทุกเพจแล้วแก้รวดเดียว):
+#   1) ถามชื่อหลังได้เบอร์/LINE ถ้ายังไม่มีชื่อ (ถามครั้งเดียว) — ชื่อจากแชท
+#      อัปเดตแถวเดิมผ่าน upsert (no_calendar) · พิมพ์ชื่อมาพร้อมเบอร์ = ไม่ถามซ้ำ
+#   2) เบอร์มีคำห้อยท้าย ("0863692660ค่ะ") -> เก็บเฉพาะตัวเลข ไม่หลุดไปช่อง LINE
+#      (เจอจริง 4/141 ลีด รวมเกรด A)
+#   3) กันประโยคภาระผ่อน/จำนวนเงินถูกเก็บเป็นช่องทางติดต่อ (เจอจริง 8/141)
+#   4) กัน race: ชื่อจากแชทห้ามโดน background Graph thread ทับ
 #
 # Phase 3.x (เดิม) ดูประวัติท้ายไฟล์
 #
@@ -866,6 +874,91 @@ def _now() -> int:
     return int(time.time())
 
 
+
+# ======================================================================
+# ถามชื่อหลังได้ช่องทาง (Gift เคาะ 18 ส.ค. 2026)
+# - BAUPA ยังติดรีวิว Meta -> ชื่อที่ลูกค้าพิมพ์เองดีกว่าชื่อโปรไฟล์อยู่แล้ว
+# - มีชื่อมากับข้อความช่องทาง ("สมชาย 081...") -> ไม่ถามซ้ำ (Gift สั่งชัด)
+# - ถามหลังปิดเคสเท่านั้น (แถวลงชีตไปแล้ว) -> ลูกค้าไม่ตอบ ลีดก็ไม่หล่น
+# - คำตอบชื่อ -> ส่งอัปเดตแถวเดิม (upsert ตาม PSID เขียนทับเฉพาะช่องไม่ว่าง
+#   ฝั่ง Apps Script ยืนยันแล้ว) พร้อม no_calendar=1 กันนัดซ้ำ
+# ======================================================================
+ASK_NAME_MSG = "ขอชื่อที่ให้ที่ปรึกษาเรียกด้วยครับ จะได้ติดต่อถูกคนครับ 🙏"
+
+_NAME_PARTICLES = ("ครับผม", "ครับ", "ค่ะ", "คะ", "ค่า", "คับ", "จ้า", "จ้ะ",
+                   "นะ", "งับ", "ฮะ", "จร้า", "ชื่อเล่น", "ชื่อ", "ผม", "ดิฉัน",
+                   "ฉัน", "เรา", "เรียกว่า", "เรียก", "ว่า", "คุณ", "นาย",
+                   "นาง", "นางสาว")
+_NAME_BAD_WORDS = ("เบอร์", "โทร", "ไลน์", "line", "id", "ไอดี", "ทำไม", "อะไร",
+                   "ไหม", "มั้ย", "เท่าไหร่", "กี่", " okay", "ok", "โอเค",
+                   "ได้", "ไม่", "ขอบคุณ", "สวัสดี", "สนใจ", "ห้อง", "คอนโด",
+                   "ผ่อน", "บาท", "รายได้", "วงเงิน", "รอ", "เช้า", "บ่าย",
+                   "เย็น", "พรุ่งนี้", "เดี๋ยว", "สะดวก", "ยังไง", "?")
+
+
+def _clean_name_token(t: str) -> str:
+    t = t.strip(" .,!()\"'“”")
+    for p in ("คุณ", "นาย", "นางสาว", "นาง"):
+        if t.startswith(p) and len(t) > len(p) + 1:
+            t = t[len(p):]
+    for _ in range(2):  # "กิ๊กนะครับ" ตัดได้สองชั้น
+        for p in ("ครับผม", "ครับ", "ค่ะ", "คะ", "ค่า", "คับ", "จ้า", "จ้ะ",
+                  "นะ", "งับ", "ฮะ", "ฮับ", "ค๊ะ"):
+            if t.endswith(p) and len(t) > len(p) + 1:
+                t = t[: -len(p)]
+                break
+    return t.strip()
+
+
+def _looks_like_name(t: str) -> bool:
+    """เข้มไว้ก่อน — เก็บชื่อผิดแย่กว่าไม่เก็บ (เซลเรียกชื่อผิด = เสียฟอร์ม)"""
+    if not t or not (2 <= len(t) <= 25):
+        return False
+    if any(ch.isdigit() for ch in t):
+        return False
+    low = t.lower()
+    if any(w in low for w in _NAME_BAD_WORDS):
+        return False
+    return bool(re.fullmatch(r"[A-Za-zก-๙์ิีึืุูัํ็่้๊๋\s]{2,25}", t))
+
+
+def _name_from_contact_msg(msg: str) -> str:
+    """หาชื่อที่พิมพ์มาพร้อมช่องทาง เช่น "สมชาย 0812345678" / "081... ชื่อกิ๊กครับ"
+    เจอชัดเจนเท่านั้นถึงเอา — เดาไม่ได้ให้คืนค่าว่าง (แล้วค่อยถามเอา)"""
+    m = str(msg)
+    # แบบบอกตรงๆ: "ชื่อ X" / "ผมชื่อ X" / "เรียกว่า X"
+    g = re.search(r"ชื่อ(?:เล่น)?\s*(?:ว่า)?\s*([A-Za-zก-๙][A-Za-zก-๙์ิีึืุูัํ็่้๊๋]{1,24})", m)
+    if g:
+        t = _clean_name_token(g.group(1))
+        if _looks_like_name(t):
+            return t
+    # แบบพิมพ์ปนมา: ตัดเบอร์/ไอดีทิ้ง เหลืออะไรที่เป็นชื่อล้วนๆ ไหม
+    rest = re.sub(r"[0-9+\-\s]{6,}", " ", m)          # ตัดกลุ่มตัวเลขเบอร์
+    rest = re.sub(r"@?[A-Za-z0-9._-]{4,}", " ", rest)   # ตัด token แบบไอดีไลน์
+    toks = [_clean_name_token(w) for w in rest.split()]
+    toks = [w for w in toks if w and w not in _NAME_PARTICLES]
+    if len(toks) == 1 and _looks_like_name(toks[0]):
+        return toks[0]
+    return ""
+
+
+def _name_from_reply(msg: str) -> str:
+    """คำตอบของคำถามขอชื่อ เช่น "กิ๊กครับ" / "ชื่อสมชาย" / "Mild" """
+    m = str(msg).strip()
+    if len(m) > 40 or "?" in m:
+        return ""
+    g = re.search(r"ชื่อ(?:เล่น)?\s*(?:ว่า)?\s*(.+)$", m)
+    if g:
+        m = g.group(1)
+    toks = [_clean_name_token(w) for w in m.split()]
+    toks = [w for w in toks if w and w not in _NAME_PARTICLES]
+    if 1 <= len(toks) <= 2:
+        cand = " ".join(toks)
+        if _looks_like_name(cand):
+            return cand
+    return ""
+
+
 class BotEngine:
     # ==================================================================
     # Entry point
@@ -950,6 +1043,16 @@ class BotEngine:
         awaiting = state.get("awaiting")
         bubbles: list[str] = []
         grade = None
+
+        # ---- 0) คำตอบของคำถามขอชื่อ (ถามครั้งเดียว ไม่วนซ้ำ) ----------
+        # ไม่ใช่ชื่อ -> ปล่อยไหลไปตอบตามปกติ ห้ามถามชื่อซ้ำเด็ดขาด
+        if state.pop("awaiting_name", False):
+            _nm = _name_from_reply(msg)
+            if _nm:
+                state["chat_name"] = _nm
+                state["fb_name"] = _nm
+                self._send_name_update(user_id, state)
+                return [f"ขอบคุณครับ คุณ{_nm} 🙏 เดี๋ยวที่ปรึกษาติดต่อไปครับ"], None
 
         # ---- 1) เปิดหัวข้อความตามระยะที่หายไป -------------------------
         # ข้อความแรกที่เป็นคำถามจริง -> ไม่ต้องทักทาย ตอบคำถามเขาเลย
@@ -1116,8 +1219,16 @@ class BotEngine:
             state["awaiting"] = None
             # ตอบครบทุกข้อพอดี -> ปิดการขาย
             if awaiting == "contact":
+                _nm = _name_from_contact_msg(msg)
+                if _nm and not state.get("chat_name"):
+                    state["chat_name"] = _nm
+                    state["fb_name"] = _nm   # ชื่อจากแชทชนะชื่อโปรไฟล์
                 grade = self._finish(user_id, state, msg)
                 bubbles.append(self._grade_reply(grade, msg))
+                if not state.get("chat_name") and not state.get("name_asked"):
+                    state["name_asked"] = True
+                    state["awaiting_name"] = True
+                    bubbles.append(ASK_NAME_MSG)
                 return bubbles, grade
             # ไม่มีผู้กู้ร่วม -> จบบทสนทนาตรงนี้เลย ไม่ขอเบอร์ ไม่ถามบูโรต่อ
             # ยื่นเดี่ยวไม่ผ่านอยู่แล้ว เก็บเบอร์ไป = เสียเวลาทั้งสองฝ่าย
@@ -1193,6 +1304,11 @@ class BotEngine:
                     elif data.get("objective") or data.get("income"):
                         grade = self._finish(user_id, state, data.get("contact", ""))
                         bubbles.append(DONE_MSG)
+                        if (data.get("contact") and not state.get("chat_name")
+                                and not state.get("name_asked")):
+                            state["name_asked"] = True
+                            state["awaiting_name"] = True
+                            bubbles.append(ASK_NAME_MSG)
 
         # กันเคสไม่มีอะไรจะพูดเลย
         if not bubbles:
@@ -1392,6 +1508,16 @@ class BotEngine:
     def _capture(self, state: dict, field: str, msg: str):
         data = state["data"]
         data[field] = msg
+        if field == "contact":
+            # แยกเบอร์ออกจากคำห้อยท้าย ("0863692660ค่ะ" / "081-234-5678 ครับ")
+            # ไม่งั้นฝั่งชีตตีเป็น LINE id -> เซลเห็น "ทักไลน์" ทั้งที่โทรได้
+            ph = re.search(r"(?<!\d)0\d{8,9}(?!\d)",
+                           re.sub(r"[\-\s\.]", "", msg))
+            if ph:
+                data[field] = ph.group(0)
+                extra = re.sub(r"[\d\-\s\.]+", " ", msg).strip()
+                if extra and ("ไลน์" in extra or "line" in extra.lower()):
+                    self._add_signal(state, "ลูกค้าบอกไลน์ = เบอร์เดียวกัน")
         if field == "debt":
             # ยอดผ่อนรวมต่อเดือน — ตัวตั้งของเกรด A/B/C/D และของ engine โหมด A
             data["debt_baht"] = _parse_debt_monthly(msg)
@@ -1683,8 +1809,16 @@ class BotEngine:
             return False
         if field == "contact":
             low = m.lower()
-            # 1) เบอร์โทร
-            if sum(c.isdigit() for c in m) >= 6:
+            # 1) เบอร์โทร — ต้องหน้าตาเป็นเบอร์จริง ไม่ใช่แค่ "มีตัวเลขเยอะ"
+            #    เจอจริง 17 ส.ค.: "ผ่อนแล้วเดือนละประมาณ 25000-30000 คับ" (10 หลัก)
+            #    ผ่านเกณฑ์เดิม -> ไปโผล่ช่อง LINE ในไฟล์เซล
+            if re.search(r"(?<!\d)0\d{8,9}(?!\d)", re.sub(r"[\-\s\.]", "", m)):
+                return True
+            _runs = re.findall(r"\d+", m)
+            if (_runs and max(len(r) for r in _runs) >= 8
+                    and not any(w in low for w in ("ผ่อน", "บาท", "วงเงิน",
+                                                   "รายได้", "เดือนละ", "หมื่น",
+                                                   "แสน", "ล้าน"))):
                 return True
             # 2) บอกมาตรงๆ ว่าเป็นไลน์ / ไอดี
             if any(h in low for h in _CONTACT_HINTS):
@@ -1693,6 +1827,7 @@ class BotEngine:
             #    คนไทยส่วนใหญ่พิมพ์แค่ไอดีมาเฉยๆ ไม่มีคำว่า line และไม่มีตัวเลข
             #    ของเดิมตกเคสนี้ทั้งหมด -> บอทถามซ้ำ (เจอหน้างาน 14 ส.ค. 2026)
             if (" " not in m and _LINE_ID_RE.match(m)
+                    and re.search(r"[A-Za-z]", m)
                     and low.lstrip("@") not in _NOT_ID_WORDS):
                 return True
             return False
@@ -1967,10 +2102,11 @@ class BotEngine:
         def _work():
             try:
                 nm = self._get_fb_name(user_id, platform, page_id)
-                if nm:
+                if nm and not state.get("chat_name"):
+                    # ชื่อที่ลูกค้าพิมพ์เองสำคัญกว่าชื่อโปรไฟล์ -> ห้ามทับ
                     state["fb_name"] = nm
                     print(f"[NAME] {user_id[:8]}... = {nm}")
-                elif state.get("fb_name_tries", 0) >= 2:
+                elif state.get("fb_name_tries", 0) >= 2 and not state.get("fb_name"):
                     # ครบ 2 ครั้งแล้วยังไม่ได้ = บอกให้รู้ ไม่ปล่อยว่างเงียบ
                     state["fb_name"] = "(ยังไม่ได้ชื่อ)"
                     print(f"[NAME MISS] {user_id[:8]}... ยิงครบ 2 ครั้งแล้วไม่ได้ชื่อ "
@@ -2064,6 +2200,25 @@ class BotEngine:
             "cash": "ใช่" if data.get("cash") else "",
             "no_call": "ไม่สะดวกให้โทร" if state.get("contact_refused") else "",
         })
+
+    def _send_name_update(self, user_id: str, state: dict):
+        """อัปเดตชื่อลงแถวเดิมหลังลูกค้าตอบชื่อ (เคสปิดไปแล้ว)
+        ปลอดภัยเพราะ p4UpsertLead หาแถวตาม PSID + เขียนทับเฉพาะช่องที่มีค่า
+        และ no_calendar=1 -> ไม่สร้างนัดโทรซ้ำ"""
+        try:
+            data = state.get("data", {})
+            self._send_to_sheets(user_id, data, data.get("grade", ""),
+                                 state.get("fb_name", ""),
+                                 state.get("referral", {}),
+                                 state.get("platform", "facebook"),
+                                 state.get("page_id", ""),
+                                 state.get("sheet_tab", ""),
+                                 signals=state.get("signals", []),
+                                 contact_refused=state.get("contact_refused", False),
+                                 calendar=False)
+            print(f"[NAME CHAT] {user_id[:8]}... = {state.get('fb_name', '')} (จากแชท)")
+        except Exception as e:
+            print(f"[NAME UPDATE ERROR] {e}")
 
     def _send_to_sheets(self, user_id: str, data: dict, grade: str,
                         fb_name: str = "", referral: dict | None = None,
