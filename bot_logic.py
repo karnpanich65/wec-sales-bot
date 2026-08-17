@@ -924,6 +924,13 @@ class BotEngine:
         if referral:
             state["referral"] = referral
 
+        # 17 ส.ค. 2026 — ดึงชื่อลูกค้าตั้งแต่ข้อความแรก ไม่รอปิดเคส
+        # บั๊กเดิม: _get_fb_name ถูกเรียกที่เดียวคือใน _finish() -> ลีดที่คุยค้าง
+        # / ไม่ให้เบอร์ / หายกลางทาง มีแถวในชีตแต่ "ช่องชื่อว่างตลอดไป"
+        # ตรวจ CRM จริง 17 ส.ค. 2026: 145 ลีด มีชื่อแค่ 5 แถว (3%)
+        # ยิงใน background thread เพราะ Graph API timeout 5 วิ ห้ามบล็อกการตอบลูกค้า
+        self._ensure_fb_name(user_id, state)
+
         bubbles, grade = self._decide(user_message, user_id, state, bucket, is_new)
 
         parts = [b for b in bubbles if b and b.strip()]
@@ -1353,6 +1360,11 @@ class BotEngine:
                 "platform": state.get("platform", ""),
                 "last_seen": state.get("last_seen", _now()),
                 "lead_sent": state.get("lead_sent", False),
+                # 17 ส.ค. 2026 — ต้อง persist ชื่อด้วย ไม่งั้น server restart
+                # แล้ว _load_session คืน state ที่ไม่มีชื่อ -> ยิง Graph ใหม่ทุกรอบ
+                # (คอมเมนต์ที่ :1727 เตือนไว้แล้วว่าเคยตก lead_sent + fb_name มาก่อน)
+                "fb_name": state.get("fb_name", ""),
+                "fb_name_tries": state.get("fb_name_tries", 0),
             },
             "log": rows,
         })
@@ -1774,7 +1786,11 @@ class BotEngine:
         # เดิม D ไม่นัดโทร -> เกือบทิ้งเคสบริดจ์ชั้นดี
         # (เคสจริง DSR 75% วงเงิน 0 แต่ปิดบัตรก้อนเดียว = วงเงิน 4.69 ล้าน)
         # D จึงแปลว่า "ต้องดูแผนปิดหนี้ก่อน" ไม่ใช่ "ไปไม่ได้" -> นัดโทรปกติ
-        fb_name = self._get_fb_name(user_id, state.get("platform", "facebook"))
+        # 17 ส.ค. 2026 — ใช้ชื่อที่ _ensure_fb_name ดึงไว้แล้วก่อน
+        # ยิง Graph ซ้ำเฉพาะตอนที่ยังไม่มีจริงๆ (ประหยัดโควตา + ไม่หน่วงตอนปิดเคส)
+        fb_name = state.get("fb_name") or ""
+        if not fb_name or fb_name == "(ยังไม่ได้ชื่อ)":
+            fb_name = self._get_fb_name(user_id, state.get("platform", "facebook")) or fb_name
         state["fb_name"] = fb_name
         # ส่งชุดเต็ม (แถวสมบูรณ์ + สร้างนัดในปฏิทิน) — schema เดิม ไม่แตะ
         self._send_to_sheets(user_id, data, grade, fb_name,
@@ -1928,6 +1944,41 @@ class BotEngine:
     # ==================================================================
     # Facebook / Instagram / Google Sheets
     # ==================================================================
+    def _ensure_fb_name(self, user_id: str, state: dict):
+        """ดึงชื่อลูกค้าครั้งเดียวต่อ session แล้วเก็บไว้ใน state
+
+        กติกาที่ทำให้ไม่พัง:
+        - ยิง background thread -> ไม่บล็อกการตอบลูกค้า (Graph timeout 5 วิ)
+        - ยิงสูงสุด 2 ครั้งต่อ session (`fb_name_tries`) -> token ล่มชั่วคราวยังมีโอกาสที่ 2
+          แต่ไม่ยิงรัวทุกข้อความจนโดน Graph rate limit
+        - ได้ชื่อแล้วจำใน state และ state ถูก persist ลงชีต -> restart ไม่ต้องยิงใหม่
+        - ยิงไม่ได้เลย -> ใส่ "(ยังไม่ได้ชื่อ)" ให้เห็นในชีตว่าเป็นปัญหา token
+          ไม่ใช่ปล่อยว่างจนแยกไม่ออกจาก "ยังไม่ได้ยิง"
+        """
+        if state.get("fb_name"):
+            return
+        if state.get("fb_name_tries", 0) >= 2:
+            return
+        state["fb_name_tries"] = state.get("fb_name_tries", 0) + 1
+        platform = state.get("platform", "facebook")
+
+        def _work():
+            try:
+                nm = self._get_fb_name(user_id, platform)
+                if nm:
+                    state["fb_name"] = nm
+                    print(f"[NAME] {user_id[:8]}... = {nm}")
+                elif state.get("fb_name_tries", 0) >= 2:
+                    # ครบ 2 ครั้งแล้วยังไม่ได้ = บอกให้รู้ ไม่ปล่อยว่างเงียบ
+                    state["fb_name"] = "(ยังไม่ได้ชื่อ)"
+                    print(f"[NAME MISS] {user_id[:8]}... ยิงครบ 2 ครั้งแล้วไม่ได้ชื่อ "
+                          f"— เช็ค FB_PAGE_ACCESS_TOKEN")
+            except Exception as e:
+                print(f"[NAME BG ERROR] {e}")
+
+        threading.Thread(target=_work, daemon=True,
+                         name=f"wec-name-{user_id[:6]}").start()
+
     def _get_fb_name(self, user_id: str, platform: str = "facebook") -> str:
         if not FB_PAGE_ACCESS_TOKEN:
             return ""
@@ -1952,6 +2003,9 @@ class BotEngine:
         _enqueue({
             "action": "lead_partial",
             "facebook_psid": state.get("psid", ""),
+            # 17 ส.ค. 2026 — เดิม payload นี้ไม่มี fb_name เลย
+            # ผล: ลีดที่ยังไม่ปิดเคส = ช่องชื่อในชีตว่างตลอดไป (3% เท่านั้นที่มีชื่อ)
+            "fb_name": state.get("fb_name", ""),
             "objective": data.get("objective", ""),
             "income": data.get("income", ""),
             "debt": data.get("debt", ""),
