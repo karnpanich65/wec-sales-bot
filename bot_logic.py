@@ -1985,34 +1985,58 @@ class BotEngine:
                      page_id: str = "") -> str:
         # 17 ส.ค. 2026 — บั๊กตัวจริงของ "ชื่อว่าง 97%":
         # PSID เป็น page-scoped -> อ่านชื่อได้ด้วย token ของ "เพจที่ลูกค้าทัก" เท่านั้น
-        # ของเดิมใช้ FB_PAGE_ACCESS_TOKEN ตัวเดียวกับทุกเพจ -> เพจอื่นอีก 3 เพจ
-        # Graph ตอบ error JSON เงียบๆ (ไม่ throw) -> ได้ "" โดยไม่มี log สักบรรทัด
-        # แก้: เลือก PAGE_TOKEN_<page_id> ก่อน (มีครบ 4 เพจใน Railway แล้ว)
-        # + ถ้า Graph ตอบ error ต้องพิมพ์ให้เห็น ไม่เงียบอีกต่อไป
-        token = ""
+        # ของเดิมใช้ FB_PAGE_ACCESS_TOKEN ตัวเดียวกับทุกเพจ -> Graph ตอบ error เงียบๆ
+        #
+        # อัปเดตรอบ 2 (คืนเดียวกัน) — log production จับได้ว่า PAGE_TOKEN_<id>
+        # บางตัว "ส่งข้อความได้แต่อ่านชื่อไม่ได้" (Graph 100 missing permissions —
+        # token ที่ generate ผ่าน Graph API Explorer 16 ส.ค. สิทธิ์ไม่ครบ)
+        # ขณะที่ FB_PAGE_ACCESS_TOKEN ตัวเก่าอ่านชื่อได้ (มี 3 ชื่อในชีตเป็นหลักฐาน)
+        # -> ต้องลองทีละ token: ตัวของเพจก่อน แล้วถอยไปตัวกลาง ตัวไหนได้ใช้ตัวนั้น
+        # + log บอกว่าตัวไหนเวิร์ก จะได้รู้ว่า token ตัวไหนต้อง generate ใหม่
+        cands = []
         if page_id:
-            token = os.environ.get(f"PAGE_TOKEN_{page_id}", "")
-        if not token:
-            token = FB_PAGE_ACCESS_TOKEN
-        if not token:
+            t = os.environ.get(f"PAGE_TOKEN_{page_id}", "").strip()
+            if t:
+                cands.append((f"PAGE_TOKEN_{page_id}", t))
+        if FB_PAGE_ACCESS_TOKEN and all(t != FB_PAGE_ACCESS_TOKEN for _, t in cands):
+            cands.append(("FB_PAGE_ACCESS_TOKEN", FB_PAGE_ACCESS_TOKEN))
+        if not cands:
             return ""
-        fields = "name,username" if platform == "instagram" else "name"
-        try:
-            resp = requests.get(
-                f"{FB_GRAPH_URL}/{user_id}",
-                params={"fields": fields, "access_token": token},
-                timeout=5,
-            )
-            j = resp.json()
-            if "error" in j:
-                err = j["error"]
-                print(f"[NAME ERROR] ({platform}) page={page_id or '-'} "
-                      f"Graph {err.get('code')}: {err.get('message', '')[:120]}")
-                return ""
-            return j.get("name") or j.get("username") or ""
-        except Exception as e:
-            print(f"[NAME ERROR] ({platform}) page={page_id or '-'} {e}")
-            return ""
+        # Messenger User Profile API รองรับ first_name/last_name เป็นทางการ
+        # (ขอ "name" เฉยๆ บางแอปโดนปัด) — IG ใช้ name,username ตามเดิม
+        fields = ("name,username" if platform == "instagram"
+                  else "first_name,last_name")
+        for src, token in cands:
+            try:
+                resp = requests.get(
+                    f"{FB_GRAPH_URL}/{user_id}",
+                    params={"fields": fields, "access_token": token},
+                    timeout=5,
+                )
+                j = resp.json()
+                if "error" in j:
+                    err = j["error"]
+                    print(f"[NAME ERROR] ({platform}) page={page_id or '-'} "
+                          f"via {src} Graph {err.get('code')}: "
+                          f"{str(err.get('message', ''))[:100]}")
+                    continue          # token นี้ไม่ได้ -> ลองตัวถัดไป
+                if platform == "instagram":
+                    nm = j.get("name") or j.get("username") or ""
+                else:
+                    nm = " ".join(x for x in (j.get("first_name", ""),
+                                              j.get("last_name", "")) if x).strip()
+                    nm = nm or j.get("name", "")
+                if nm:
+                    if src != cands[0][0]:
+                        # ตัวแรกพัง ตัวถอยเวิร์ก -> บอกไว้ใน log ให้รู้ว่า
+                        # PAGE_TOKEN_<id> ตัวนั้นควร generate ใหม่ (แต่ระบบยังเดินต่อได้)
+                        print(f"[NAME OK-FALLBACK] page={page_id or '-'} "
+                              f"ได้ชื่อจาก {src} — {cands[0][0]} อ่านชื่อไม่ได้ "
+                              f"ควร generate token ใหม่")
+                    return nm
+            except Exception as e:
+                print(f"[NAME ERROR] ({platform}) page={page_id or '-'} via {src} {e}")
+        return ""
 
     def _upsert_lead(self, state: dict):
         """ส่งลีด 'บางส่วน' เข้าชีตทันทีที่ได้ข้อมูลใหม่ — กันลีดหลุด
