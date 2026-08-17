@@ -1790,7 +1790,8 @@ class BotEngine:
         # ยิง Graph ซ้ำเฉพาะตอนที่ยังไม่มีจริงๆ (ประหยัดโควตา + ไม่หน่วงตอนปิดเคส)
         fb_name = state.get("fb_name") or ""
         if not fb_name or fb_name == "(ยังไม่ได้ชื่อ)":
-            fb_name = self._get_fb_name(user_id, state.get("platform", "facebook")) or fb_name
+            fb_name = self._get_fb_name(user_id, state.get("platform", "facebook"),
+                                        state.get("page_id", "")) or fb_name
         state["fb_name"] = fb_name
         # ส่งชุดเต็ม (แถวสมบูรณ์ + สร้างนัดในปฏิทิน) — schema เดิม ไม่แตะ
         self._send_to_sheets(user_id, data, grade, fb_name,
@@ -1961,10 +1962,11 @@ class BotEngine:
             return
         state["fb_name_tries"] = state.get("fb_name_tries", 0) + 1
         platform = state.get("platform", "facebook")
+        page_id = state.get("page_id", "")
 
         def _work():
             try:
-                nm = self._get_fb_name(user_id, platform)
+                nm = self._get_fb_name(user_id, platform, page_id)
                 if nm:
                     state["fb_name"] = nm
                     print(f"[NAME] {user_id[:8]}... = {nm}")
@@ -1972,27 +1974,44 @@ class BotEngine:
                     # ครบ 2 ครั้งแล้วยังไม่ได้ = บอกให้รู้ ไม่ปล่อยว่างเงียบ
                     state["fb_name"] = "(ยังไม่ได้ชื่อ)"
                     print(f"[NAME MISS] {user_id[:8]}... ยิงครบ 2 ครั้งแล้วไม่ได้ชื่อ "
-                          f"— เช็ค FB_PAGE_ACCESS_TOKEN")
+                          f"— เช็ค token ของเพจ {page_id or '(ไม่รู้เพจ)'}")
             except Exception as e:
                 print(f"[NAME BG ERROR] {e}")
 
         threading.Thread(target=_work, daemon=True,
                          name=f"wec-name-{user_id[:6]}").start()
 
-    def _get_fb_name(self, user_id: str, platform: str = "facebook") -> str:
-        if not FB_PAGE_ACCESS_TOKEN:
+    def _get_fb_name(self, user_id: str, platform: str = "facebook",
+                     page_id: str = "") -> str:
+        # 17 ส.ค. 2026 — บั๊กตัวจริงของ "ชื่อว่าง 97%":
+        # PSID เป็น page-scoped -> อ่านชื่อได้ด้วย token ของ "เพจที่ลูกค้าทัก" เท่านั้น
+        # ของเดิมใช้ FB_PAGE_ACCESS_TOKEN ตัวเดียวกับทุกเพจ -> เพจอื่นอีก 3 เพจ
+        # Graph ตอบ error JSON เงียบๆ (ไม่ throw) -> ได้ "" โดยไม่มี log สักบรรทัด
+        # แก้: เลือก PAGE_TOKEN_<page_id> ก่อน (มีครบ 4 เพจใน Railway แล้ว)
+        # + ถ้า Graph ตอบ error ต้องพิมพ์ให้เห็น ไม่เงียบอีกต่อไป
+        token = ""
+        if page_id:
+            token = os.environ.get(f"PAGE_TOKEN_{page_id}", "")
+        if not token:
+            token = FB_PAGE_ACCESS_TOKEN
+        if not token:
             return ""
         fields = "name,username" if platform == "instagram" else "name"
         try:
             resp = requests.get(
                 f"{FB_GRAPH_URL}/{user_id}",
-                params={"fields": fields, "access_token": FB_PAGE_ACCESS_TOKEN},
+                params={"fields": fields, "access_token": token},
                 timeout=5,
             )
             j = resp.json()
+            if "error" in j:
+                err = j["error"]
+                print(f"[NAME ERROR] ({platform}) page={page_id or '-'} "
+                      f"Graph {err.get('code')}: {err.get('message', '')[:120]}")
+                return ""
             return j.get("name") or j.get("username") or ""
         except Exception as e:
-            print(f"[NAME ERROR] ({platform}) {e}")
+            print(f"[NAME ERROR] ({platform}) page={page_id or '-'} {e}")
             return ""
 
     def _upsert_lead(self, state: dict):
