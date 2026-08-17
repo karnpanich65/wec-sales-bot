@@ -1,4 +1,6 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r4 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r5 — 2026-08-18)
+# v67 r5 (18 ส.ค. เช้า): เกรด A ต้องยืนยันยอดผ่อนแล้วเท่านั้น —
+#   มีภาระ/ไม่รู้ยอด = อย่างดีสุด B + signal บอกเซลอัปเกรดเองหลังโทรยืนยัน
 # Core engine: FAQ -> Qualification (Q1-Q4) -> Grading (A/B/C) -> Claude AI fallback
 #
 # v67 r4 (18 ส.ค. 2026 — อ่าน Chat_Log ทุกเพจแล้วแก้รวดเดียว):
@@ -1964,6 +1966,12 @@ class BotEngine:
         debt = data.get("debt_baht")
         if debt is None:
             debt = _parse_debt_monthly(str(data.get("debt", "")))
+        # 18 ส.ค. 2026 (Gift): "ยังไม่ได้ยอดผ่อน ทำไมจัดเกรดมาแบบนั้น"
+        # เดิม: มีภาระแต่ไม่รู้ยอด -> คิดเป็น 0 -> A เฟ้อ (เจอจริง: A ฝั่ง WO
+        # ติดธง ⚠️ 4/4) เซลได้คิว "โทรใน 30 นาที กู้ได้เลย" ทั้งที่ยังไม่ยืนยัน
+        # ใหม่: ยอดผ่อนยังไม่ยืนยัน (และไม่ได้บอกว่า "ไม่มี") -> อย่างดีสุด B
+        #       เซลโทรยืนยันยอดจริงแล้วค่อยอัปเกรดเป็น A เองในไฟล์
+        debt_unverified = debt is None and not _says_no_debt(str(data.get("debt", "")))
         debt = 0 if debt is None else max(0, int(debt))
 
         cap_now = _capacity(income, debt)
@@ -1973,6 +1981,10 @@ class BotEngine:
         data["capacity_clear"] = cap_clear
 
         if cap_now >= UNIT_PRICE_BAHT:
+            if debt_unverified:
+                if state is not None:
+                    self._add_signal(state, "ลดเกรด A→B: มีภาระแต่ยังไม่ยืนยันยอดผ่อน/เดือน — โทรยืนยันแล้วอัปเกรดได้")
+                return "B"
             return "A"
         if cap_clear >= UNIT_PRICE_BAHT:
             return "B"          # ปิดภาระแล้วไปได้ = ลีดของทีมบริดจ์
