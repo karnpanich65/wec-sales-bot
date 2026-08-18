@@ -1,4 +1,5 @@
 # bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r7 — 2026-08-18)
+# v67 r8: persist ธง handover ลงชีต (restart แล้วยังจำได้ = ถาวรจริง)
 # v67 r7: โหมดเซลรับช่วงเอง — เซลพิมพ์ทักในกล่องข้อความเพจ (มีคำว่า "ที่ปรึกษา"
 #   หรือ #รับเคส) -> บอทหยุดตอบเฉพาะแชทนั้นถาวร · ยังเก็บ log ครบทั้งสองฝั่ง
 #   · สั่งกลับด้วย #เปิดบอท
@@ -1557,6 +1558,12 @@ class BotEngine:
                 # (คอมเมนต์ที่ :1727 เตือนไว้แล้วว่าเคยตก lead_sent + fb_name มาก่อน)
                 "fb_name": state.get("fb_name", ""),
                 "fb_name_tries": state.get("fb_name_tries", 0),
+                # 18 ส.ค. 2026 — ต้อง persist ธง "เซลรับช่วงเอง" ด้วย
+                # ไม่งั้นพอ Railway restart/deploy ใหม่ -> โหลด state กลับมาไม่มีธง
+                # -> บอทกลับไปตอบแทรกเซลกลางแชท (ไม่ "ถาวร" จริงตามที่ Gift สั่ง)
+                "handover": state.get("handover", False),
+                "handover_at": state.get("handover_at", 0),
+                "chat_name": state.get("chat_name", ""),
             },
             "log": rows,
         })
