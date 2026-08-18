@@ -1,4 +1,8 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r9 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r10 — 2026-08-18)
+# v67 r10: อาชีพอิสระ/เจ้าของกิจการ — ถาม 'ทำมากี่ปี + มีภาษี/จดบริษัทไหม'
+#          ตามเกณฑ์จริงใน Sheet ฐานข้อมูลธนาคาร_WEC_v2 (ทำมา 2 ปี+ · ภาษี 2 ปี+)
+#          คิดรายได้ 50% (เกณฑ์ TTB/UOB — Gift เคาะ 18 ส.ค.) · ไม่ครบเกณฑ์ = ปิดแชทสุภาพ
+#          + ถามค้างข้อไหนไม่ได้ ให้ข้ามไปถามข้อที่ยังขาดข้ออื่น (ไม่ตัน) ห้ามถามข้อที่ได้แล้วซ้ำ
 # v67 r9: เซลรับช่วง = หยุดบอท 3 วัน (ไม่ถาวร) แล้วกลับมาคุยต่อจากเดิม ไม่เริ่มใหม่
 # v67 r7: โหมดเซลรับช่วงเอง — เซลพิมพ์ทักในกล่องข้อความเพจ (มีคำว่า "ที่ปรึกษา"
 #   หรือ #รับเคส) -> บอทหยุดตอบเฉพาะแชทนั้นถาวร · ยังเก็บ log ครบทั้งสองฝั่ง
@@ -85,7 +89,7 @@ GAP_SAME_DAY = 24 * 60 * 60  # 1 วัน
 
 # ลำดับข้อมูลที่ต้องเก็บ -> index ใน QUALIFY_QUESTIONS
 # co_borrower ถามเฉพาะเคสรายได้ต่ำกว่า LOW_INCOME_BAHT (ดู _next_missing)
-FIELD_ORDER = ["objective", "income", "co_borrower", "debt", "contact"]
+FIELD_ORDER = ["objective", "income", "self_emp", "co_borrower", "debt", "contact"]
 FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3,
                  "co_borrower": 4}
 
@@ -328,6 +332,68 @@ _SELF_EMP_WORDS = (
 def _is_self_employed(msg: str) -> bool:
     m = (msg or "").replace(" ", "")
     return any(w in m for w in _SELF_EMP_WORDS)
+
+
+# ----------------------------------------------------------------------
+# อาชีพอิสระ / เจ้าของกิจการ (Gift สั่ง 18 ส.ค. 2026)
+# เกณฑ์จริงจาก Google Sheet `ฐานข้อมูลธนาคาร_WEC_v2` แท็บ "อาชีพอิสระ":
+#   เงื่อนไขกลางทุกแบงก์ = ทำมา 2 ปี+ · มีภาษีย้อนหลัง 2 ปี+ · รายได้เฉลี่ย 6 ด. ÷ 6
+#   % ที่แต่ละแบงก์นับ: KBank 100 · TTB 50 · UOB 50 · ออมสิน 39 (Score EFG ไม่รับ)
+#                      KTB 30 · ธอส ไม่รับเลย
+# Gift เคาะ: บอทใช้ 50% (เกณฑ์ TTB/UOB) — ไม่เฟ้อแบบ KBank ไม่ต่ำเกินแบบ KTB
+# เจ้าของบริษัทจดทะเบียน = รับ (engine มี company_grade จากยอดขาย DBD อยู่แล้ว)
+# ----------------------------------------------------------------------
+FREELANCE_INCOME_PCT = 0.50
+FREELANCE_MIN_YEARS = 2
+
+SELF_EMP_Q = (
+    "ขออนุญาตถามเพิ่ม 2 ข้อสั้นๆ ครับ ทำอาชีพนี้/เปิดกิจการมากี่ปีแล้ว "
+    "และมีเสียภาษีหรือจดบริษัทไว้ไหมครับ — สายอาชีพอิสระธนาคารดู 2 ข้อนี้เป็นหลักครับ"
+)
+# ไม่ครบเกณฑ์ -> ปิดบทสนทนาแบบสุภาพ ไม่รับปากว่าจะโทรกลับ (Gift 18 ส.ค.)
+SELF_EMP_SOFT_CLOSE = (
+    "ขอบคุณสำหรับข้อมูลครับ 🙏 เคสลักษณะนี้ธนาคารส่วนใหญ่จะขอ "
+    "\"ทำมา 2 ปีขึ้นไป + มีภาษีย้อนหลัง\" ครับ ผมเก็บข้อมูลของลูกค้าไว้ให้แล้ว "
+    "ถ้ามีธนาคารหรือโปรแกรมที่เหมาะกับเคสนี้เพิ่มเข้ามา จะรีบแจ้งให้ทราบทันทีครับ"
+)
+
+_TAX_YES_WORDS = ("เสียภาษี", "มีภาษี", "ยื่นภาษี", "จดทะเบียน", "จดบริษัท",
+                  "มีบริษัท", "เปิดบริษัท", "หจก", "ห้างหุ้นส่วน", "บริษัทจำกัด",
+                  "ภพ", "ภงด", "มีนิติบุคคล", "นิติบุคคล", "มีงบการเงิน")
+_TAX_NO_WORDS = ("ไม่ได้เสียภาษี", "ไม่เสียภาษี", "ไม่มีภาษี", "ไม่ได้ยื่นภาษี",
+                 "ไม่ได้จด", "ไม่จดทะเบียน", "ไม่มีบริษัท", "ยังไม่จด",
+                 "ยังไม่เสียภาษี", "ไม่มีเอกสาร")
+
+
+def _parse_years(msg: str) -> int | None:
+    """อ่าน 'ทำมากี่ปี' จากภาษาคนพิมพ์ — 'ปีกว่า' = 1 ปี, 'ครึ่งปี/เดือน' = 0"""
+    m = _collapse_ranges((msg or "").strip())
+    if re.search(r"(ไม่ถึงปี|ครึ่งปี|เพิ่งเริ่ม|เพิ่งทำ|เพิ่งเปิด)", m):
+        return 0
+    y = re.search(r"(\d+)\s*ปี", m)
+    if y:
+        return int(y.group(1))
+    mo = re.search(r"(\d+)\s*เดือน", m)
+    if mo:
+        return int(mo.group(1)) // 12
+    n = re.search(r"(?<!\d)(\d{1,2})(?!\d)", m)
+    if n and int(n.group(1)) <= 60:
+        return int(n.group(1))
+    return None
+
+
+def _parse_tax_flag(msg: str) -> bool | None:
+    """มีภาษี/จดบริษัทไหม -> True / False / None (ยังไม่รู้)"""
+    m = (msg or "").replace(" ", "")
+    if any(w in m for w in _TAX_NO_WORDS):
+        return False
+    if any(w in m for w in _TAX_YES_WORDS):
+        return True
+    if re.fullmatch(r"(ไม่|ไม่มี|ยังไม่มี|ยังไม่|ไม่ครับ|ไม่ค่ะ)[ครับค่ะคะจ้า]*", m):
+        return False
+    if re.fullmatch(r"(มี|มีครับ|มีค่ะ|ใช่|ใช่ครับ|ใช่ค่ะ|เสีย|เสียครับ|เสียค่ะ)[ครับค่ะคะจ้า]*", m):
+        return True
+    return None
 
 
 
@@ -1328,7 +1394,10 @@ class BotEngine:
                     state["chat_name"] = _nm
                     state["fb_name"] = _nm   # ชื่อจากแชทชนะชื่อโปรไฟล์
                 grade = self._finish(user_id, state, msg)
-                bubbles.append(self._grade_reply(grade, msg))
+                if state.get("soft_close"):
+                    bubbles.append(SELF_EMP_SOFT_CLOSE)
+                else:
+                    bubbles.append(self._grade_reply(grade, msg))
                 if not state.get("chat_name") and not state.get("name_asked"):
                     state["name_asked"] = True
                     state["awaiting_name"] = True
@@ -1386,15 +1455,18 @@ class BotEngine:
         if not state.get("done"):
             if self._should_qualify(msg) or state.get("qualifying") or consumed:
                 state["qualifying"] = True
-                field, question = self._next_missing(data, state)
                 asked = state.setdefault("asked", {})
-                if field and asked.get(field, 0) >= MAX_ASK_PER_FIELD:
-                    # ถามไป 2 ครั้งแล้วยังไม่ได้ -> หยุด อย่าไล่บี้จนลูกค้าหนี
-                    if field == "contact":
+                field, question = self._next_missing(data, state)
+                # ถามข้อนี้ครบ 2 ครั้งแล้วยังไม่ได้ -> ไม่ไล่บี้ต่อ
+                # แต่ "ย้อนไปถามข้อที่ยังขาดข้ออื่น" แทนการเงียบ (Gift 18 ส.ค.)
+                _skipped: set = set()
+                while field and asked.get(field, 0) >= MAX_ASK_PER_FIELD:
+                    if field == "contact" and not state.get("contact_refused"):
                         state["contact_refused"] = True
                         bubbles.append(CONTACT_REFUSED_MSG)
-                    field = None
-                elif field:
+                    _skipped.add(field)
+                    field, question = self._next_missing(data, state, skip=_skipped)
+                if field:
                     asked[field] = asked.get(field, 0) + 1
                     state["awaiting"] = field
                     bubbles.append(question)
@@ -1619,6 +1691,20 @@ class BotEngine:
     def _capture(self, state: dict, field: str, msg: str):
         data = state["data"]
         data[field] = msg
+        if field == "self_emp":
+            # แยกเป็น 2 ค่าให้เซล/เกรดใช้ได้จริง ไม่ใช่เก็บเป็นข้อความก้อนเดียว
+            yrs = _parse_years(msg)
+            tax = _parse_tax_flag(msg)
+            if yrs is not None:
+                data["self_emp_years"] = yrs
+            if tax is not None:
+                data["self_emp_tax"] = tax
+            m = (msg or "").replace(" ", "")
+            if any(w in m for w in ("จดทะเบียน", "จดบริษัท", "มีบริษัท", "หจก",
+                                    "ห้างหุ้นส่วน", "บริษัทจำกัด", "นิติบุคคล")):
+                data["biz_registered"] = True
+                data["self_emp_tax"] = True
+            return
         if field == "contact":
             # แยกเบอร์ออกจากคำห้อยท้าย ("0863692660ค่ะ" / "081-234-5678 ครับ")
             # ไม่งั้นฝั่งชีตตีเป็น LINE id -> เซลเห็น "ทักไลน์" ทั้งที่โทรได้
@@ -1716,9 +1802,22 @@ class BotEngine:
         self._upsert_lead(state)
 
     def _next_missing(self, data: dict,
-                      state: dict | None = None) -> tuple[str | None, str | None]:
+                      state: dict | None = None,
+                      skip: set | None = None) -> tuple[str | None, str | None]:
+        """หาข้อถัดไปที่ยัง "ไม่ได้คำตอบ" — ข้อที่ได้แล้วห้ามถามซ้ำเด็ดขาด
+
+        skip = ข้อที่ถามครบโควตาแล้ว -> ข้ามไปถามข้อที่ยังขาดข้ออื่นแทน
+        (ของเดิมถ้าข้อแรกตัน = ไม่ถามอะไรต่อเลย บทสนทนาตายคาที่ — Gift 18 ส.ค.)
+        """
         state = state or {}
+        skip = skip or set()
         for f in FIELD_ORDER:
+            if f in skip:
+                continue
+            if f == "self_emp" and not state.get("self_employed"):
+                continue          # พนักงานประจำ = ไม่ต้องถาม
+            if f == "self_emp" and data.get("cash"):
+                continue          # ซื้อสด = ไม่ได้กู้
             if f == "debt" and (data.get("income_unknown") or data.get("cash")):
                 continue
             if f == "income" and data.get("cash"):
@@ -1744,6 +1843,8 @@ class BotEngine:
                     # ขอเบอร์รอบแรกไปแล้วยังไม่ได้ -> รอบ 2 เปิดทาง LINE แบบนุ่มนวล
                     state["contact_line_offered"] = True
                     return f, CONTACT_REASK_MSG
+                if f == "self_emp":
+                    return f, SELF_EMP_Q
                 return f, QUALIFY_QUESTIONS[FIELD_Q_INDEX[f]]
         return None, None
 
@@ -1945,6 +2046,9 @@ class BotEngine:
         if field == "objective":
             # ต้องพูดถึงเป้าหมายจริง ไม่งั้นเก็บคำลอยๆ เป็นวัตถุประสงค์
             return any(k in m.lower() for k in _OBJECTIVE_WORDS)
+        if field == "self_emp":
+            # ต้องมีตัวเลขปี หรือคำตอบเรื่องภาษี/จดทะเบียน อย่างน้อย 1 อย่าง
+            return (_parse_years(m) is not None) or (_parse_tax_flag(m) is not None)
         if field == "income":
             # กันเก็บข้อความมั่วเป็นรายได้ — เจอจริง 14 ส.ค. เก็บคำว่า "รูปแบบ"
             # เป็นรายได้ลูกค้า แล้วเดินหน้าถามข้อถัดไปเหมือนไม่มีอะไรเกิดขึ้น
@@ -2009,7 +2113,7 @@ class BotEngine:
             self._add_signal(state, "ผู้เช่า (ไม่ใช่นักลงทุน) — ทีมห้องเช่ารับช่วง")
         if grade == "D":
             self._add_signal(state, "ภาระหนัก (ผ่อนเกินรายได้) — เคสบริดจ์ ดูแผนปิดหนี้ก่อน")
-        if grade == "N":
+        if grade == "N" and not state.get("soft_close"):
             self._add_signal(state, "⚠️ ยังไม่ได้ตัวเลขรายได้ — โทรถามก่อนตีเกรด")
         cap_now, cap_clear = data.get("capacity_now"), data.get("capacity_clear")
         if cap_now is not None:
@@ -2071,6 +2175,33 @@ class BotEngine:
             # C แปลว่า "คำนวณแล้วยังไม่ไหว" · N แปลว่า "ยังคำนวณไม่ได้ ต้องโทรถาม"
             # ห้ามปนกัน ไม่งั้นลีดดีที่แค่ไม่บอกตัวเลขจะจมไปกับเคสที่ไปต่อไม่ได้
             return "N"
+
+        # ---- อาชีพอิสระ/เจ้าของกิจการ (Gift 18 ส.ค. · Sheet ฐานข้อมูลธนาคาร_WEC_v2)
+        # เงื่อนไขรับเคส: ทำมา 2 ปี+ และมีภาษี/จดทะเบียน · ไม่ครบ = N ให้คนตรวจ
+        # รายได้ที่แบงก์นับ = 50% (เกณฑ์ TTB/UOB) ไม่ใช่ 100% แบบพนักงานประจำ
+        if state is not None and state.get("self_employed"):
+            yrs = data.get("self_emp_years")
+            tax = data.get("self_emp_tax")
+            reg = data.get("biz_registered")
+            if not reg and (tax is False or (yrs is not None and yrs < FREELANCE_MIN_YEARS)):
+                state["soft_close"] = True
+                self._add_signal(
+                    state,
+                    f"อาชีพอิสระยังไม่เข้าเกณฑ์ธนาคาร (ทำมา {yrs if yrs is not None else '?'} ปี · "
+                    f"ภาษี/จดทะเบียน: {'ไม่มี' if tax is False else 'ยังไม่ยืนยัน'}) "
+                    "— เกณฑ์กลางคือ 2 ปี+ และมีภาษีย้อนหลัง · เก็บไว้ตามทีหลัง")
+                return "N"
+            if reg:
+                self._add_signal(
+                    state,
+                    "เจ้าของกิจการจดทะเบียน — รับเคสได้ · รายได้จริงต้องคิดจาก "
+                    "ยอดขาย×margin×%หุ้น (§0.5) + เกรดบริษัทจาก DBD ให้ทีมวิเคราะห์คำนวณ")
+            income = int(income * FREELANCE_INCOME_PCT)
+            data["income_counted"] = income
+            self._add_signal(
+                state,
+                f"อาชีพอิสระ/เจ้าของกิจการ — คิดรายได้ที่แบงก์นับ 50% "
+                f"(เกณฑ์ TTB/UOB) = {income:,} · KBank นับ 100% · KTB 30% · ธอส ไม่รับ")
 
         debt = data.get("debt_baht")
         if debt is None:
