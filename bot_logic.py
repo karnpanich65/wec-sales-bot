@@ -73,6 +73,7 @@ from faq_data import (
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
+    NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -939,6 +940,31 @@ _TIMELINE_WORDS = [
 ]
 
 # ----------------------------------------------------------------------
+# ปิดจบแล้ว = เงียบ (Gift 19 ส.ค. 2026 "จบแล้วมาตอบอะไรอีก")
+# ----------------------------------------------------------------------
+# เจอเคสจริงเพจ New Chapter: ปิดจบเพราะไม่มีผู้กู้ร่วมไปแล้ว
+# ลูกค้าพิมพ์ "ขอบคุณ" มารยาท -> บอทตอบ "ยินดีค่ะ มีอะไรที่เราช่วยได้ไหมคะ"
+# = เปิดวงสนทนาที่เพิ่งปิดไปเองใหม่ ดูไม่มืออาชีพ
+# กติกา: ปิดแล้วเงียบ ยกเว้นลูกค้า "ถามจริง" (ตอบคำถามเสมอ = กติกาเดิมของเพจ)
+# หรือกลับมาบอกว่าหาผู้กู้ร่วมได้แล้ว -> เปิดแชทกลับ คุยต่อจากเดิม
+_REOPEN_WORDS = (
+    "มีผู้กู้ร่วมแล้ว", "มีผู้กู้ร่วม", "หาผู้กู้ร่วมได้", "ผู้กู้ร่วมได้แล้ว",
+    "กู้ร่วมได้แล้ว", "มีคนกู้ร่วม", "แฟนกู้ร่วม", "พ่อกู้ร่วม", "แม่กู้ร่วม",
+    "พี่กู้ร่วม", "น้องกู้ร่วม", "กู้ร่วมกับ", "จะกู้ร่วม", "ขอกู้ร่วม",
+)
+
+# ขอบคุณ/ทักทายมารยาท — ไม่ใช่คำถาม ไม่ต้องตอบหลังปิดจบ
+_COURTESY_WORDS = (
+    "ขอบคุณ", "ขอบใจ", "thank", "thx", "ครับ", "ค่ะ", "คะ", "โอเค", "ok",
+    "รับทราบ", "เข้าใจแล้ว", "ได้เลย", "จ้า", "สวัสดี",
+)
+
+
+def _is_reopen(msg: str) -> bool:
+    return _has_any(msg, _REOPEN_WORDS)
+
+
+# ----------------------------------------------------------------------
 # น้ำเสียงหญิง (เพจที่แอดมินเป็นผู้หญิง)
 # ----------------------------------------------------------------------
 # สรรพนาม "ผม" -> ตัดทิ้ง (ผู้หญิงไทยมักละสรรพนามในบทสนทนาขาย)
@@ -1388,6 +1414,30 @@ class BotEngine:
                 self._send_name_update(user_id, state)
                 return [f"ขอบคุณครับ คุณ{_nm} 🙏 เดี๋ยวที่ปรึกษาติดต่อไปครับ"], None
 
+        # ---- 0.4) ปิดจบไปแล้ว -> เงียบ ยกเว้นถามจริง/กลับมาพร้อมผู้กู้ร่วม ----
+        if state.get("closed"):
+            if _is_reopen(msg):
+                state["closed"] = False
+                state["done"] = False
+                state["below_threshold"] = False
+                state["contact_refused"] = False
+                state["soft_close"] = False
+                data["co_borrower_none"] = False
+                data["co_borrower_weak"] = False
+                data.pop("co_borrower", None)
+                state["awaiting"] = None
+                state["qualifying"] = True
+                self._add_signal(state, "ลูกค้ากลับมาบอกว่าหาผู้กู้ร่วมได้แล้ว — เปิดเคสใหม่")
+                print(f"[REOPEN] {user_id[:8]}... กลับมาพร้อมผู้กู้ร่วม")
+            elif self._is_question(msg):
+                # ลูกค้าถามจริง ต้องได้คำตอบเสมอ — แต่จบที่คำตอบ ไม่ชวนคุยต่อ
+                return [self._ask_claude(msg, user_id,
+                                         state.get("gender", ""), done=True)], None
+            else:
+                print(f"[CLOSED SILENT] {user_id[:8]}... ปิดจบแล้ว ไม่ตอบ "
+                      f"| {msg[:40]!r}")
+                return [], None
+
         # ---- 0.5) คำตอบของคำถามประวัติเครดิต (ถามไปรอบก่อน) ------------
         # ใช้ธงเฉพาะ ไม่ผ่าน FIELD_ORDER — ไม่งั้นไปแย่งคิวคำถามหลัก
         # (บทเรียน 18 ส.ค.: ใส่ใน FIELD_ORDER แล้วเบอร์โทรถูกกลืนหายไปเลย)
@@ -1593,9 +1643,11 @@ class BotEngine:
                     state["fb_name"] = _nm   # ชื่อจากแชทชนะชื่อโปรไฟล์
                 grade = self._finish(user_id, state, msg)
                 if state.get("soft_close"):
-                    bubbles.append(state.get("soft_close_msg") or SELF_EMP_SOFT_CLOSE)
-                else:
-                    bubbles.append(self._grade_reply(grade, msg))
+                    # ปิดจบแบบสุภาพ = ข้อความเดียวจบ ไม่พ่วงคำถามอื่นต่อท้าย
+                    state.pop("awaiting_ncb", None)
+                    self._close_chat(state)
+                    return [state.get("soft_close_msg") or SELF_EMP_SOFT_CLOSE], grade
+                bubbles.append(self._grade_reply(grade, msg))
                 if not state.get("chat_name") and not state.get("name_asked"):
                     state["name_asked"] = True
                     state["awaiting_name"] = True
@@ -1611,10 +1663,13 @@ class BotEngine:
                 state["contact_refused"] = True   # กันโค้ดส่วนอื่นขอช่องทาง
                 state["below_threshold"] = True   # ชีตจะได้รู้ว่าไม่ต้องโทร
                 grade = self._finish(user_id, state, "-", calendar=False)
-                bubbles.append(NO_COBORROWER_MSG if data.get("co_borrower_none")
-                               else WEAK_COBORROWER_MSG)
-                bubbles.append(COBORROWER_INVITE_MSG)
-                return bubbles, grade
+                # ปฏิเสธ = พูดเรื่องเดียว บับเบิลเดียว (Gift 19 ส.ค. 2026)
+                # ทิ้งบับเบิลที่สะสมมาก่อนหน้าทั้งหมด — รวมถึงคำถามบูโร
+                # ที่เพิ่งตั้งไว้ในเทิร์นเดียวกัน ถามไปก็ไม่ได้ใช้แล้ว
+                state.pop("awaiting_ncb", None)
+                self._close_chat(state)
+                return [NO_COBORROWER_CLOSE if data.get("co_borrower_none")
+                        else WEAK_COBORROWER_CLOSE], grade
 
         if not consumed:
             faq = self._check_faq(msg)
@@ -1864,9 +1919,19 @@ class BotEngine:
                 "handover_by": state.get("handover_by", ""),
                 "ncb_kind": state.get("ncb_kind", ""),
                 "chat_name": state.get("chat_name", ""),
+                # ปิดจบแล้ว — ต้องรอดข้าม restart ไม่งั้น deploy ทีนึง
+                # บอทกลับมาตอบเคสที่ปิดไปแล้วใหม่หมด
+                "closed": state.get("closed", False),
+                "closed_at": state.get("closed_at", 0),
             },
             "log": rows,
         })
+
+    @staticmethod
+    def _close_chat(state: dict):
+        """ปิดจบแชทนี้ — หลังจากนี้บอทเงียบ ยกเว้นลูกค้าถามจริง"""
+        state["closed"] = True
+        state["closed_at"] = _now()
 
     @staticmethod
     def _stage_label(state: dict) -> str:

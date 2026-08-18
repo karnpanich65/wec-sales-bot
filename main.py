@@ -245,16 +245,60 @@ def verify_fb_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+# ======================================================
+# จังหวะพิมพ์ให้เหมือนคน (Gift 19 ส.ค. 2026 "พิมพ์ตอบเร็วไป")
+# ------------------------------------------------------
+# ตอบกลับใน 0.3 วิ = ลูกค้ารู้ทันทีว่าคุยกับบอท
+# แอดมินจริงพิมพ์ประมาณ 5-15 วิ/ข้อความ แต่บอทรอนานขนาดนั้นไม่ได้
+# (webhook ต้องตอบ 200 ให้ Meta ภายใน ~20 วิ ไม่งั้นโดนยิงซ้ำ)
+# ทางสายกลาง: โชว์ "..." แล้วหน่วงตามความยาวข้อความ 1-3.5 วิ/บับเบิล
+# รวมทั้งเทิร์นไม่เกิน TYPING_BUDGET_SEC — ปรับได้จาก env ไม่ต้องแก้โค้ด
+# ปิดทั้งหมดด้วย TYPING_DELAY=0
+# ======================================================
+TYPING_ENABLED = os.environ.get("TYPING_DELAY", "1").strip() != "0"
+TYPING_BASE_SEC = float(os.environ.get("TYPING_BASE_SEC", "1.0"))
+TYPING_CPS = float(os.environ.get("TYPING_CPS", "18"))        # ตัวอักษร/วินาที
+TYPING_MAX_SEC = float(os.environ.get("TYPING_MAX_SEC", "3.5"))
+TYPING_BUDGET_SEC = float(os.environ.get("TYPING_BUDGET_SEC", "8"))
+
+
+def send_sender_action(recipient_id: str, action: str, page_id: str = ""):
+    """โชว์จุดไข่ปลา "กำลังพิมพ์..." — Meta ล้างให้เองเมื่อข้อความถูกส่ง"""
+    token = page_token(page_id) if page_id else FB_PAGE_ACCESS_TOKEN
+    if not token:
+        return
+    try:
+        requests.post(
+            GRAPH_API_URL,
+            params={"access_token": token},
+            json={"recipient": {"id": recipient_id}, "sender_action": action},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[TYPING ERROR] {e}")
+
+
+def _typing_pause(text: str) -> float:
+    """หน่วงตามความยาวข้อความ — ข้อความยาวใช้เวลาพิมพ์นานกว่า"""
+    return min(TYPING_MAX_SEC, TYPING_BASE_SEC + len(text) / TYPING_CPS)
+
+
 def send_reply(recipient_id: str, text: str, page_id: str = ""):
     """ส่งคำตอบของบอท — แยกเป็นหลายบับเบิลถ้ามี MSG_SPLIT
 
     เหตุผล: คำถามที่อยู่รวมก้อนเดียวกับข้อความอื่นจะถูกลูกค้าสแกนผ่าน
     ส่งคำถามเป็นบับเบิลสุดท้ายเดี่ยวๆ ได้อัตราตอบกลับสูงกว่าชัดเจน
     """
+    budget = TYPING_BUDGET_SEC
     for part in text.split(MSG_SPLIT):
         part = part.strip()
         if not part:
             continue
+        if TYPING_ENABLED and budget > 0.2:
+            pause = min(_typing_pause(part), budget)
+            send_sender_action(recipient_id, "typing_on", page_id)
+            time.sleep(pause)
+            budget -= pause
         if not send_message(recipient_id, part, page_id):
             # ส่งถึงคนนี้ไม่ได้แล้ว (บล็อกเพจ / ปิดบัญชี / หลุด 24 ชม.)
             # บับเบิลที่เหลือก็ไม่ถึงเหมือนกัน ยิงต่อได้แค่ error ซ้ำ
