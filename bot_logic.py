@@ -1,5 +1,5 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r7 — 2026-08-18)
-# v67 r8: persist ธง handover ลงชีต (restart แล้วยังจำได้ = ถาวรจริง)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r9 — 2026-08-18)
+# v67 r9: เซลรับช่วง = หยุดบอท 3 วัน (ไม่ถาวร) แล้วกลับมาคุยต่อจากเดิม ไม่เริ่มใหม่
 # v67 r7: โหมดเซลรับช่วงเอง — เซลพิมพ์ทักในกล่องข้อความเพจ (มีคำว่า "ที่ปรึกษา"
 #   หรือ #รับเคส) -> บอทหยุดตอบเฉพาะแชทนั้นถาวร · ยังเก็บ log ครบทั้งสองฝั่ง
 #   · สั่งกลับด้วย #เปิดบอท
@@ -992,7 +992,9 @@ def _name_from_reply(msg: str) -> str:
 # โหมด "เซลรับช่วงเอง" (Human handover) — Gift สั่ง 18 ส.ค. 2026
 # ----------------------------------------------------------------------
 # เซลพิมพ์ทักในกล่องข้อความเพจ เช่น "สวัสดีค่ะ ที่ปรึกษากิ๊ฟท์ค่ะ"
-# -> บอทหยุดตอบอัตโนมัติ "เฉพาะแชทนั้น ถาวร" ให้เซลคุยเอง
+# -> บอทหยุดตอบอัตโนมัติ "เฉพาะแชทนั้น 3 วัน" ให้เซลคุยเอง
+# -> ครบ 3 วัน บอทกลับมาตอบเอง โดยอ่านของเก่าต่อ ไม่เริ่มถามใหม่
+#    (Gift 18 ส.ค. 2026: "ไม่เอาถาวรแล้วนะ")
 # แต่ยังเก็บ log ครบ: ข้อความลูกค้า + ข้อความเซล เข้า Chat_Log เหมือนเดิม
 # และแถวลีดใน CRM ยังอยู่ ไม่ถูกลบ
 #
@@ -1000,6 +1002,12 @@ def _name_from_reply(msg: str) -> str:
 #          (ข้อความที่บอทส่งผ่าน API จะมี app_id เสมอ -> ไม่เข้าเงื่อนไข)
 # ======================================================================
 HANDOVER_TRIGGERS = ("ที่ปรึกษา", "#รับเคส", "#หยุดบอท", "#takeover")
+
+# หยุดกี่วัน — ครบแล้วบอทกลับมาตอบเอง (นับจากตอนเซลทักครั้งแรกของแชทนั้น)
+HANDOVER_DAYS = 3
+HANDOVER_TTL_SEC = HANDOVER_DAYS * 86400
+# เก็บบทสนทนาช่วงเซลดูแลไว้กี่ท่อน -> ใช้ต่อบริบทตอนบอทกลับมา
+HANDOVER_LOG_MAX = 20
 HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 
 # ชื่อเซลรายเพจ (Gift 18 ส.ค.: "ตามชื่อเซลแต่ละเพจเลยนะ")
@@ -1095,11 +1103,30 @@ class BotEngine:
         self._ensure_fb_name(user_id, state)
 
         # เซลรับช่วงแชทนี้แล้ว -> ไม่ตอบอัตโนมัติ แต่ยังเก็บ log ครบ
+        # ครบ HANDOVER_DAYS วัน -> ปลดล็อกเอง บอทคุยต่อจากของเดิม
         if state.get("handover"):
-            self._log(user_id, user_message, "")
-            self._persist(user_id, state, user_message, "(เซลดูแลเอง — บอทไม่ตอบ)", bucket)
-            print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ | {user_message[:40]!r}")
-            return "", None
+            _hat = int(state.get("handover_at") or 0)
+            if not _hat:
+                # state เก่าที่ยังไม่มีเวลา -> เริ่มจับเวลาตอนนี้ ไม่ใช่หมดอายุทันที
+                state["handover_at"] = _hat = _now()
+            _hage = _now() - _hat
+            if _hage < HANDOVER_TTL_SEC:
+                self._handover_note(state, "cust", user_message)
+                self._log(user_id, user_message, "")
+                self._persist(user_id, state, user_message, "(เซลดูแลเอง — บอทไม่ตอบ)", bucket)
+                _left = int((HANDOVER_TTL_SEC - _hage) / 3600)
+                print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
+                      f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
+                return "", None
+            # หมดเวลาแล้ว — คืนแชทให้บอท พร้อมบริบทเดิม
+            state["handover"] = False
+            state["handover_ended_at"] = _now()
+            self._add_signal(
+                state,
+                f"ครบ {HANDOVER_DAYS} วันหลังเซลรับช่วง — บอทกลับมาตอบต่อจากเดิม")
+            self._resume_context(user_id, state)
+            print(f"[HANDOVER EXPIRED] {user_id[:8]}... ครบ {HANDOVER_DAYS} วัน "
+                  f"บอทกลับมาตอบเอง")
 
         bubbles, grade = self._decide(user_message, user_id, state, bucket, is_new)
 
@@ -1563,6 +1590,7 @@ class BotEngine:
                 # -> บอทกลับไปตอบแทรกเซลกลางแชท (ไม่ "ถาวร" จริงตามที่ Gift สั่ง)
                 "handover": state.get("handover", False),
                 "handover_at": state.get("handover_at", 0),
+                "handover_log": state.get("handover_log", []),
                 "chat_name": state.get("chat_name", ""),
             },
             "log": rows,
@@ -2195,14 +2223,21 @@ class BotEngine:
         result = "logged"
         if _is_resume_trigger(text):
             state["handover"] = False
+            state["handover_ended_at"] = _now()
             result = "resume"
+            self._resume_context(customer_id, state)
             print(f"[HANDOVER OFF] {customer_id[:8]}... กลับมาให้บอทตอบ")
         elif _is_handover_trigger(text) and not state.get("handover"):
             state["handover"] = True
             state["handover_at"] = _now()
             result = "handover"
-            self._add_signal(state, "เซลเข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ถาวร")
+            state["handover_log"] = []
+            self._add_signal(
+                state,
+                f"เซลเข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_DAYS} วัน")
             print(f"[HANDOVER ON] {customer_id[:8]}... เซลรับช่วงแล้ว | {text[:40]!r}")
+        if state.get("handover"):
+            self._handover_note(state, "sale", text)
         _lead_states[skey] = state
         # เก็บข้อความของเซลลง Chat_Log ด้วย (ไม่ให้ log ขาดช่วง)
         try:
@@ -2210,6 +2245,50 @@ class BotEngine:
         except Exception as e:
             print(f"[HANDOVER PERSIST ERROR] {e}")
         return result
+
+    @staticmethod
+    def _handover_note(state: dict, who: str, text: str):
+        """เก็บบทสนทนาช่วง "เซลดูแลเอง" ไว้ใน state
+
+        state ก้อนนี้ถูก persist ลงชีตทุกครั้ง -> restart/deploy ก็ยังอยู่
+        ครบ 3 วันบอทกลับมา จึงอ่านต่อได้ว่าคุยอะไรค้างไว้ ไม่ต้องเริ่มใหม่
+        """
+        t = (text or "").strip()
+        if not t:
+            return
+        log = list(state.get("handover_log") or [])
+        log.append({"w": who, "t": t[:300]})
+        state["handover_log"] = log[-HANDOVER_LOG_MAX:]
+
+    def _resume_context(self, user_id: str, state: dict):
+        """โหลดบทสนทนาช่วงเซลคุย กลับเข้าความจำของบอท (ตอนหมดเวลา 3 วัน)
+
+        ทำเฉพาะตอนความจำใน RAM ว่าง (เพิ่ง restart) — ถ้ายังมีอยู่ ไม่ต้องยุ่ง
+        รวมท่อนที่ role ซ้ำกันติดกันเป็นก้อนเดียว เพราะ Claude API
+        ต้องการ user/assistant สลับกัน ไม่งั้น 400
+        """
+        log = state.get("handover_log") or []
+        if not log or _conversations.get(user_id):
+            return
+        msgs: list[dict] = []
+        for it in log:
+            role = "user" if it.get("w") == "cust" else "assistant"
+            txt = (it.get("t") or "").strip()
+            if not txt:
+                continue
+            if role == "assistant":
+                txt = f"[เซล] {txt}"
+            if msgs and msgs[-1]["role"] == role:
+                msgs[-1]["content"] += "\n" + txt
+            else:
+                msgs.append({"role": role, "content": txt})
+        msgs = msgs[-10:]
+        while msgs and msgs[0]["role"] != "user":
+            msgs.pop(0)
+        if msgs:
+            _conversations[user_id] = msgs
+            print(f"[HANDOVER CTX] {user_id[:8]}... "
+                  f"ต่อบทสนทนาเก่า {len(msgs)} ท่อน")
 
     def _ensure_fb_name(self, user_id: str, state: dict):
         """ดึงชื่อลูกค้าครั้งเดียวต่อ session แล้วเก็บไว้ใน state
