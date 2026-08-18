@@ -1,4 +1,5 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r10 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r12 — 2026-08-18)
+# v67 r12: ชื่อเซลแยกรายเพจ (คิวแจกแต่ละเพจไม่เหมือนกัน) + บันทึกว่าใครรับเคส
 # v67 r10: อาชีพอิสระ/เจ้าของกิจการ — ถาม 'ทำมากี่ปี + มีภาษี/จดบริษัทไหม'
 #          ตามเกณฑ์จริงใน Sheet ฐานข้อมูลธนาคาร_WEC_v2 (ทำมา 2 ปี+ · ภาษี 2 ปี+)
 #          คิดรายได้ 50% (เกณฑ์ TTB/UOB — Gift เคาะ 18 ส.ค.) · ไม่ครบเกณฑ์ = ปิดแชทสุภาพ
@@ -1079,23 +1080,51 @@ HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 # ชื่อเซลรายเพจ (Gift 18 ส.ค.: "ตามชื่อเซลแต่ละเพจเลยนะ")
 # ทักด้วยชื่อตัวเอง เช่น "สวัสดีค่ะ ที่ปรึกษาเจี๊ยบค่ะ" หรือ "สวัสดีครับ ป๊อปครับ"
 # -> เข้าเงื่อนไขรับช่วงทันที · เพิ่มชื่อใหม่ได้ที่ลิสต์นี้
-SALES_NAMES = (
-    "กิ๊ฟท์", "กิฟท์", "gift",            # Wealth Estate
-    "เจี๊ยบ", "jeab", "ป๊อป", "pop", "โม", "mo",   # Realty Smart
-    "แพท", "pat", "เล็ก", "lek",          # Wealth Owner
-    "หลี", "lee",                          # Angel Estate
-)
+# เซลรายเพจ — คิวแจกของแต่ละเพจไม่เหมือนกัน (Gift ย้ำ 18 ส.ค.)
+# ตรงกับ D_QUEUE ใน รหัส.gs: WE⟶Gift · RS⟶เจี๊ยบ/ป๊อป/โม · WO⟶แพท/เล็ก · Angel⟶ป๊อป/หลี
+# ใช้ 2 อย่าง: (1) จับว่าใครทัก = ใครรับเคส (2) บันทึกชื่อเซลลง log/ชีต
+SALES_BY_PAGE = {
+    "108248514185091": {"กิ๊ฟท์": ("กิ๊ฟท์", "กิฟท์", "gift")},
+    "102444118935634": {"เจี๊ยบ": ("เจี๊ยบ", "jeab"),
+                        "ป๊อป": ("ป๊อป", "pop"),
+                        "โม": ("โม", "mo")},
+    "103558845414793": {"แพท": ("แพท", "pat"),
+                        "เล็ก": ("เล็ก", "lek")},
+    "107182014999194": {"ป๊อป": ("ป๊อป", "pop"),
+                        "หลี": ("หลี", "lee")},
+    "115064745022991": {},          # Millionaire Asset — ยังไม่ได้เคาะทีมเซล
+}
+# ชื่อทั้งหมดรวมกัน — ใช้ตอนไม่รู้ page_id (fallback เท่านั้น)
+SALES_NAMES = tuple({k for m in SALES_BY_PAGE.values() for v in m.values() for k in v})
 _GREET_WORDS = ("สวัสดี", "หวัดดี", "ขออนุญาต")
 
 
-def _is_handover_trigger(text: str) -> bool:
+def _sales_of_page(page_id: str) -> dict:
+    """เซลของเพจนั้น — เพจที่ยังไม่ได้ตั้งทีม ให้ตกไปใช้ลิสต์รวม
+    (ดีกว่าปล่อยให้ "หยุดบอท" ใช้ไม่ได้เลยกับเพจใหม่)"""
+    m = SALES_BY_PAGE.get(str(page_id or ""))
+    if m:
+        return m
+    return {n: (n,) for n in SALES_NAMES}
+
+
+def _who_greeted(text: str, page_id: str = "") -> str:
+    """คืนชื่อเซลที่ทักเข้ามา ('' ⟶ ไม่เข้าเงื่อนไข)"""
+    t = (text or "").strip().lower()
+    if not any(g in t for g in _GREET_WORDS):
+        return ""
+    for name, keys in _sales_of_page(page_id).items():
+        if any(k.lower() in t for k in keys):
+            return name
+    return ""
+
+
+def _is_handover_trigger(text: str, page_id: str = "") -> bool:
     t = (text or "").strip().lower()
     if any(k.lower() in t for k in HANDOVER_TRIGGERS):
         return True
-    # ทักด้วยชื่อเซล: ต้องมีคำทักทาย + ชื่อ (กันข้อความทั่วไปที่บังเอิญมีชื่อ)
-    if any(g in t for g in _GREET_WORDS) and any(n.lower() in t for n in SALES_NAMES):
-        return True
-    return False
+    # ทักด้วยชื่อเซล: ต้องมีคำทักทาย + ชื่อเซล "ของเพจนั้น"
+    return bool(_who_greeted(text, page_id))
 
 
 def _is_resume_trigger(text: str) -> bool:
@@ -1663,6 +1692,7 @@ class BotEngine:
                 "handover": state.get("handover", False),
                 "handover_at": state.get("handover_at", 0),
                 "handover_log": state.get("handover_log", []),
+                "handover_by": state.get("handover_by", ""),
                 "chat_name": state.get("chat_name", ""),
             },
             "log": rows,
@@ -2358,15 +2388,20 @@ class BotEngine:
             result = "resume"
             self._resume_context(customer_id, state)
             print(f"[HANDOVER OFF] {customer_id[:8]}... กลับมาให้บอทตอบ")
-        elif _is_handover_trigger(text) and not state.get("handover"):
+        elif _is_handover_trigger(text, page_id) and not state.get("handover"):
             state["handover"] = True
             state["handover_at"] = _now()
             result = "handover"
             state["handover_log"] = []
+            _who = _who_greeted(text, page_id)
+            if _who:
+                state["handover_by"] = _who
             self._add_signal(
                 state,
-                f"เซลเข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_DAYS} วัน")
-            print(f"[HANDOVER ON] {customer_id[:8]}... เซลรับช่วงแล้ว | {text[:40]!r}")
+                (f"เซล{_who} " if _who else "เซล")
+                + f"เข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_DAYS} วัน")
+            print(f"[HANDOVER ON] {customer_id[:8]}... "
+                  f"เซล{_who or '(ไม่ระบุชื่อ)'} รับช่วงแล้ว | {text[:40]!r}")
         if state.get("handover"):
             self._handover_note(state, "sale", text)
         _lead_states[skey] = state
