@@ -154,6 +154,10 @@ function ceoSnapshot(){
   var ds = ceoSS_();
   var raw = ds.getSheetByName('_raw_daily') || ds.insertSheet('_raw_daily');
   raw.clear();
+  // บังคับคอลัมน์วันที่/เดือนเป็นข้อความ ไม่งั้น Sheets แปลงเป็น Date
+  // แล้วตอนอ่านกลับมาจะได้ object ไม่ใช่ '2026-08-19' -> สร้างมุมมองพัง
+  raw.getRange(1,1,raw.getMaxRows(),1).setNumberFormat('@');
+  raw.getRange(1,3,raw.getMaxRows(),2).setNumberFormat('@');
   raw.getRange(1,1,1,CEO_RAW_HEAD.length).setValues([CEO_RAW_HEAD])
      .setFontWeight('bold').setBackground('#17203D').setFontColor('#FFFFFF');
   if (out.length) raw.getRange(2,1,out.length,CEO_RAW_HEAD.length).setValues(out);
@@ -163,11 +167,23 @@ function ceoSnapshot(){
 
 
 /* ---------- ดึง _raw_daily มาใช้สร้างมุมมอง ---------- */
+/* เซลอาจคืนค่าเป็น Date ถ้า Sheets เผลอแปลงชนิดข้อมูล — บังคับให้เป็นข้อความเสมอ */
+function ceoStr_(v, fmt){
+  if (Object.prototype.toString.call(v) === '[object Date]')
+    return Utilities.formatDate(v, P4_TZ, fmt);
+  return String(v || '');
+}
+
 function ceoLoadRaw_(){
   var ds = ceoSS_();
   var raw = ds.getSheetByName('_raw_daily');
   if (!raw || raw.getLastRow() < 2) return { rows:[], pages:[] };
   var v = raw.getRange(2, 1, raw.getLastRow()-1, CEO_RAW_HEAD.length).getValues();
+  for (var q=0; q<v.length; q++){
+    v[q][0] = ceoStr_(v[q][0], 'yyyy-MM-dd');
+    v[q][2] = ceoStr_(v[q][2], 'yyyy-MM');
+    v[q][3] = ceoStr_(v[q][3], 'yyyy-MM');
+  }
   var pages = [CEO_ALL];
   for (var i=0; i<P4_PAGES.length; i++) pages.push(P4_PAGES[i].name);
   return { rows:v, pages:pages };
@@ -276,7 +292,7 @@ function ceoBuildView_(tabName, colIdx, limit, title, fmtHead){
         if (n > 1){
           var a1 = sh.getRange(row, 3, 1, n).getA1Notation();
           sh.getRange(row, 2).setFormula(
-            '=SPARKLINE(TRANSPOSE(SORT(TRANSPOSE(' + a1 + '),1,FALSE)),' +
+            '=SPARKLINE(TRANSPOSE(SORT(TRANSPOSE(' + a1 + '),SEQUENCE(COLUMNS(' + a1 + ')),FALSE)),' +
             '{"charttype","line";"linewidth",2;"color","#2B5CE6";"empty","zero"})');
         }
       }
@@ -308,7 +324,7 @@ function ceoHeadline_(agg, buckets){
   var cur7 = 0, prev7 = 0, i;
   for (i=0; i<7 && i<buckets.length; i++)  cur7  += ceoVal_(A[buckets[i]], 'new');
   for (i=7; i<14 && i<buckets.length; i++) prev7 += ceoVal_(A[buckets[i]], 'new');
-  var trend = prev7 ? Math.round((cur7-prev7)/prev7*100) : 0;
+  var trend = prev7 ? Math.round((cur7-prev7)/prev7*100) : null;
 
   var best = '-', bestN = -1, worst = '-', worstN = 1e9;
   for (var pg in agg){
@@ -329,7 +345,9 @@ function ceoHeadline_(agg, buckets){
       ' · ให้ช่องทางติดต่อ ' + ceoVal_(all,'contact') +
       ' · ลีดคุณภาพ A+B ' + ceoVal_(all,'ab') + ' ใบ',
     '7 วันล่าสุด คนทักใหม่ ' + cur7 + ' คน  ' +
-      (trend >= 0 ? '▲ +' : '▼ ') + trend + '% เทียบ 7 วันก่อนหน้า',
+      (trend === null || prev7 < 5
+        ? '(ยังไม่มีข้อมูล 7 วันก่อนหน้ามากพอจะเทียบ)'
+        : (trend >= 0 ? '▲ +' : '▼ ') + trend + '% เทียบ 7 วันก่อนหน้า'),
     'ลีดคุณภาพสูงสุด 7 วัน: ' + best + '   ·   ต่ำสุด: ' + worst
   ];
 }
@@ -444,7 +462,7 @@ function ceoParseIncome_(txt){
 function RUN_ONCE_ceoBackfillIncome(){
   var ss = p4SS(), done = 0, skip = 0;
   for (var i=0; i<P4_PAGES.length; i++){
-    var sh = p4EnsureTab(P4_PAGES[i].tab);
+    var sh = p4LeadSheet(P4_PAGES[i].tab);
     if (!sh) continue;
     var last = sh.getLastRow();
     if (last < 2) continue;
@@ -463,5 +481,7 @@ function RUN_ONCE_ceoBackfillIncome(){
     numR.setValues(num);
     qR.setValues(q);
   }
-  return 'เติมได้ ' + done + ' แถว · แกะไม่ออก ' + skip + ' แถว (ปล่อยว่างไว้ ไม่เดา)';
+  // เติมเสร็จแล้วสร้างรายงานใหม่ทันที ไม่ต้องรอ trigger รอบดึก
+  var re = ceoRefreshAll();
+  return 'เติมได้ ' + done + ' แถว · แกะไม่ออก ' + skip + ' แถว (ปล่อยว่างไว้ ไม่เดา) | ' + re;
 }
