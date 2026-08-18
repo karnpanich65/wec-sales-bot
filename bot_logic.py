@@ -1,4 +1,7 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r6 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r7 — 2026-08-18)
+# v67 r7: โหมดเซลรับช่วงเอง — เซลพิมพ์ทักในกล่องข้อความเพจ (มีคำว่า "ที่ปรึกษา"
+#   หรือ #รับเคส) -> บอทหยุดตอบเฉพาะแชทนั้นถาวร · ยังเก็บ log ครบทั้งสองฝั่ง
+#   · สั่งกลับด้วย #เปิดบอท
 # v67 r6 (18 ส.ค. เที่ยง — Gift จับได้จาก log เคส WO-010):
 #   ช่วงตัวเลขถูกบวกกันแทนที่จะใช้ค่ากลาง "25000-30000" -> 55,000 (ผิด)
 #   ทำให้วงเงินติดลบ เกรดเพี้ยนจาก A เป็น B/D · แก้ด้วย _collapse_ranges()
@@ -983,6 +986,48 @@ def _name_from_reply(msg: str) -> str:
     return ""
 
 
+
+# ======================================================================
+# โหมด "เซลรับช่วงเอง" (Human handover) — Gift สั่ง 18 ส.ค. 2026
+# ----------------------------------------------------------------------
+# เซลพิมพ์ทักในกล่องข้อความเพจ เช่น "สวัสดีค่ะ ที่ปรึกษากิ๊ฟท์ค่ะ"
+# -> บอทหยุดตอบอัตโนมัติ "เฉพาะแชทนั้น ถาวร" ให้เซลคุยเอง
+# แต่ยังเก็บ log ครบ: ข้อความลูกค้า + ข้อความเซล เข้า Chat_Log เหมือนเดิม
+# และแถวลีดใน CRM ยังอยู่ ไม่ถูกลบ
+#
+# ตรวจจับ: echo ที่ "ไม่มี app_id" = คนพิมพ์เองจากกล่องข้อความเพจ
+#          (ข้อความที่บอทส่งผ่าน API จะมี app_id เสมอ -> ไม่เข้าเงื่อนไข)
+# ======================================================================
+HANDOVER_TRIGGERS = ("ที่ปรึกษา", "#รับเคส", "#หยุดบอท", "#takeover")
+HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
+
+# ชื่อเซลรายเพจ (Gift 18 ส.ค.: "ตามชื่อเซลแต่ละเพจเลยนะ")
+# ทักด้วยชื่อตัวเอง เช่น "สวัสดีค่ะ ที่ปรึกษาเจี๊ยบค่ะ" หรือ "สวัสดีครับ ป๊อปครับ"
+# -> เข้าเงื่อนไขรับช่วงทันที · เพิ่มชื่อใหม่ได้ที่ลิสต์นี้
+SALES_NAMES = (
+    "กิ๊ฟท์", "กิฟท์", "gift",            # Wealth Estate
+    "เจี๊ยบ", "jeab", "ป๊อป", "pop", "โม", "mo",   # Realty Smart
+    "แพท", "pat", "เล็ก", "lek",          # Wealth Owner
+    "หลี", "lee",                          # Angel Estate
+)
+_GREET_WORDS = ("สวัสดี", "หวัดดี", "ขออนุญาต")
+
+
+def _is_handover_trigger(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if any(k.lower() in t for k in HANDOVER_TRIGGERS):
+        return True
+    # ทักด้วยชื่อเซล: ต้องมีคำทักทาย + ชื่อ (กันข้อความทั่วไปที่บังเอิญมีชื่อ)
+    if any(g in t for g in _GREET_WORDS) and any(n.lower() in t for n in SALES_NAMES):
+        return True
+    return False
+
+
+def _is_resume_trigger(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return any(k.lower() in t for k in HANDOVER_RESUME)
+
+
 class BotEngine:
     # ==================================================================
     # Entry point
@@ -1047,6 +1092,13 @@ class BotEngine:
         # ตรวจ CRM จริง 17 ส.ค. 2026: 145 ลีด มีชื่อแค่ 5 แถว (3%)
         # ยิงใน background thread เพราะ Graph API timeout 5 วิ ห้ามบล็อกการตอบลูกค้า
         self._ensure_fb_name(user_id, state)
+
+        # เซลรับช่วงแชทนี้แล้ว -> ไม่ตอบอัตโนมัติ แต่ยังเก็บ log ครบ
+        if state.get("handover"):
+            self._log(user_id, user_message, "")
+            self._persist(user_id, state, user_message, "(เซลดูแลเอง — บอทไม่ตอบ)", bucket)
+            print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ | {user_message[:40]!r}")
+            return "", None
 
         bubbles, grade = self._decide(user_message, user_id, state, bucket, is_new)
 
@@ -2114,6 +2166,44 @@ class BotEngine:
     # ==================================================================
     # Facebook / Instagram / Google Sheets
     # ==================================================================
+    def handle_page_echo(self, customer_id: str, text: str,
+                         platform: str = "facebook", page_id: str = "",
+                         from_app: bool = False) -> str:
+        """ข้อความที่ "เพจ" ส่งออก (echo) — ใช้ตรวจว่าเซลเข้ามาคุยเองหรือยัง
+
+        from_app=True  -> บอทเป็นคนส่งเอง ไม่ต้องทำอะไร
+        from_app=False -> คนพิมพ์จากกล่องข้อความเพจ
+        คืนค่า: 'handover' | 'resume' | 'logged' | 'skip'
+        """
+        if from_app:
+            return "skip"
+        skey = f"{page_id}:{customer_id}" if page_id else customer_id
+        state = _lead_states.get(skey) or self._load_session(customer_id, page_id) or {}
+        if not state:
+            state = {"data": {}, "signals": [], "asked": {}}
+        state.setdefault("data", {})
+        state["platform"] = platform
+        if page_id:
+            state["page_id"] = page_id
+        result = "logged"
+        if _is_resume_trigger(text):
+            state["handover"] = False
+            result = "resume"
+            print(f"[HANDOVER OFF] {customer_id[:8]}... กลับมาให้บอทตอบ")
+        elif _is_handover_trigger(text) and not state.get("handover"):
+            state["handover"] = True
+            state["handover_at"] = _now()
+            result = "handover"
+            self._add_signal(state, "เซลเข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ถาวร")
+            print(f"[HANDOVER ON] {customer_id[:8]}... เซลรับช่วงแล้ว | {text[:40]!r}")
+        _lead_states[skey] = state
+        # เก็บข้อความของเซลลง Chat_Log ด้วย (ไม่ให้ log ขาดช่วง)
+        try:
+            self._persist(customer_id, state, "", "[เซล] " + (text or ""), "live")
+        except Exception as e:
+            print(f"[HANDOVER PERSIST ERROR] {e}")
+        return result
+
     def _ensure_fb_name(self, user_id: str, state: dict):
         """ดึงชื่อลูกค้าครั้งเดียวต่อ session แล้วเก็บไว้ใน state
 

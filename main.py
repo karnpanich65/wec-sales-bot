@@ -591,8 +591,23 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
     if not sender_id:
         return
 
-    # ข้าม echo (ข้อความที่เพจ/IG ส่งเอง)
+    # echo = ข้อความที่ "เพจ" ส่งออก
+    # ถ้าไม่มี app_id แปลว่า "คนพิมพ์เองจากกล่องข้อความเพจ" (เซลเข้ามาคุย)
+    # -> เช็คว่าเป็นการทักเพื่อรับช่วงเคสไหม แล้วเก็บ log ข้อความเซลไว้ด้วย
     if event.get("message", {}).get("is_echo"):
+        _msg = event.get("message", {})
+        _from_app = bool(_msg.get("app_id"))
+        _customer = event.get("recipient", {}).get("id", "")
+        _txt = _msg.get("text", "") or ""
+        if _customer and _txt:
+            try:
+                _res = bot.handle_page_echo(
+                    _customer, _txt, platform=platform,
+                    page_id=page_id, from_app=_from_app)
+                if _res != "skip":
+                    print(f"[ECHO] ({platform}) {_mask(_customer)} -> {_res} | {_txt[:40]!r}")
+            except Exception as _e:
+                print(f"[ECHO ERROR] {_e}")
         return
 
     # ข้าม event ที่เคยประมวลผลแล้ว (Meta ส่งซ้ำเมื่อรอ 200 นานเกินไป)
@@ -647,7 +662,10 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
         page_id=page_id, brand=page_brand(page_id), sheet_tab=page_tab(page_id),
             gender=page_gender(page_id),
     )
-    send_reply(sender_id, reply_text, page_id)
+    if reply_text and reply_text.strip():
+        send_reply(sender_id, reply_text, page_id)
+    else:
+        print(f"[SILENT] ({platform}) {_mask(sender_id)} ไม่ตอบ (เซลดูแลเอง)")
 
     if lead_grade == "A":
         alert_lead(sender_id, user_text, lead_referral.get("ad_id", ""), page_id)
