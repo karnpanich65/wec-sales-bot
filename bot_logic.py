@@ -1,4 +1,5 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r14 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r15 — 2026-08-18)
+# v67 r15: ตัดวรรณยุกต์ก่อนเทียบคำ ("ปรับปรุ่ง"/"สร่าง"/"หนี่" ก็จับได้)
 # v67 r14: อุดคำที่ลูกค้าเขียนจริง — "ปรับปรุงโครงสร้างหนี้" (r13 จับไม่ได้ = ปล่อยเคสแดงผ่าน)
 #          + ธงเสี่ยง: จ่ายบัตรขั้นต่ำ · หนี้นอกระบบ · บัตรหลายใบ (บอกเซล ไม่ตัดเกรด)
 # v67 r13: คัดกรองประวัติเครดิต — ติดบูโร/ล่าช้า/ปรับโครงสร้าง ถามต่อแล้วตัดสิน
@@ -335,8 +336,7 @@ _SELF_EMP_WORDS = (
 
 
 def _is_self_employed(msg: str) -> bool:
-    m = (msg or "").replace(" ", "")
-    return any(w in m for w in _SELF_EMP_WORDS)
+    return _has_any(msg, _SELF_EMP_WORDS)
 
 
 # ----------------------------------------------------------------------
@@ -359,7 +359,8 @@ def _is_self_employed(msg: str) -> bool:
 NCB_CLEAR_YEARS = 3
 NCB_LATE_DAYS = 30
 
-_NCB_BLACKLIST_WORDS = ("ติดบูโร", "ติดแบล็ค", "ติดแบล๊ค", "แบล็คลิสต์", "แบล๊คลิสต์",
+_NCB_BLACKLIST_WORDS = ("ติดบูโร", "ติดบูโล", "ติดบุโร", "ติดบูโล่", "บูโรเสีย",
+                        "ติดแบล็ค", "ติดแบล๊ค", "แบล็คลิสต์", "แบล๊คลิสต์",
                         "แบลคลิสต์", "blacklist", "ติดเครดิตบูโร", "บูโรไม่ผ่าน",
                         "ติดหนี้เสีย", "หนี้เสีย", "npl", "โดนฟ้อง", "ถูกฟ้อง",
                         "ค้างชำระ", "ค้างอยู่", "ติดบัญชีดำ")
@@ -377,26 +378,39 @@ _BANK_WORDS = ("กสิกร", "kbank", "ไทยพาณิชย์", "sc
                "เฟิร์สช้อยส์", "กรุงศรีออโต้", "ทิสโก้", "ธนชาต")
 
 
+# ลูกค้าพิมพ์ผิดวรรณยุกต์เป็นเรื่องปกติ ("ปรับปรุ่ง" / "สร่าง" / "หนี่")
+# ตัดวรรณยุกต์ + ช่องว่างทั้งสองฝั่งก่อนเทียบ -> ครอบคำสะกดเพี้ยนได้เกือบหมด
+# โดยไม่ต้องไล่เพิ่ม dictionary ทีละคำ (บทเรียนเคส May 18 ส.ค.)
+_TONE_MARKS = dict.fromkeys(map(ord, "\u0e48\u0e49\u0e4a\u0e4b\u0e4c\u0e47"), None)
+
+
+def _norm_th(t: str) -> str:
+    return (t or "").translate(_TONE_MARKS).replace(" ", "").lower()
+
+
+def _has_any(msg: str, words) -> bool:
+    m = _norm_th(msg)
+    return any(_norm_th(w) in m for w in words)
+
+
 def _ncb_kind(msg: str) -> str:
     """ประเภทปัญหาเครดิตที่ลูกค้าพูดถึง ('' ⟶ ไม่มี)"""
-    m = (msg or "").lower().replace(" ", "")
-    if any(w in m for w in _NCB_RESTRUCT_WORDS):
+    if _has_any(msg, _NCB_RESTRUCT_WORDS):
         return "restruct"
-    if any(w in m for w in _NCB_BLACKLIST_WORDS):
+    if _has_any(msg, _NCB_BLACKLIST_WORDS):
         return "blacklist"
-    if any(w in m for w in _NCB_LATE_WORDS):
+    if _has_any(msg, _NCB_LATE_WORDS):
         return "late"
     return ""
 
 
 def _ncb_still_stuck(msg: str) -> bool | None:
     """ตอนนี้ยังติดอยู่ไหม — True ยังติด / False ปิดแล้ว / None ไม่ชัด"""
-    m = (msg or "").replace(" ", "")
-    if any(w in m for w in ("ปิดแล้ว", "ปิดหมดแล้ว", "เคลียร์แล้ว", "หายแล้ว",
-                            "จ่ายหมดแล้ว", "ไม่ติดแล้ว", "ปลดแล้ว", "ชำระหมดแล้ว")):
+    if _has_any(msg, ("ปิดแล้ว", "ปิดหมดแล้ว", "เคลียร์แล้ว", "หายแล้ว",
+                      "จ่ายหมดแล้ว", "ไม่ติดแล้ว", "ปลดแล้ว", "ชำระหมดแล้ว")):
         return False
-    if any(w in m for w in ("ยังติด", "ยังอยู่", "ยังไม่ได้ปิด", "ยังค้าง",
-                            "ยังไม่ปิด", "ติดอยู่")):
+    if _has_any(msg, ("ยังติด", "ยังอยู่", "ยังไม่ได้ปิด", "ยังค้าง",
+                      "ยังไม่ปิด", "ติดอยู่")):
         return True
     return None
 
@@ -404,11 +418,11 @@ def _ncb_still_stuck(msg: str) -> bool | None:
 def _ncb_over_30(msg: str) -> bool | None:
     """ล่าช้าเกิน 30 วันไหม — True เกิน / False ไม่เกิน / None ไม่ชัด"""
     m = (msg or "").replace(" ", "")
-    if any(w in m for w in ("ไม่เกิน", "ไม่ถึง", "ไม่เคยเกิน", "ต่ำกว่า",
-                            "ไม่กี่วัน", "อาทิตย์เดียว", "ไม่นาน")):
+    if _has_any(msg, ("ไม่เกิน", "ไม่ถึง", "ไม่เคยเกิน", "ต่ำกว่า",
+                      "ไม่กี่วัน", "อาทิตย์เดียว", "ไม่นาน")):
         return False
     # "เกิน 30 วันครับ ประมาณ 60 วัน" -> ต้องอ่านว่าเกิน ไม่ใช่จับเลข 30 ตัวแรก
-    if any(w in m for w in ("เกิน", "หลายเดือน", "เป็นเดือน", "ค้างมานาน")):
+    if _has_any(msg, ("เกิน", "หลายเดือน", "เป็นเดือน", "ค้างมานาน")):
         return True
     days = [int(d) for d in re.findall(r"(\d{1,3})\s*วัน", m)]
     if days:
@@ -440,12 +454,7 @@ _RISK_FLAGS = (
 
 
 def _risk_flag_msgs(msg: str) -> list:
-    m = (msg or "").replace(" ", "")
-    out = []
-    for keys, sig in _RISK_FLAGS:
-        if any(k.replace(" ", "") in m for k in keys):
-            out.append(sig)
-    return out
+    return [sig for keys, sig in _RISK_FLAGS if _has_any(msg, keys)]
 
 
 NCB_Q = {
@@ -505,10 +514,10 @@ def _parse_years(msg: str) -> int | None:
 
 def _parse_tax_flag(msg: str) -> bool | None:
     """มีภาษี/จดบริษัทไหม -> True / False / None (ยังไม่รู้)"""
-    m = (msg or "").replace(" ", "")
-    if any(w in m for w in _TAX_NO_WORDS):
+    m = _norm_th(msg)
+    if _has_any(msg, _TAX_NO_WORDS):
         return False
-    if any(w in m for w in _TAX_YES_WORDS):
+    if _has_any(msg, _TAX_YES_WORDS):
         return True
     if re.fullmatch(r"(ไม่|ไม่มี|ยังไม่มี|ยังไม่|ไม่ครับ|ไม่ค่ะ)[ครับค่ะคะจ้า]*", m):
         return False
