@@ -116,6 +116,44 @@ def page_gender(page_id: str) -> str:
     return (PAGES.get(str(page_id), {}) or {}).get("gender", "")
 
 
+# ======================================================
+# ตั้ง webhook fields ของแต่ละเพจให้ครบเอง (18 ส.ค. 2026)
+# ----------------------------------------------------
+# Meta ส่ง echo (ข้อความที่เพจส่งออก) ให้เฉพาะเพจที่ subscribe field
+# `message_echoes` ไว้เท่านั้น — เปิดที่ระดับแอปอย่างเดียวไม่พอ
+# ไม่มี field นี้ = โหมด "เซลรับช่วงเอง" ไม่ทำงานเลย เพราะบอทไม่รู้ว่าเซลพิมพ์
+# เรียก Graph API ด้วยโทเค็นเพจที่ตั้งไว้ใน env อยู่แล้ว (ตัวเดียวกับที่ใช้ส่งข้อความ)
+# รันตอนบูตครั้งเดียวใน thread — ล้มเหลวก็ไม่กระทบการตอบลูกค้า
+# ======================================================
+SUBSCRIBE_FIELDS = ("feed,messages,messaging_postbacks,messaging_referrals,"
+                    "messaging_handovers,message_echoes,standby")
+
+
+def _ensure_page_subscriptions():
+    for _key in [k for k in os.environ if k.startswith("PAGE_TOKEN_")]:
+        _tok = (os.environ.get(_key) or "").strip()
+        if not _tok:
+            continue
+        _pid = _key[len("PAGE_TOKEN_"):]
+        try:
+            r = requests.post(
+                f"https://graph.facebook.com/v22.0/{_pid}/subscribed_apps",
+                params={"subscribed_fields": SUBSCRIBE_FIELDS,
+                        "access_token": _tok},
+                timeout=10,
+            )
+            print(f"[SUBSCRIBE] page={_pid} http={r.status_code} {r.text[:150]}")
+        except Exception as _e:
+            print(f"[SUBSCRIBE ERROR] page={_pid} {_e}")
+
+
+try:
+    import threading
+    threading.Thread(target=_ensure_page_subscriptions, daemon=True).start()
+except Exception as _e:
+    print(f"[SUBSCRIBE BOOT ERROR] {_e}")
+
+
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
 FB_APP_SECRET = os.environ.get("FB_APP_SECRET", "")  # เว้นว่าง = dev mode (ข้าม signature check)
 GIFT_FB_PSID = os.environ.get("GIFT_FB_PSID", "")
