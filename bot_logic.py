@@ -1,4 +1,6 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r12 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r13 — 2026-08-18)
+# v67 r13: คัดกรองประวัติเครดิต — ติดบูโร/ล่าช้า/ปรับโครงสร้าง ถามต่อแล้วตัดสิน
+#          ตามเกณฑ์ engine (ล่าช้า >30 วัน · ปรับโครงสร้างต้องพ้น 3 ปี) = เคสแดง ปิดสุภาพ
 # v67 r12: ชื่อเซลแยกรายเพจ (คิวแจกแต่ละเพจไม่เหมือนกัน) + บันทึกว่าใครรับเคส
 # v67 r10: อาชีพอิสระ/เจ้าของกิจการ — ถาม 'ทำมากี่ปี + มีภาษี/จดบริษัทไหม'
 #          ตามเกณฑ์จริงใน Sheet ฐานข้อมูลธนาคาร_WEC_v2 (ทำมา 2 ปี+ · ภาษี 2 ปี+)
@@ -344,6 +346,97 @@ def _is_self_employed(msg: str) -> bool:
 # Gift เคาะ: บอทใช้ 50% (เกณฑ์ TTB/UOB) — ไม่เฟ้อแบบ KBank ไม่ต่ำเกินแบบ KTB
 # เจ้าของบริษัทจดทะเบียน = รับ (engine มี company_grade จากยอดขาย DBD อยู่แล้ว)
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# คัดกรองประวัติเครดิต / บูโร (Gift สั่ง 18 ส.ค. 2026)
+# ตัวเลขยึดตาม engine `rules.json` -> case_color.red_conditions:
+#   · ชำระล่าช้าเกิน 30 วัน                        = เคสแดง
+#   · ปรับโครงสร้างหนี้ ยังไม่พ้น 3 ปีนับจากวันปรับ = เคสแดง
+# เคสแดง = ธนาคารไม่รับ -> บอทปิดบทสนทนาแบบสุภาพ ไม่รับปากว่าจะโทรกลับ
+# แต่ยังเก็บลีดเข้าชีต (เกรด N + สัญญาณบอกเหตุผล) เผื่อนโยบายเปลี่ยน
+# ----------------------------------------------------------------------
+NCB_CLEAR_YEARS = 3
+NCB_LATE_DAYS = 30
+
+_NCB_BLACKLIST_WORDS = ("ติดบูโร", "ติดแบล็ค", "ติดแบล๊ค", "แบล็คลิสต์", "แบล๊คลิสต์",
+                        "แบลคลิสต์", "blacklist", "ติดเครดิตบูโร", "บูโรไม่ผ่าน",
+                        "ติดหนี้เสีย", "หนี้เสีย", "npl", "โดนฟ้อง", "ถูกฟ้อง",
+                        "ค้างชำระ", "ค้างอยู่", "ติดบัญชีดำ")
+_NCB_LATE_WORDS = ("จ่ายช้า", "ผ่อนช้า", "ชำระช้า", "ล่าช้า", "จ่ายไม่ตรง",
+                   "ค้างค่างวด", "เลยกำหนด", "จ่ายเลท", "เลทบ้าง")
+_NCB_RESTRUCT_WORDS = ("ปรับโครงสร้างหนี้", "ปรับโครงสร้าง", "ประนอมหนี้",
+                       "คลินิกแก้หนี้", "พักชำระหนี้", "ปรับหนี้")
+_BANK_WORDS = ("กสิกร", "kbank", "ไทยพาณิชย์", "scb", "กรุงเทพ", "bbl", "กรุงไทย",
+               "ktb", "กรุงศรี", "bay", "ทีเอ็มบี", "ttb", "ออมสิน", "gsb",
+               "ธอส", "ยูโอบี", "uob", "เกียรตินาคิน", "kk", "ซิตี้", "อิออน",
+               "เฟิร์สช้อยส์", "กรุงศรีออโต้", "ทิสโก้", "ธนชาต")
+
+
+def _ncb_kind(msg: str) -> str:
+    """ประเภทปัญหาเครดิตที่ลูกค้าพูดถึง ('' ⟶ ไม่มี)"""
+    m = (msg or "").lower().replace(" ", "")
+    if any(w in m for w in _NCB_RESTRUCT_WORDS):
+        return "restruct"
+    if any(w in m for w in _NCB_BLACKLIST_WORDS):
+        return "blacklist"
+    if any(w in m for w in _NCB_LATE_WORDS):
+        return "late"
+    return ""
+
+
+def _ncb_still_stuck(msg: str) -> bool | None:
+    """ตอนนี้ยังติดอยู่ไหม — True ยังติด / False ปิดแล้ว / None ไม่ชัด"""
+    m = (msg or "").replace(" ", "")
+    if any(w in m for w in ("ปิดแล้ว", "ปิดหมดแล้ว", "เคลียร์แล้ว", "หายแล้ว",
+                            "จ่ายหมดแล้ว", "ไม่ติดแล้ว", "ปลดแล้ว", "ชำระหมดแล้ว")):
+        return False
+    if any(w in m for w in ("ยังติด", "ยังอยู่", "ยังไม่ได้ปิด", "ยังค้าง",
+                            "ยังไม่ปิด", "ติดอยู่")):
+        return True
+    return None
+
+
+def _ncb_over_30(msg: str) -> bool | None:
+    """ล่าช้าเกิน 30 วันไหม — True เกิน / False ไม่เกิน / None ไม่ชัด"""
+    m = (msg or "").replace(" ", "")
+    if any(w in m for w in ("ไม่เกิน", "ไม่ถึง", "ไม่เคยเกิน", "ต่ำกว่า",
+                            "ไม่กี่วัน", "อาทิตย์เดียว", "ไม่นาน")):
+        return False
+    # "เกิน 30 วันครับ ประมาณ 60 วัน" -> ต้องอ่านว่าเกิน ไม่ใช่จับเลข 30 ตัวแรก
+    if any(w in m for w in ("เกิน", "หลายเดือน", "เป็นเดือน", "ค้างมานาน")):
+        return True
+    days = [int(d) for d in re.findall(r"(\d{1,3})\s*วัน", m)]
+    if days:
+        return max(days) > NCB_LATE_DAYS
+    mo = re.search(r"(\d{1,2})\s*เดือน", m)
+    if mo:
+        return int(mo.group(1)) >= 1
+    return None
+
+
+def _bank_from(msg: str) -> str:
+    m = (msg or "").lower()
+    for b in _BANK_WORDS:
+        if b in m:
+            return b
+    return ""
+
+
+NCB_Q = {
+    "blacklist": ("ขออนุญาตถามตรงๆ นิดนึงนะครับ ตอนนี้ยังติดอยู่ไหมครับ "
+                  "ถ้าปิดไปแล้ว ปิดมากี่ปีแล้วและเป็นของธนาคารไหนครับ "
+                  "— ธนาคารดูตรงนี้เป็นหลักครับ"),
+    "late": ("ขออนุญาตถามเพิ่มนิดนึงครับ ที่ชำระล่าช้า เคยเลยกำหนด "
+             "เกิน 30 วันไหมครับ"),
+    "restruct": ("ขออนุญาตถามครับ ปรับโครงสร้างหนี้มากี่ปีแล้วครับ "
+                 "และหลังจากนั้นชำระปกติตลอดไหมครับ"),
+}
+
+NCB_SOFT_CLOSE = (
+    "ขอบคุณที่ให้ข้อมูลตรงๆ นะครับ 🙏 เคสลักษณะนี้ตอนนี้ธนาคารส่วนใหญ่ยังไม่รับ"
+    "พิจารณาครับ ผมเก็บข้อมูลของลูกค้าไว้ให้แล้ว ถ้ามีนโยบายหรือโปรแกรมใหม่ที่รับ"
+    "เคสแบบนี้เข้ามา จะรีบแจ้งให้ทราบทันทีครับ"
+)
+
 FREELANCE_INCOME_PCT = 0.50
 FREELANCE_MIN_YEARS = 2
 
@@ -1253,6 +1346,21 @@ class BotEngine:
                 self._send_name_update(user_id, state)
                 return [f"ขอบคุณครับ คุณ{_nm} 🙏 เดี๋ยวที่ปรึกษาติดต่อไปครับ"], None
 
+        # ---- 0.5) คำตอบของคำถามประวัติเครดิต (ถามไปรอบก่อน) ------------
+        # ใช้ธงเฉพาะ ไม่ผ่าน FIELD_ORDER — ไม่งั้นไปแย่งคิวคำถามหลัก
+        # (บทเรียน 18 ส.ค.: ใส่ใน FIELD_ORDER แล้วเบอร์โทรถูกกลืนหายไปเลย)
+        if state.pop("awaiting_ncb", False):
+            if self._is_valid_answer("ncb", msg):
+                self._capture(state, "ncb", msg)
+                state["awaiting"] = None
+                awaiting = None
+            else:
+                # ตอบไม่ตรง -> ถามซ้ำได้ 1 ครั้ง แล้วปล่อย ไม่ไล่บี้
+                if not state.get("ncb_reasked"):
+                    state["ncb_reasked"] = True
+                    state["awaiting_ncb"] = True
+                    bubbles.append(NCB_Q.get(state.get("ncb_kind"), NCB_Q["blacklist"]))
+
         # ---- 1) เปิดหัวข้อความตามระยะที่หายไป -------------------------
         # ข้อความแรกที่เป็นคำถามจริง -> ไม่ต้องทักทาย ตอบคำถามเขาเลย
         # เจอ 15 ส.ค.: คนตอบกลับโฆษณาได้ข้อความทักทายไปแล้ว 1 ครั้ง
@@ -1272,6 +1380,20 @@ class BotEngine:
         # ---- 1.5) อ่านเจตนาพิเศษก่อนอย่างอื่น (Phase 4.3) --------------
         state["turns"] = state.get("turns", 0) + 1
         self._scan_signals(state, msg)
+
+        # ธงประวัติเครดิต — ลูกค้าพูดเองเมื่อไหร่ ตั้งธงแล้วถามต่อ 1 ข้อ
+        if not state.get("ncb_kind"):
+            _k = _ncb_kind(msg)
+            if _k and not data.get("cash"):
+                state["ncb_kind"] = _k
+                data["ncb_raw"] = msg[:200]
+                state["awaiting_ncb"] = True
+                bubbles.append(NCB_Q.get(_k, NCB_Q["blacklist"]))
+                self._add_signal(
+                    state,
+                    {"blacklist": "⚠️ ลูกค้าแจ้งเองว่าเคยติดบูโร/แบล็คลิสต์ — ต้องเช็คว่าปิดแล้วกี่ปี",
+                     "late": "⚠️ ลูกค้าแจ้งเองว่าเคยชำระล่าช้า — เกิน 30 วันคือเคสแดง",
+                     "restruct": "⚠️ ลูกค้าแจ้งเองว่าเคยปรับโครงสร้างหนี้ — ต้องพ้น 3 ปีขึ้นไป"}[_k])
 
         # ธงอาชีพอิสระ/ไม่มีประกันสังคม — ติดครั้งเดียว ไม่ตัดเกรด
         if not state.get("self_employed") and _is_self_employed(msg):
@@ -1424,7 +1546,7 @@ class BotEngine:
                     state["fb_name"] = _nm   # ชื่อจากแชทชนะชื่อโปรไฟล์
                 grade = self._finish(user_id, state, msg)
                 if state.get("soft_close"):
-                    bubbles.append(SELF_EMP_SOFT_CLOSE)
+                    bubbles.append(state.get("soft_close_msg") or SELF_EMP_SOFT_CLOSE)
                 else:
                     bubbles.append(self._grade_reply(grade, msg))
                 if not state.get("chat_name") and not state.get("name_asked"):
@@ -1693,6 +1815,7 @@ class BotEngine:
                 "handover_at": state.get("handover_at", 0),
                 "handover_log": state.get("handover_log", []),
                 "handover_by": state.get("handover_by", ""),
+                "ncb_kind": state.get("ncb_kind", ""),
                 "chat_name": state.get("chat_name", ""),
             },
             "log": rows,
@@ -1721,6 +1844,25 @@ class BotEngine:
     def _capture(self, state: dict, field: str, msg: str):
         data = state["data"]
         data[field] = msg
+        if field == "ncb":
+            kind = state.get("ncb_kind") or "blacklist"
+            yrs = _parse_years(msg) if kind in ("blacklist", "restruct") else None
+            if yrs is not None:
+                data["ncb_years"] = yrs
+            bank = _bank_from(msg)
+            if bank:
+                data["ncb_bank"] = bank
+            if kind == "blacklist":
+                st = _ncb_still_stuck(msg)
+                if st is not None:
+                    data["ncb_still"] = st
+                elif yrs is not None:
+                    data["ncb_still"] = False   # บอกจำนวนปี = ปิดไปแล้ว
+            elif kind == "late":
+                ov = _ncb_over_30(msg)
+                if ov is not None:
+                    data["ncb_over30"] = ov
+            return
         if field == "self_emp":
             # แยกเป็น 2 ค่าให้เซล/เกรดใช้ได้จริง ไม่ใช่เก็บเป็นข้อความก้อนเดียว
             yrs = _parse_years(msg)
@@ -2076,6 +2218,10 @@ class BotEngine:
         if field == "objective":
             # ต้องพูดถึงเป้าหมายจริง ไม่งั้นเก็บคำลอยๆ เป็นวัตถุประสงค์
             return any(k in m.lower() for k in _OBJECTIVE_WORDS)
+        if field == "ncb":
+            return (_parse_years(m) is not None
+                    or _ncb_still_stuck(m) is not None
+                    or _ncb_over_30(m) is not None)
         if field == "self_emp":
             # ต้องมีตัวเลขปี หรือคำตอบเรื่องภาษี/จดทะเบียน อย่างน้อย 1 อย่าง
             return (_parse_years(m) is not None) or (_parse_tax_flag(m) is not None)
@@ -2205,6 +2351,63 @@ class BotEngine:
             # C แปลว่า "คำนวณแล้วยังไม่ไหว" · N แปลว่า "ยังคำนวณไม่ได้ ต้องโทรถาม"
             # ห้ามปนกัน ไม่งั้นลีดดีที่แค่ไม่บอกตัวเลขจะจมไปกับเคสที่ไปต่อไม่ได้
             return "N"
+
+        # ---- ประวัติเครดิต (Gift 18 ส.ค. · engine case_color.red_conditions) ----
+        # แดง = ธนาคารไม่รับ -> ปิดบทสนทนาสุภาพ + เกรด N (ยังเก็บลีดไว้)
+        _k = state.get("ncb_kind") if state is not None else None
+        if _k and state is not None:
+            _yrs = data.get("ncb_years")
+            _reject = False
+            _why = ""
+            if _k == "blacklist":
+                if data.get("ncb_still") is True:
+                    _reject, _why = True, "ยังติดบูโร/ค้างชำระอยู่ ณ ตอนนี้"
+                elif _yrs is not None and _yrs < 1:
+                    _reject, _why = True, "เพิ่งปิดบัญชีที่ค้าง ยังไม่พ้น 1 ปี"
+                elif _yrs is not None and _yrs >= NCB_CLEAR_YEARS:
+                    self._add_signal(
+                        state,
+                        f"เคยติดบูโร แต่ปิดมาแล้ว {_yrs} ปี"
+                        + (f" ({data.get('ncb_bank')})" if data.get("ncb_bank") else "")
+                        + f" — พ้น {NCB_CLEAR_YEARS} ปีแล้ว ยื่นได้ตามปกติ")
+                else:
+                    self._add_signal(
+                        state,
+                        "เคยติดบูโร ปิดแล้วแต่ยังไม่พ้น 3 ปี (หรือยังไม่ยืนยันจำนวนปี) "
+                        "— ให้เซลดึงบูโรจริงก่อนเสนอแผน · บางแบงก์ดูย้อน 1 ปีไม่ช้ำ (KTB)")
+                    return "N"
+            elif _k == "late":
+                if data.get("ncb_over30") is True:
+                    _reject, _why = True, f"ชำระล่าช้าเกิน {NCB_LATE_DAYS} วัน"
+                elif data.get("ncb_over30") is False:
+                    self._add_signal(
+                        state,
+                        f"เคยชำระล่าช้าแต่ไม่เกิน {NCB_LATE_DAYS} วัน — ยังไม่ใช่เคสแดง "
+                        "แต่ตั้งธงไว้ ให้เช็คบูโรจริง")
+                else:
+                    self._add_signal(
+                        state, "เคยชำระล่าช้า ยังไม่ยืนยันว่าเกิน 30 วันไหม — โทรถามก่อน")
+                    return "N"
+            elif _k == "restruct":
+                if _yrs is not None and _yrs < NCB_CLEAR_YEARS:
+                    _reject, _why = True, f"ปรับโครงสร้างหนี้มา {_yrs} ปี ยังไม่พ้น {NCB_CLEAR_YEARS} ปี"
+                elif _yrs is not None:
+                    self._add_signal(
+                        state,
+                        f"เคยปรับโครงสร้างหนี้ แต่ผ่านมาแล้ว {_yrs} ปี (เกิน {NCB_CLEAR_YEARS} ปี) "
+                        "— ยื่นได้ ถ้าหลังจากนั้นชำระปกติ")
+                else:
+                    self._add_signal(
+                        state, "เคยปรับโครงสร้างหนี้ ยังไม่ยืนยันว่ากี่ปี — โทรถามก่อน")
+                    return "N"
+            if _reject:
+                state["soft_close"] = True
+                state["soft_close_msg"] = NCB_SOFT_CLOSE
+                self._add_signal(
+                    state,
+                    f"❌ ประวัติเครดิตไม่ผ่านเกณฑ์ธนาคาร: {_why} "
+                    "(engine: เคสแดง ห้ามเสนอแผน) — เก็บไว้ตามเมื่อนโยบายเปลี่ยน")
+                return "N"
 
         # ---- อาชีพอิสระ/เจ้าของกิจการ (Gift 18 ส.ค. · Sheet ฐานข้อมูลธนาคาร_WEC_v2)
         # เงื่อนไขรับเคส: ทำมา 2 ปี+ และมีภาษี/จดทะเบียน · ไม่ครบ = N ให้คนตรวจ
