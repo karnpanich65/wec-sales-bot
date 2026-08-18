@@ -2989,6 +2989,29 @@ class BotEngine:
                 print(f"[NAME ERROR] ({platform}) page={page_id or '-'} via {src} {e}")
         return ""
 
+    @staticmethod
+    def _income_numbers(data: dict) -> dict:
+        """ตัวเลขรายได้สำหรับรายงาน CEO — ต้องเป็นตัวเลขจริง ไม่ใช่ข้อความ
+
+        รายงานต้องนับ "รายได้ถึงเกณฑ์ 25,000" ให้ตรง ถ้าปล่อยให้ชีตไป
+        แกะเลขจากข้อความ ("พนักงานประจำ รายได้ 60k ค่ะ") จะเพี้ยนแน่นอน
+        บอทรู้ตัวเลขอยู่แล้วตอนคำนวณวงเงิน — ส่งไปตรงๆ ดีกว่า
+        เกณฑ์นับรายได้ "รวมผู้กู้ร่วม" (Gift เคาะ 19 ส.ค. 2026)
+        """
+        own = data.get("income_baht")
+        if own is None:
+            own = _parse_income(str(data.get("income", "")))
+        total = data.get("income_total") or own
+        qualified = ""
+        if total is not None and not data.get("income_unknown"):
+            qualified = "1" if int(total) >= LOW_INCOME_BAHT else "0"
+        return {
+            "income_baht":  "" if own is None else int(own),
+            "income_total": "" if total is None else int(total),
+            "co_income":    data.get("co_borrower_income") or "",
+            "qualified25k": qualified,
+        }
+
     def _upsert_lead(self, state: dict):
         """ส่งลีด 'บางส่วน' เข้าชีตทันทีที่ได้ข้อมูลใหม่ — กันลีดหลุด
         ใช้ action แยก เพื่อไม่ให้ Apps Script ตัวเก่าเผลอสร้างนัดในปฏิทินซ้ำ
@@ -3014,6 +3037,7 @@ class BotEngine:
             "score": self._intent_score(state),
             "cash": "ใช่" if data.get("cash") else "",
             "no_call": "ไม่สะดวกให้โทร" if state.get("contact_refused") else "",
+            **self._income_numbers(data),
         })
 
     def _send_name_update(self, user_id: str, state: dict):
@@ -3064,6 +3088,7 @@ class BotEngine:
             "cash":          "ใช่" if data.get("cash") else "",
             "no_call":       "ไม่สะดวกให้โทร" if contact_refused else "",
             "no_calendar":   "1" if not calendar else "",
+            **self._income_numbers(data),
         }
         try:
             resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)
