@@ -1,4 +1,5 @@
-# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r16 — 2026-08-18)
+# bot_logic.py — WEC Sales Bot Phase 4.0 (v67 r17 — 2026-08-18)
+# v67 r17: เพจใหม่ Millionaire Asset (ปราช) + New Chapter Investment
 # v67 r16: เพิ่มเซล 'บุญ' เพจ Wealth Estate (คิว 6:1)
 # v67 r15: ตัดวรรณยุกต์ก่อนเทียบคำ ("ปรับปรุ่ง"/"สร่าง"/"หนี่" ก็จับได้)
 # v67 r14: อุดคำที่ลูกค้าเขียนจริง — "ปรับปรุงโครงสร้างหนี้" (r13 จับไม่ได้ = ปล่อยเคสแดงผ่าน)
@@ -1223,7 +1224,10 @@ SALES_BY_PAGE = {
                         "เล็ก": ("เล็ก", "lek")},
     "107182014999194": {"ป๊อป": ("ป๊อป", "pop"),
                         "หลี": ("หลี", "lee")},
-    "115064745022991": {},          # Millionaire Asset — ยังไม่ได้เคาะทีมเซล
+    # Millionaire Asset — เพจใหม่ millionaireassetthai (18 ส.ค.) · เซล: ปราช คนเดียว
+    "100899675332209": {"ปราช": ("ปราช", "ปราชญ์", "prach", "เอกภาพันธ์")},
+    "115064745022991": {},          # MA เพจเก่า — ยังไม่เคาะว่าเลิกใช้ไหม
+    "108941814354248": {},          # New Chapter Investment — ยังไม่มีเซล (MKT=เอย)
 }
 # ชื่อทั้งหมดรวมกัน — ใช้ตอนไม่รู้ page_id (fallback เท่านั้น)
 SALES_NAMES = tuple({k for m in SALES_BY_PAGE.values() for v in m.values() for k in v})
