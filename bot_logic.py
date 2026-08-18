@@ -73,7 +73,7 @@ from faq_data import (
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
-    NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE,
+    NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -98,7 +98,9 @@ GAP_SAME_DAY = 24 * 60 * 60  # 1 วัน
 
 # ลำดับข้อมูลที่ต้องเก็บ -> index ใน QUALIFY_QUESTIONS
 # co_borrower ถามเฉพาะเคสรายได้ต่ำกว่า LOW_INCOME_BAHT (ดู _next_missing)
-FIELD_ORDER = ["objective", "income", "self_emp", "co_borrower", "debt", "contact"]
+# co_income/co_debt ถามเฉพาะเคสที่ตอบว่า "มีผู้กู้ร่วม" (co_borrower_yes)
+FIELD_ORDER = ["objective", "income", "self_emp", "co_borrower",
+               "co_income", "co_debt", "debt", "contact"]
 FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3,
                  "co_borrower": 4}
 
@@ -960,6 +962,19 @@ _COURTESY_WORDS = (
 )
 
 
+# เบอร์มือถือไทย — ใช้กันไม่ให้เบอร์ถูกกลืนเป็น "ยอดผ่อน" หรือ "รายได้"
+_PHONE_RE = re.compile(r"(?<!\d)0\d{8,9}(?!\d)")
+
+
+def _looks_like_phone(msg: str) -> bool:
+    return bool(_PHONE_RE.search(re.sub(r"[\-\s\.]", "", msg or "")))
+
+
+# ประโยคที่ขึ้นต้นแบบนี้ = คำตอบเชิงปฏิเสธ ไม่ใช่คำถาม
+_NEGATIVE_STARTS = ("ไม่มี", "ไม่ได้", "ยังไม่", "ไม่เคย", "ไม่ค่อย", "ไม่ครับ",
+                    "ไม่ค่ะ", "ไม่มีครับ", "ไม่มีค่ะ")
+
+
 def _is_reopen(msg: str) -> bool:
     return _has_any(msg, _REOPEN_WORDS)
 
@@ -1414,29 +1429,52 @@ class BotEngine:
                 self._send_name_update(user_id, state)
                 return [f"ขอบคุณครับ คุณ{_nm} 🙏 เดี๋ยวที่ปรึกษาติดต่อไปครับ"], None
 
-        # ---- 0.4) ปิดจบไปแล้ว -> เงียบ ยกเว้นถามจริง/กลับมาพร้อมผู้กู้ร่วม ----
+        # ---- 0.4) กลับมาบอกว่า "มีผู้กู้ร่วมแล้ว" -> เปิดเคสใหม่ ถามต่อทันที ----
+        # 19 ส.ค. 2026 — ต้องเช็ค "ก่อน" ประตูเงียบ และต้องไม่ผูกกับธง closed
+        # อย่างเดียว เพราะเคสที่ปิดไปก่อน r18 ในชีตไม่มีธงนี้ (เจอจริงเพจ
+        # New Chapter: ลูกค้าพิมพ์ "มีผู้กู้ร่วมแล้วครับ" แล้วบอทตอบลอยๆ
+        # "ดีค่ะ ผู้กู้ร่วมจะช่วยให้สภาพการกู้ดีขึ้นได้ค่ะ" จบ ไม่ถามอะไรต่อ)
+        if _is_reopen(msg) and (state.get("closed") or state.get("done")
+                                or data.get("co_borrower_none")
+                                or data.get("co_borrower_weak")):
+            state["closed"] = False
+            state["done"] = False
+            state["below_threshold"] = False
+            state["contact_refused"] = False
+            state["soft_close"] = False
+            state["soft_close_msg"] = ""
+            data["co_borrower_none"] = False
+            data["co_borrower_weak"] = False
+            state["awaiting"] = None
+            state["qualifying"] = True
+            # เคลียร์โควตาคำถามที่เคยตัน ไม่งั้นถามต่อไม่ได้เลย
+            _asked = state.setdefault("asked", {})
+            for _f in ("contact", "co_borrower", "co_income", "co_debt", "debt"):
+                _asked.pop(_f, None)
+            # ธงเก่าที่ขัดกับสถานะใหม่ ต้องเอาออก ไม่งั้นเซลอ่านในชีตแล้วสับสน
+            state["signals"] = [x for x in (state.get("signals") or [])
+                                if "ไม่มีผู้กู้ร่วม" not in x
+                                and "ผู้กู้ร่วมรายได้ไม่ประจำ" not in x
+                                and "ยังไม่ถึงเกณฑ์" not in x]
+            self._add_signal(state, "ลูกค้ากลับมาบอกว่าหาผู้กู้ร่วมได้แล้ว — เปิดเคสใหม่")
+            print(f"[REOPEN] {user_id[:8]}... กลับมาพร้อมผู้กู้ร่วม")
+            # เก็บคำตอบ "มีผู้กู้ร่วม" แล้วเดินหน้าถามรายได้/ภาระของผู้กู้ร่วมต่อ
+            self._capture(state, "co_borrower", msg)
+            _f, _q = self._next_missing(data, state)
+            if _q:
+                state["awaiting"] = _f
+                _asked[_f] = _asked.get(_f, 0) + 1
+                return [_q], None
+
+        # ---- 0.45) ปิดจบไปแล้ว -> เงียบ ยกเว้นลูกค้าถามจริง ----
         if state.get("closed"):
-            if _is_reopen(msg):
-                state["closed"] = False
-                state["done"] = False
-                state["below_threshold"] = False
-                state["contact_refused"] = False
-                state["soft_close"] = False
-                data["co_borrower_none"] = False
-                data["co_borrower_weak"] = False
-                data.pop("co_borrower", None)
-                state["awaiting"] = None
-                state["qualifying"] = True
-                self._add_signal(state, "ลูกค้ากลับมาบอกว่าหาผู้กู้ร่วมได้แล้ว — เปิดเคสใหม่")
-                print(f"[REOPEN] {user_id[:8]}... กลับมาพร้อมผู้กู้ร่วม")
-            elif self._is_question(msg):
+            if self._is_question(msg):
                 # ลูกค้าถามจริง ต้องได้คำตอบเสมอ — แต่จบที่คำตอบ ไม่ชวนคุยต่อ
                 return [self._ask_claude(msg, user_id,
                                          state.get("gender", ""), done=True)], None
-            else:
-                print(f"[CLOSED SILENT] {user_id[:8]}... ปิดจบแล้ว ไม่ตอบ "
-                      f"| {msg[:40]!r}")
-                return [], None
+            print(f"[CLOSED SILENT] {user_id[:8]}... ปิดจบแล้ว ไม่ตอบ "
+                  f"| {msg[:40]!r}")
+            return [], None
 
         # ---- 0.5) คำตอบของคำถามประวัติเครดิต (ถามไปรอบก่อน) ------------
         # ใช้ธงเฉพาะ ไม่ผ่าน FIELD_ORDER — ไม่งั้นไปแย่งคิวคำถามหลัก
@@ -1630,6 +1668,14 @@ class BotEngine:
             bubbles.append(TIER2_GUARD_MSG)
             return bubbles, None
 
+        # ลูกค้าให้เบอร์มาเองระหว่างที่บอทถามข้ออื่นอยู่
+        # -> สลับมาโหมดเก็บเบอร์เลย จะได้เข้าเส้นทางปิดการขายตามปกติ
+        # (ห้ามปล่อยให้ไหลไปเป็นคำตอบของข้อที่กำลังถาม — เบอร์จะหาย)
+        if (not data.get("contact") and awaiting != "contact"
+                and not state.get("done") and _looks_like_phone(msg)):
+            awaiting = "contact"
+            state["awaiting"] = "contact"
+
         consumed = False
         if awaiting and not self._is_question(msg) and self._is_valid_answer(awaiting, msg):
             self._capture(state, awaiting, msg)
@@ -1658,8 +1704,9 @@ class BotEngine:
             # แต่ยังเก็บลีดไว้ในชีต + เปิดประตูให้กลับมาเมื่อหาผู้กู้ร่วมได้
             # ผู้กู้ร่วมช่วยไม่ได้จริง ก็ปิดจบเหมือนไม่มีผู้กู้ร่วม
             # (รายได้รวมยังไม่ถึงเกณฑ์ / ผู้กู้ร่วมไม่มีรายได้ประจำ)
-            if awaiting == "co_borrower" and (data.get("co_borrower_none")
-                                              or data.get("co_borrower_weak")):
+            if (awaiting in ("co_borrower", "co_income")
+                    and (data.get("co_borrower_none")
+                         or data.get("co_borrower_weak"))):
                 state["contact_refused"] = True   # กันโค้ดส่วนอื่นขอช่องทาง
                 state["below_threshold"] = True   # ชีตจะได้รู้ว่าไม่ต้องโทร
                 grade = self._finish(user_id, state, "-", calendar=False)
@@ -2070,20 +2117,65 @@ class BotEngine:
                 # มีผู้กู้ร่วม — แต่ "มี" ไม่พอ ต้องดูว่าช่วยได้จริงไหม
                 # เจอ 16 ส.ค.: รายได้ 17,000 ตอบว่า "แม่ ทำเกษตร" ระบบนับว่ามีผู้กู้ร่วม
                 # แล้วเดินหน้าต่อจนได้เกรด B = เซลเสียเวลาโทรหาเคสที่แบงก์ไม่อนุมัติ
+                #
+                # 19 ส.ค. 2026 — บั๊กจริงเพจ New Chapter:
+                # ลูกค้าตอบ "มีผู้กู้ร่วมแล้วครับ" เฉยๆ ไม่มีตัวเลข
+                # _parse_income = None -> total = รายได้ตัวเอง -> ต่ำกว่าเกณฑ์
+                # -> ฟันว่า co_borrower_weak แล้วปิดจบทันที ทั้งที่ยังไม่ได้ถามเลย
+                # ใหม่: ไม่มีตัวเลข = ยังตัดสินไม่ได้ ต้องไปถาม co_income ต่อ
+                data["co_borrower_yes"] = True
                 cob_n = _parse_income(msg)
-                data["co_borrower_income"] = cob_n
                 weak_job = _is_unbankable_job(msg)
-                total = (data.get("income_baht") or 0) + (cob_n or 0)
-                data["income_total"] = total
-                if weak_job or total < LOW_INCOME_BAHT:
+                if cob_n is not None:
+                    data["co_borrower_income"] = cob_n
+                    data["co_income"] = msg
+                if weak_job:
                     data["co_borrower_weak"] = True
-                    self._add_signal(
-                        state,
-                        "ผู้กู้ร่วมรายได้ไม่ประจำ" if weak_job
-                        else f"รายได้รวม {total:,} ไม่ถึงเกณฑ์")
+                    self._add_signal(state, "ผู้กู้ร่วมรายได้ไม่ประจำ")
+                elif cob_n is not None:
+                    self._recalc_total(state)
+        if field == "co_income":
+            cob_n = _parse_income(msg)
+            if cob_n is not None:
+                data["co_borrower_income"] = cob_n
+            if _is_unbankable_job(msg):
+                data["co_borrower_weak"] = True
+                self._add_signal(state, "ผู้กู้ร่วมรายได้ไม่ประจำ")
+            else:
+                self._recalc_total(state)
+        if field == "co_debt":
+            cd = _parse_debt_monthly(msg)
+            if cd is not None:
+                data["co_debt_baht"] = max(0, int(cd))
+                self._add_signal(state, f"ผู้กู้ร่วมผ่อน/เดือน {int(cd):,}")
+            elif _says_no_debt(msg):
+                data["co_debt_baht"] = 0
+                self._add_signal(state, "ผู้กู้ร่วมไม่มีภาระผ่อน")
         state["data"] = data
         # ได้ข้อมูลใหม่ -> ส่งเข้าชีตทันที ไม่รอครบ 4 ข้อ (กันลีดหลุด)
         self._upsert_lead(state)
+
+    def _recalc_total(self, state: dict):
+        """รวมรายได้ผู้กู้หลัก + ผู้กู้ร่วม แล้วตัดสินว่าถึงเกณฑ์ยื่นไหม
+
+        ยังไม่รู้ตัวเลขฝั่งผู้กู้ร่วม = ยังไม่ตัดสิน (ห้ามฟันว่าอ่อน)
+        """
+        data = state["data"]
+        cob = data.get("co_borrower_income")
+        if cob is None:
+            return
+        own = data.get("income_baht") or _parse_income(str(data.get("income", ""))) or 0
+        total = int(own) + int(cob)
+        data["income_total"] = total
+        if total < LOW_INCOME_BAHT:
+            data["co_borrower_weak"] = True
+            self._add_signal(state, f"รายได้รวม {total:,} ยังไม่ถึงเกณฑ์ {LOW_INCOME_BAHT:,}")
+        else:
+            data["co_borrower_weak"] = False
+            self._add_signal(
+                state,
+                f"กู้ร่วม: {int(own):,} + {int(cob):,} = รายได้รวม {total:,} "
+                f"ผ่านเกณฑ์ยื่น (เกณฑ์ {LOW_INCOME_BAHT:,})")
 
     def _next_missing(self, data: dict,
                       state: dict | None = None,
@@ -2110,6 +2202,10 @@ class BotEngine:
                 continue          # รายได้ถึงเกณฑ์ = ยื่นเดี่ยวได้ ไม่ต้องถาม
             if f == "co_borrower" and data.get("cash"):
                 continue          # ซื้อสด = ไม่ได้กู้
+            # ถามรายละเอียดผู้กู้ร่วมเฉพาะเคสที่ตอบว่า "มี" เท่านั้น
+            if f in ("co_income", "co_debt"):
+                if not data.get("co_borrower_yes") or data.get("cash"):
+                    continue
             if f == "contact" and state.get("contact_refused"):
                 continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
             if not data.get(f):
@@ -2129,6 +2225,10 @@ class BotEngine:
                     return f, CONTACT_REASK_MSG
                 if f == "self_emp":
                     return f, SELF_EMP_Q
+                if f == "co_income":
+                    return f, CO_INCOME_Q
+                if f == "co_debt":
+                    return f, CO_DEBT_Q
                 return f, QUALIFY_QUESTIONS[FIELD_Q_INDEX[f]]
         return None, None
 
@@ -2156,7 +2256,13 @@ class BotEngine:
     # ==================================================================
     @staticmethod
     def _is_question(msg: str) -> bool:
-        m = msg.lower()
+        m = msg.lower().strip()
+        # 19 ส.ค. 2026 — เจอจริง: "ไม่มีผ่อนอะไร" มีคำว่า "อะไร" อยู่
+        # ระบบเลยอ่านเป็นคำถาม ไม่เก็บเป็นคำตอบ -> ถามยอดผ่อนวนซ้ำ
+        # ประโยคสั้นที่ขึ้นต้นด้วยการปฏิเสธ = คำตอบ ไม่ใช่คำถาม
+        if ("?" not in m and len(m) <= 25
+                and any(m.startswith(p) for p in _NEGATIVE_STARTS)):
+            return False
         return any(k in m for k in _QUESTION_HINTS)
 
     @staticmethod
@@ -2337,6 +2443,21 @@ class BotEngine:
         if field == "self_emp":
             # ต้องมีตัวเลขปี หรือคำตอบเรื่องภาษี/จดทะเบียน อย่างน้อย 1 อย่าง
             return (_parse_years(m) is not None) or (_parse_tax_flag(m) is not None)
+        if field in ("income", "co_income", "debt", "co_debt") and _looks_like_phone(m):
+            # 19 ส.ค. 2026 — เจอจริง: ลูกค้าส่งเบอร์มาตอนบอทกำลังถามยอดผ่อน
+            # เบอร์ถูกเก็บเป็น "ยอดผ่อน" แล้วบอทถามยอดผ่อนซ้ำ ส่วนเบอร์หายไปเลย
+            return False
+        if field == "co_income":
+            # ต้องมีตัวเลข หรือบอกอาชีพมา อย่างน้อย 1 อย่าง
+            low = m.lower()
+            if any(c.isdigit() for c in m):
+                return True
+            return any(k in low for k in _INCOME_WORDS) or _is_unbankable_job(m)
+        if field == "co_debt":
+            # ตัวเลขยอดผ่อน หรือบอกว่า "ไม่มี"
+            return (_parse_debt_monthly(m) is not None
+                    or _says_no_debt(m)
+                    or any(c.isdigit() for c in m))
         if field == "income":
             # กันเก็บข้อความมั่วเป็นรายได้ — เจอจริง 14 ส.ค. เก็บคำว่า "รูปแบบ"
             # เป็นรายได้ลูกค้า แล้วเดินหน้าถามข้อถัดไปเหมือนไม่มีอะไรเกิดขึ้น
@@ -2558,6 +2679,9 @@ class BotEngine:
         #       เซลโทรยืนยันยอดจริงแล้วค่อยอัปเกรดเป็น A เองในไฟล์
         debt_unverified = debt is None and not _says_no_debt(str(data.get("debt", "")))
         debt = 0 if debt is None else max(0, int(debt))
+        # เคสกู้ร่วม — ภาระของผู้กู้ร่วมนับรวมด้วย ธนาคารดู DSR ของทั้งก้อน
+        if data.get("co_debt_baht"):
+            debt += int(data["co_debt_baht"])
 
         cap_now = _capacity(income, debt)
         cap_clear = _capacity(income, 0)
