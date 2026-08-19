@@ -1671,7 +1671,8 @@ class BotEngine:
         if pg_store is not None:
             try:
                 pg_store.save_turn(page_id, user_id, state,
-                                   user_message, reply, bucket)
+                                   user_message, reply, bucket,
+                                   _hash_psid(user_id))
             except Exception as _pe:
                 print(f'[PG] save_turn พลาด: {_pe}')
         return reply, grade
@@ -2249,7 +2250,8 @@ class BotEngine:
                 _lead_states[skey] = _pgst
                 if not _conversations.get(user_id):
                     try:
-                        _hist = pg_store.load_history(_pid, user_id, 10)
+                        _hist = pg_store.load_history(
+                            _pid, user_id, 10, _hash_psid(user_id))
                     except Exception:
                         _hist = []
                     if _hist:
@@ -3269,7 +3271,8 @@ class BotEngine:
             # แล้วแนะนำตัวใหม่ ซึ่งคือเคสที่ Gift เจอ 19 ส.ค. 2026
             try:
                 history = pg_store.load_history(
-                    (state or {}).get("page_id", ""), user_id, 10)
+                    (state or {}).get("page_id", ""), user_id, 10,
+                    _hash_psid(user_id))
             except Exception:
                 history = []
             if history:
