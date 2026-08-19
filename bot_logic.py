@@ -1565,16 +1565,31 @@ class BotEngine:
         # ใช้ธงเฉพาะ ไม่ผ่าน FIELD_ORDER — ไม่งั้นไปแย่งคิวคำถามหลัก
         # (บทเรียน 18 ส.ค.: ใส่ใน FIELD_ORDER แล้วเบอร์โทรถูกกลืนหายไปเลย)
         if state.pop("awaiting_ncb", False):
+            # 19 ส.ค. 2026 (Gift): "ติดบูโรปิดจบสวยๆ ไม่ต้องเอาเข้า lead ไม่ต้องถามต่อ"
+            # เจอจริงเพจ New Chapter: ลูกค้าตอบ "ตอนนี้ยังติดอยู่ครับ"
+            # บอทยังไล่ถามโซน/งบ/รายได้/ภาระต่ออีก 5 รอบ ทั้งที่ธนาคารไม่รับแน่นอน
+            # เสียเวลาลูกค้า เสียเวลาเซล และทำให้เคสเสียไปนั่งอยู่ในคิวแจก
+            if _ncb_still_stuck(msg) is True:
+                data["ncb_still"] = True
+                self._ncb_hard_close(state, user_id)
+                grade = self._finish(user_id, state, "-", calendar=False)
+                print(f"[NCB REJECT] {user_id[:8]}... ยังติดบูโรอยู่ — ปิดจบ ไม่แจกเซล")
+                return [NCB_SOFT_CLOSE], grade
             if self._is_valid_answer("ncb", msg):
                 self._capture(state, "ncb", msg)
                 state["awaiting"] = None
                 awaiting = None
+                # ตอบมาแล้วว่ายังติดอยู่ (ผ่านเส้นทาง _capture) -> ปิดเหมือนกัน
+                if data.get("ncb_still") is True:
+                    self._ncb_hard_close(state, user_id)
+                    grade = self._finish(user_id, state, "-", calendar=False)
+                    print(f"[NCB REJECT] {user_id[:8]}... ยังติดบูโรอยู่ — ปิดจบ ไม่แจกเซล")
+                    return [NCB_SOFT_CLOSE], grade
             else:
                 # ตอบไม่ตรง -> ถามซ้ำได้ 1 ครั้ง แล้วปล่อย ไม่ไล่บี้
                 if not state.get("ncb_reasked"):
                     state["ncb_reasked"] = True
-                    state["awaiting_ncb"] = True
-                    bubbles.append(NCB_Q.get(state.get("ncb_kind"), NCB_Q["blacklist"]))
+                    state["ncb_pending"] = True
 
         # ---- 1) เปิดหัวข้อความตามระยะที่หายไป -------------------------
         # ข้อความแรกที่เป็นคำถามจริง -> ไม่ต้องทักทาย ตอบคำถามเขาเลย
@@ -1607,8 +1622,9 @@ class BotEngine:
             if _k and not data.get("cash"):
                 state["ncb_kind"] = _k
                 data["ncb_raw"] = msg[:200]
-                state["awaiting_ncb"] = True
-                bubbles.append(NCB_Q.get(_k, NCB_Q["blacklist"]))
+                # เข้าคิวถาม ไม่ยิงตรงนี้ — ไม่งั้นจะได้คำถามบูโรพ่วงกับคำถาม
+                # โซน/งบ/รายได้ ในเทิร์นเดียว (เจอจริง 19 ส.ค. ยิงทีเดียว 3 บับเบิล)
+                state["ncb_pending"] = True
                 self._add_signal(
                     state,
                     {"blacklist": "⚠️ ลูกค้าแจ้งเองว่าเคยติดบูโร/แบล็คลิสต์ — ต้องเช็คว่าปิดแล้วกี่ปี",
@@ -1851,6 +1867,10 @@ class BotEngine:
                 asked = state.setdefault("asked", {})
                 # อายุมาก่อนข้ออื่น — รู้อายุแล้วเส้นทางที่เหลือถึงจะถูก
                 # (ปีกู้สั้น = ต้องวิ่งไปหาผู้กู้ร่วมทันที ไม่ใช่ไล่ถามตามคิวเดิม)
+                if state.pop("ncb_pending", False):
+                    state["awaiting_ncb"] = True
+                    bubbles.append(NCB_Q.get(state.get("ncb_kind"), NCB_Q["blacklist"]))
+                    return [b for b in bubbles if b and b.strip()], grade
                 if state.pop("age_pending", False):
                     state["awaiting_age"] = True
                     bubbles.append(AGE_Q)
@@ -2076,6 +2096,27 @@ class BotEngine:
             },
             "log": rows,
         })
+
+    def _ncb_hard_close(self, state: dict, user_id: str = ""):
+        """ยังติดบูโรอยู่ ณ ตอนนี้ = ธนาคารไม่รับแน่นอน — ปิดจบตรงนี้เลย
+
+        Gift 19 ส.ค. 2026: "ติดบูโรปิดจบสวยๆ ไม่ต้องเอาเข้า lead ไม่ต้องถามต่อ"
+        ไม่ขอเบอร์ -> ระบบแจกเคสอ่านเฉพาะลีดที่มีช่องทางติดต่อ เคสนี้จึงไม่เข้าคิวเซล
+        ยังเก็บแถวไว้ในชีตพร้อมธงชัดเจน เผื่อวันหน้านโยบายเปลี่ยนแล้วกลับมาตามได้
+        """
+        state["contact_refused"] = True     # ห้ามส่วนอื่นขอเบอร์ต่อ
+        state["below_threshold"] = True     # ชีตรู้ว่าไม่ต้องโทร
+        state["soft_close"] = True
+        state["soft_close_msg"] = NCB_SOFT_CLOSE
+        state.pop("awaiting_ncb", None)
+        state.pop("ncb_pending", None)
+        state.pop("age_pending", None)
+        state["awaiting"] = None
+        self._add_signal(
+            state,
+            "❌ ยังติดบูโรอยู่ ณ ปัจจุบัน — ปิดเคสตั้งแต่ต้นทาง ไม่เข้าคิวแจกเซล "
+            "(Gift 19 ส.ค. 69) · เก็บไว้ตามเมื่อนโยบายเปลี่ยน")
+        self._close_chat(state)
 
     @staticmethod
     def _close_chat(state: dict):
