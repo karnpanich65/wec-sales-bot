@@ -2177,9 +2177,20 @@ class BotEngine:
                     _skipped.add(field)
                     field, question = self._next_missing(data, state, skip=_skipped)
                 if field:
-                    asked[field] = asked.get(field, 0) + 1
-                    state["awaiting"] = field
-                    bubbles.append(question)
+                    # r39 — ห้ามถามประโยคเดิมซ้ำติดกัน 2 เทิร์น (Gift 19 ส.ค. 2026)
+                    # เคสจริง คุณ Patcharin: ลูกค้าถามคำถามของตัวเอง 2 ข้อติด
+                    # บอทตอบ FAQ แล้วต่อท้ายด้วย "เป็นพนักงานประจำหรือเปล่าครับ..."
+                    # คำเดิมเป๊ะทั้งสองรอบ อ่านแล้วเหมือนบอทไม่ฟัง
+                    # ข้ามรอบนี้เฉยๆ ยังรอ field เดิมอยู่ เทิร์นหน้าถามได้ตามปกติ
+                    if question and question == state.get("last_q"):
+                        state["awaiting"] = field
+                        state["last_q"] = ""
+                        print(f"[NO REPEAT] {user_id[:8]}... ข้ามคำถามซ้ำ: {question[:40]!r}")
+                    else:
+                        asked[field] = asked.get(field, 0) + 1
+                        state["awaiting"] = field
+                        bubbles.append(question)
+                        state["last_q"] = question
 
                 if not field and not state.get("done"):
                     if state.get("contact_refused") and not data.get("contact"):
@@ -2441,6 +2452,9 @@ class BotEngine:
                 "handover_log": state.get("handover_log", []),
                 "handover_by": state.get("handover_by", ""),
                 "ncb_kind": state.get("ncb_kind", ""),
+                # r39 — จำคำถามล่าสุดข้าม restart ไม่งั้น deploy ทีนึง
+                # กันถามซ้ำหลุดทันที (ดูบล็อก NO REPEAT ที่ :2185)
+                "last_q": state.get("last_q", ""),
                 "was_angry": state.get("was_angry", False),
                 "route_to": state.get("route_to", ""),
                 "chat_name": state.get("chat_name", ""),
