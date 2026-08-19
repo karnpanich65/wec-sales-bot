@@ -99,17 +99,19 @@ _SMART_TRIGGERS = (
 # ให้โมเดลอ่าน "คนตรงหน้า" กลับมาด้วย 1 บรรทัด แล้วเราตัดออกก่อนส่งลูกค้า
 # ผลที่อ่านได้จะไปโผล่ในช่องสัญญาณของชีต CRM ให้เซลอ่านก่อนโทร
 # และสะสมเป็นข้อมูลว่าลูกค้าจริงๆ พูดแบบไหนแล้วปิดได้/ไม่ได้
+# Gift 19 ส.ค. 2026: "ส่งเฉพาะ skill keyword เพราะจริงๆ มี log อยู่แล้ว
+#  แค่ให้ log รู้ว่ามีการส่ง api จะได้เอาตรงนั้นมาเพิ่ม"
+# -> ไม่ต้องให้โมเดลเขียนบทวิเคราะห์ยาวๆ (เปลืองโทเคนและซ้ำกับ Chat_Log)
+#    เอาแค่ "เรื่องที่บอทต้องรับมือในเทิร์นนี้" เป็นคีย์เวิร์ดสั้นๆ
+#    แล้วมาร์กไว้ในชีตว่าเทิร์นนี้ยิง API — ทีหลังไล่เก็บจุดพวกนี้มาเพิ่มสกิลได้
 BEHAVIOR_READ_RULE = (
-    "\n\n[อ่านคน] หลังข้อความตอบลูกค้า ให้ขึ้นบรรทัดใหม่แล้วเขียนบรรทัดเดียวรูปแบบนี้เป๊ะๆ:\n"
-    "<<READ|ท่าที=...|กังวลเรื่อง=...|ความพร้อมซื้อ=1-5|ควรทำต่อ=...>>\n"
-    "ท่าที เช่น สนใจจริง/เปรียบเทียบอยู่/ขอข้อมูลเฉยๆ/ไม่พร้อม · "
-    "กังวลเรื่อง = สิ่งที่เขาลังเลจริงๆ เขียนสั้นๆ · "
-    "ความพร้อมซื้อ 5 = พร้อมคุยกับเซลเลย 1 = ยังไม่ใช่ลูกค้า · "
-    "ควรทำต่อ = สิ่งที่เซลควรทำเป็นอย่างแรก\n"
-    "บรรทัดนี้เป็นข้อมูลภายใน ลูกค้าจะไม่เห็น เขียนเป็นภาษาไทยสั้นๆ"
+    "\n\n[แท็กสกิล] ปิดท้ายข้อความด้วยบรรทัดเดียวรูปแบบนี้เป๊ะๆ: <<SKILL|คำ,คำ>>\n"
+    "ใส่ 1-3 คำสั้นๆ ว่าเทิร์นนี้ต้องใช้ความรู้เรื่องอะไร "
+    "เช่น กู้ร่วม, บูโร, ค่าโอน, ผ่อนต่อเดือน, ทำเล, ลังเล, เปรียบเทียบคู่แข่ง\n"
+    "ห้ามเขียนอย่างอื่นในบรรทัดนี้ ลูกค้าจะไม่เห็นบรรทัดนี้"
 )
 
-_BEHAVIOR_RE = re.compile(r"<<READ\|(.+?)>>", re.S)
+_BEHAVIOR_RE = re.compile(r"<<SKILL\|(.+?)>>", re.S)
 
 
 def _needs_smart(msg: str, state: dict) -> bool:
@@ -2275,11 +2277,16 @@ class BotEngine:
         body = m.group(1).strip()
         raw = _BEHAVIOR_RE.sub("", raw).strip()
         if state is not None and body:
-            _short = body.replace("|", " · ")[:220]
-            self._add_signal(state, "🧠 อ่านลูกค้า: " + _short)
-            state["behavior_read"] = _short
-            state["behavior_model"] = model
-            print(f"[READ] {_short[:120]}")
+            _tags = ", ".join([w.strip() for w in body.replace("|", ",").split(",")
+                               if w.strip()][:3])[:60]
+            if _tags:
+                _seen = state.setdefault("skill_tags", [])
+                for _t in _tags.split(", "):
+                    if _t and _t not in _seen:
+                        _seen.append(_t)
+                state["api_used"] = True
+                print(f"[API SKILL] model={model.split('-')[1] if '-' in model else model} "
+                      f"tags={_tags}")
         return raw
 
     @staticmethod
@@ -2290,12 +2297,18 @@ class BotEngine:
 
     @staticmethod
     def _stage_label(state: dict) -> str:
+        # ต่อท้ายด้วย api:<แท็ก> เมื่อเทิร์นนี้ยิง Anthropic API
+        # ทีหลังกรองคอลัมน์นี้ในชีต = ได้จุดที่ต้องเติมสกิลทั้งหมดทันที
+        _suffix = ""
+        if state.pop("api_used", False):
+            _tags = ",".join((state.get("skill_tags") or [])[-3:])
+            _suffix = " · api:" + (_tags or "-")
         if state.get("done"):
-            return "done"
+            return "done" + _suffix
         aw = state.get("awaiting")
         if aw:
-            return f"await_{aw}"
-        return "qualifying" if state.get("qualifying") else "open"
+            return f"await_{aw}" + _suffix
+        return ("qualifying" if state.get("qualifying") else "open") + _suffix
 
     @staticmethod
     def _gap_bucket(gap: int) -> str:
