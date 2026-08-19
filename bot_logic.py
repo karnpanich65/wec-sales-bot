@@ -79,6 +79,7 @@ from faq_data import (
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
+    CO_SELF_EMP_Q,
     ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
     GUARD_FALLBACK_MSG,
 )
@@ -184,7 +185,7 @@ GAP_SAME_DAY = 24 * 60 * 60  # 1 วัน
 # co_borrower ถามเฉพาะเคสรายได้ต่ำกว่า LOW_INCOME_BAHT (ดู _next_missing)
 # co_income/co_debt ถามเฉพาะเคสที่ตอบว่า "มีผู้กู้ร่วม" (co_borrower_yes)
 FIELD_ORDER = ["objective", "income", "self_emp", "co_borrower",
-               "co_income", "co_debt", "debt", "contact"]
+               "co_income", "co_self_emp", "co_debt", "debt", "contact"]
 FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3,
                  "co_borrower": 4}
 
@@ -465,6 +466,55 @@ _SELF_EMP_WORDS = (
 
 def _is_self_employed(msg: str) -> bool:
     return _has_any(msg, _SELF_EMP_WORDS)
+
+
+# r41 — ผู้กู้ร่วมที่ "ไม่ใช่พนักงานประจำ" (Gift 20 ส.ค. 2026)
+# กว้างกว่า _SELF_EMP_WORDS เพราะลูกค้าตอบสั้นมาก เช่น "ไม่ประจำครับ ขายผลไม้"
+# ซึ่งไม่มีคำว่า "ค้าขาย/ธุรกิจส่วนตัว" เลย แต่ธนาคารถือเป็นอาชีพอิสระเต็มตัว
+_CO_INFORMAL_WORDS = (
+    "ไม่ประจำ", "ไม่ได้ประจำ", "ไม่ใช่ประจำ", "ไม่ได้เป็นพนักงาน",
+    "ไม่ใช่พนักงาน", "อิสระ", "ฟรีแลนซ์", "freelance",
+    "ขาย", "ค้าขาย", "แม่ค้า", "พ่อค้า", "เปิดร้าน", "ร้านค้า",
+    "ธุรกิจ", "กิจการ", "รับจ้าง", "รับงาน",
+)
+
+
+# r41 — คำจดทะเบียน "ต้องกันคำปฏิเสธ": "ไม่ได้จดทะเบียน" มีคำว่าจดทะเบียนอยู่ด้วย
+# เช็คแบบ substring เฉยๆ จะอ่านเป็น "จดแล้ว" ทันที = ปล่อยเคสที่แบงก์ไม่รับผ่าน
+_NEG_PREFIX = ("ยังไม่ได้", "ยังไม่มี", "ยังไม่", "ไม่ได้", "ไม่มี", "ไม่")
+_REG_WORDS = ("จดทะเบียน", "จดบริษัท", "มีบริษัท", "หจก", "ห้างหุ้นส่วน",
+              "บริษัทจำกัด", "นิติบุคคล", "ทะเบียนพาณิชย์", "ทะเบียนการค้า")
+
+
+def _has_registered(msg: str) -> bool:
+    """จดทะเบียนจริงไหม (ไม่นับที่ถูกปฏิเสธ เช่น "ไม่ได้จดทะเบียน")"""
+    m = (msg or "").replace(" ", "")
+    for w in _REG_WORDS:
+        i = 0
+        while True:
+            j = m.find(w, i)
+            if j < 0:
+                break
+            head = m[max(0, j - 9):j]
+            if not any(head.endswith(n) for n in _NEG_PREFIX):
+                return True
+            i = j + 1
+    return False
+
+
+def _is_co_self_employed(msg: str) -> bool:
+    """ผู้กู้ร่วมไม่ใช่พนักงานประจำ -> ต้องเช็คทะเบียน/ภาษีก่อนนับรายได้
+
+    ถ้าบอกมาในประโยคเดียวกันแล้วว่าจดทะเบียน/เป็นพนักงานประจำ ไม่ต้องถามซ้ำ
+    """
+    m = (msg or "").lower().replace(" ", "")
+    if _has_registered(msg):
+        return False          # จดทะเบียนแล้ว = แบงก์รับเอกสารได้ ไม่ต้องถามซ้ำ
+    if "ประจำ" in m and not any(w in m for w in ("ไม่ประจำ", "ไม่ได้ประจำ",
+                                                 "ไม่ใช่ประจำ")):
+        return False          # "พนักงานประจำ" = ผ่านปกติ
+    return (_is_self_employed(msg)
+            or any(w in m for w in _CO_INFORMAL_WORDS))
 
 
 # ----------------------------------------------------------------------
@@ -2728,6 +2778,14 @@ class BotEngine:
                 if weak_job:
                     data["co_borrower_weak"] = True
                     self._add_signal(state, "ผู้กู้ร่วมรายได้ไม่ประจำ")
+                elif _is_co_self_employed(msg):
+                    # r41 — ตอบมาพร้อมกันเลย เช่น "มีครับ แม่ ขายของ 10000"
+                    # ยังบวกยอดไม่ได้ ต้องถามทะเบียน/ปี ก่อนเหมือนผู้กู้หลัก
+                    data["co_self_employed"] = True
+                    self._add_signal(
+                        state,
+                        "ผู้กู้ร่วมเป็นอาชีพอิสระ — ต้องเช็คทะเบียนการค้า/ภาษี "
+                        "ก่อนนับรายได้ (เกณฑ์เดียวกับผู้กู้หลัก)")
                 elif cob_n is not None:
                     self._recalc_total(state)
         if field == "co_income":
@@ -2742,8 +2800,52 @@ class BotEngine:
             if _is_unbankable_job(msg):
                 data["co_borrower_weak"] = True
                 self._add_signal(state, "ผู้กู้ร่วมรายได้ไม่ประจำ")
+            elif _is_co_self_employed(msg):
+                # r41 (Gift 20 ส.ค. 2026) — ผู้กู้ร่วมใช้เกณฑ์เดียวกับผู้กู้หลัก
+                # เคสจริง คุณ Golffy: แม่ "ไม่ประจำ ขายผลไม้ในโรงเรียน 10,000"
+                # เดิมเอาไปบวกกับรายได้ลูกค้าแล้วผ่านเกณฑ์ทันที = เกรดเฟ้อ
+                # ธนาคารไม่นับรายได้ก้อนนี้ถ้าไม่มีทะเบียนการค้า/ภาษี
+                # -> ยังไม่รวมยอด ถามต่อ 1 ข้อ (จดทะเบียน/กี่ปี) ก่อนตัดสิน
+                data["co_self_employed"] = True
+                self._add_signal(
+                    state,
+                    "ผู้กู้ร่วมเป็นอาชีพอิสระ — ต้องเช็คทะเบียนการค้า/ภาษี "
+                    "ก่อนนับรายได้ (เกณฑ์เดียวกับผู้กู้หลัก)")
             else:
                 self._recalc_total(state)
+        if field == "co_self_emp":
+            # r41 — ตัดสินผู้กู้ร่วมด้วยไม้บรรทัดเดียวกับผู้กู้หลัก:
+            # ทำมา 2 ปีขึ้นไป + จดทะเบียน/เสียภาษี ถึงจะนับรายได้เข้าไปรวม
+            yrs = _parse_years(msg)
+            tax = _parse_tax_flag(msg)
+            reg = _has_registered(msg)
+            if yrs is not None:
+                data["co_self_emp_years"] = yrs
+            if reg:
+                data["co_biz_registered"] = True
+            if tax is not None:
+                data["co_self_emp_tax"] = tax
+            _ok_years = (yrs is None) or (yrs >= FREELANCE_MIN_YEARS)
+            _ok_docs = bool(reg or tax)
+            if _ok_docs and _ok_years:
+                self._add_signal(
+                    state,
+                    "ผู้กู้ร่วมอาชีพอิสระ ผ่านเกณฑ์เอกสาร "
+                    f"({'จดทะเบียน' if reg else 'มีภาษี'}"
+                    f"{f' · ทำมา {yrs} ปี' if yrs is not None else ''}) — นับรายได้เข้ารวม")
+                self._recalc_total(state)
+            else:
+                data["co_borrower_weak"] = True
+                _why = []
+                if not _ok_docs:
+                    _why.append("ไม่มีทะเบียนการค้า/ภาษี")
+                if not _ok_years:
+                    _why.append(f"ทำมา {yrs} ปี (ต่ำกว่า {FREELANCE_MIN_YEARS} ปี)")
+                self._add_signal(
+                    state,
+                    "ผู้กู้ร่วมอาชีพอิสระไม่ผ่านเกณฑ์: " + " · ".join(_why)
+                    + " — ธนาคารไม่นับรายได้ก้อนนี้")
+            return
         if field == "co_debt":
             cd = _parse_debt_monthly(msg)
             if cd is not None:
@@ -2804,9 +2906,12 @@ class BotEngine:
             if f == "co_borrower" and data.get("cash"):
                 continue          # ซื้อสด = ไม่ได้กู้
             # ถามรายละเอียดผู้กู้ร่วมเฉพาะเคสที่ตอบว่า "มี" เท่านั้น
-            if f in ("co_income", "co_debt"):
+            if f in ("co_income", "co_debt", "co_self_emp"):
                 if not data.get("co_borrower_yes") or data.get("cash"):
                     continue
+            # r41 — ถามเฉพาะผู้กู้ร่วมที่ไม่ใช่พนักงานประจำ (เกณฑ์เดียวกับผู้กู้หลัก)
+            if f == "co_self_emp" and not data.get("co_self_employed"):
+                continue
             if f == "contact" and state.get("contact_refused"):
                 continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
             if not data.get(f):
@@ -2828,6 +2933,8 @@ class BotEngine:
                     return f, SELF_EMP_Q
                 if f == "co_income":
                     return f, CO_INCOME_Q
+                if f == "co_self_emp":
+                    return f, CO_SELF_EMP_Q
                 if f == "co_debt":
                     return f, CO_DEBT_Q
                 return f, QUALIFY_QUESTIONS[FIELD_Q_INDEX[f]]
