@@ -68,6 +68,11 @@ CREATE INDEX IF NOT EXISTS messages_lookup
     ON messages (page_id, psid, created_at DESC);
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS source_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS messages_source_uniq ON messages (source_key);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS psid_hash TEXT;
+CREATE INDEX IF NOT EXISTS messages_hash_lookup
+    ON messages (psid_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS messages_psid_lookup
+    ON messages (psid, created_at DESC);
 """
 
 
@@ -121,12 +126,13 @@ def _run_job(job):
                 "SET state = EXCLUDED.state, updated_at = now()",
                 (page_id, psid, state_json))
     elif kind == "msgs":
-        _, page_id, psid, rows = job
+        _, page_id, psid, rows, phash = job
         with conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
-                "INSERT INTO messages (page_id, psid, role, text, stage) VALUES %s",
-                [(page_id, psid, r[0], r[1], r[2]) for r in rows])
+                "INSERT INTO messages "
+                "(page_id, psid, role, text, stage, psid_hash) VALUES %s",
+                [(page_id, psid, r[0], r[1], r[2], phash or None) for r in rows])
 
 
 def _worker_loop():
@@ -183,7 +189,8 @@ def _clean_state(state: dict) -> dict:
 
 
 def save_turn(page_id: str, psid: str, state: dict,
-              user_msg: str, reply: str, stage: str = "") -> None:
+              user_msg: str, reply: str, stage: str = "",
+              psid_hash: str = "") -> None:
     """เรียกท้ายทุกเทิร์น — เขียน state + 2 ข้อความลงคิว (ไม่รอผล)"""
     if not ENABLED or not psid:
         return
@@ -197,19 +204,21 @@ def save_turn(page_id: str, psid: str, state: dict,
         if reply:
             rows.append(("assistant", str(reply)[:4000], stage or None))
         if rows:
-            _submit(("msgs", pid, str(psid), rows))
+            _submit(("msgs", pid, str(psid), rows, str(psid_hash or "")))
     except Exception as e:
         STATS["errors"] += 1
         STATS["last_error"] = f"save_turn {type(e).__name__}: {e}"[:200]
 
 
-def save_human(page_id: str, psid: str, text: str, who: str = "sale") -> None:
+def save_human(page_id: str, psid: str, text: str, who: str = "sale",
+               psid_hash: str = "") -> None:
     """ข้อความที่เซลพิมพ์เองจากกล่องข้อความเพจ — บริบทที่ AI มองไม่เห็นมาตลอด"""
     if not ENABLED or not psid or not text:
         return
     try:
         _submit(("msgs", str(page_id or "-"), str(psid),
-                 [("assistant", f"[{who}] {str(text)[:4000]}", "human")]))
+                 [("assistant", f"[{who}] {str(text)[:4000]}", "human")],
+                 str(psid_hash or "")))
     except Exception:
         pass
 
@@ -286,7 +295,8 @@ def load_state(page_id: str, psid: str):
         return None
 
 
-def load_history(page_id: str, psid: str, limit: int = 10) -> list:
+def load_history(page_id: str, psid: str, limit: int = 10,
+                 psid_hash: str = "") -> list:
     """คืนประวัติแชทรูปแบบที่ Anthropic API รับได้
 
     รวมท่อน role เดียวกันที่ติดกันเป็นก้อนเดียว และตัดหัวให้เริ่มด้วย user
@@ -298,11 +308,14 @@ def load_history(page_id: str, psid: str, limit: int = 10) -> list:
         with _read_lock:
             conn = _read_get()
             with conn.cursor() as cur:
+                # ไม่กรองด้วย page_id — PSID ของ Facebook ผูกกับเพจอยู่แล้ว
+                # และแถวเก่าจากชีตบางแถวไม่มีเพจติดมา ถ้ากรองจะหาไม่เจอ
+                # จับคู่ทั้ง PSID จริง (แถวสด) และรหัสย่อ (แถวที่นำเข้าจากชีต)
                 cur.execute(
                     "SELECT role, text FROM messages "
-                    "WHERE page_id = %s AND psid = %s "
+                    "WHERE psid = %s OR psid_hash = %s "
                     "ORDER BY created_at DESC, id DESC LIMIT %s",
-                    (str(page_id or "-"), str(psid), int(limit) * 3))
+                    (str(psid), str(psid_hash or psid), int(limit) * 3))
                 rows = cur.fetchall()
     except Exception as e:
         _read_fail(e)
@@ -345,7 +358,8 @@ def import_rows(rows: list) -> dict:
             role = "user" if str(r.get("role") or "").lower() in (
                 "user", "customer", "cust", "ลูกค้า") else "assistant"
             vals.append((str(r.get("page_id") or "-"), psid, role, text[:4000],
-                         (str(r.get("stage") or "") or None), ts, key))
+                         (str(r.get("stage") or "") or None), ts, key,
+                         str(r.get("psid_hash") or psid)))
         except Exception:
             continue
     if not vals:
@@ -359,10 +373,11 @@ def import_rows(rows: list) -> dict:
             psycopg2.extras.execute_values(
                 cur,
                 "INSERT INTO messages "
-                "(page_id, psid, role, text, stage, created_at, source_key) "
+                "(page_id, psid, role, text, stage, created_at, "
+                " source_key, psid_hash) "
                 "VALUES %s ON CONFLICT (source_key) DO NOTHING",
                 vals,
-                template="(%s,%s,%s,%s,%s,%s::timestamptz,%s)")
+                template="(%s,%s,%s,%s,%s,%s::timestamptz,%s,%s)")
             n = cur.rowcount
         return {"ok": True, "inserted": int(n), "seen": len(rows), "valid": len(vals)}
     except Exception as e:
