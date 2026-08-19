@@ -242,7 +242,7 @@ STATS["read_errors"] = 0
 
 
 def _read_get():
-    global _read_conn
+    global _read_conn, _schema_ok
     if _read_conn is not None:
         try:
             if _read_conn.closed == 0:
@@ -250,8 +250,19 @@ def _read_get():
         except Exception:
             pass
     c = psycopg2.connect(DATABASE_URL, connect_timeout=5,
-                         options="-c statement_timeout=4000")
+                         options="-c statement_timeout=8000")
     c.autocommit = True
+    # r38 — เดิม DDL รันจากฝั่งเขียนอย่างเดียว ถ้าหลัง deploy มีคนทักเข้ามา
+    # ก่อนบอทได้เขียนอะไรสักครั้ง ฝั่งอ่านจะเจอ UndefinedColumn (psid_hash)
+    # แล้วตัดตัวเองพัก 30 วิ — ลูกค้าคนนั้นเลยโดนถามซ้ำเหมือนเริ่มใหม่
+    if not _schema_ok:
+        try:
+            with c.cursor() as cur:
+                cur.execute(DDL)
+            _schema_ok = True
+            print("[PG] ตารางพร้อมแล้ว (ตรวจจากฝั่งอ่าน)")
+        except Exception as _de:
+            print(f"[PG] DDL ฝั่งอ่านไม่ผ่าน: {_de}")
     _read_conn = c
     return c
 
@@ -383,6 +394,57 @@ def import_rows(rows: list) -> dict:
     except Exception as e:
         return {"ok": False, "inserted": 0, "seen": len(rows),
                 "error": f"{type(e).__name__}: {e}"[:250]}
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def fix_import_ts(hours: int = 14) -> dict:
+    """เลื่อนเวลาแถวที่ import มาจากชีตให้ตรงความจริง — รันซ้ำได้ ไม่เลื่อนซ้ำ
+
+    ที่มา: ตอน import ไฟล์ WEC CRM ตั้ง timezone เป็น America/Los_Angeles
+    ค่าเวลาที่อ่านกลับมาจึงล้ำหน้าไป 14 ชม. (ข้อมูลทั้งหมดอยู่ในช่วง PDT)
+    กันรันซ้ำด้วยคอลัมน์ ts_fixed — แถวที่แก้แล้วจะไม่ถูกแตะอีก
+    """
+    if not (bool(DATABASE_URL) and _HAS_DRIVER):
+        return {"ok": False, "reason": "no driver/url"}
+    try:
+        hours = int(hours)
+    except Exception:
+        return {"ok": False, "reason": "hours ต้องเป็นตัวเลข"}
+    if not (1 <= hours <= 24):
+        return {"ok": False, "reason": "hours ต้องอยู่ระหว่าง 1-24"}
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=8,
+                                options="-c statement_timeout=60000")
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS "
+                        "ts_fixed SMALLINT")
+            cur.execute("SELECT count(*) FROM messages "
+                        "WHERE source_key IS NOT NULL AND ts_fixed IS NULL")
+            todo = int(cur.fetchone()[0])
+            cur.execute(
+                "UPDATE messages "
+                "SET created_at = created_at - make_interval(hours => %s), "
+                "    ts_fixed = 1 "
+                "WHERE source_key IS NOT NULL AND ts_fixed IS NULL", (hours,))
+            moved = int(cur.rowcount)
+            cur.execute("SELECT max(created_at)::text FROM messages "
+                        "WHERE source_key IS NOT NULL")
+            newest_imported = cur.fetchone()[0]
+            cur.execute("SELECT max(created_at)::text FROM messages "
+                        "WHERE source_key IS NULL")
+            newest_live = cur.fetchone()[0]
+        return {"ok": True, "pending_before": todo, "moved": moved,
+                "hours": hours, "newest_imported": newest_imported,
+                "newest_live": newest_live}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:250]}
     finally:
         try:
             if conn is not None:

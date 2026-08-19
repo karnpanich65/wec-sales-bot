@@ -1146,6 +1146,28 @@ def import_status():
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
 
 
+@app.route("/import/fixts", methods=["POST", "GET"])
+def import_fix_ts():
+    """แก้เวลาแถวที่ import มาจากชีต (เลื่อนถอย 14 ชม.) — รันซ้ำได้ ไม่เลื่อนซ้ำ
+
+    ที่มา: ไฟล์ WEC CRM เคยตั้ง timezone เป็น America/Los_Angeles
+    เวลาที่อ่านออกมาตอน import จึงล้ำหน้าไป 14 ชม.
+    """
+    if request.args.get("key", "") != IMPORT_KEY:
+        return jsonify({"ok": False, "error": "bad key"}), 403
+    try:
+        hours = int(request.args.get("hours", "14"))
+    except Exception:
+        return jsonify({"ok": False, "error": "hours ต้องเป็นตัวเลข"}), 400
+    try:
+        from bot_logic import pg_store
+        if pg_store is None:
+            return jsonify({"ok": False, "error": "pg_store unavailable"}), 503
+        return jsonify(pg_store.fix_import_ts(hours))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
 @app.route("/review-log", methods=["GET"])
 def review_log():
     if request.args.get("key", "") != REVIEW_LOG_KEY:
