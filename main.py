@@ -29,6 +29,7 @@ import hashlib
 import json
 import re
 import time
+import threading
 from collections import deque
 
 import requests
@@ -378,6 +379,37 @@ def _is_unreachable(resp) -> bool:
             or err.get("error_subcode") in _UNREACHABLE_SUBCODES)
 
 
+# ---------------------------------------------------------------------------
+# 19 ส.ค. 2026 — เคสจริง (เพจ Intake, ลูกค้า Aor Alisa):
+# เซล "หลี" พิมพ์เองจากกล่องข้อความเพจ 3 ข้อความ แต่บอทไม่หยุด ตอบทับต่อ
+# สาเหตุ: เดิมเช็คว่า "มี app_id ไหม" -> ถือว่าเป็นบอทส่งเอง
+# แต่ Meta Business Suite / Page Inbox ก็แนบ app_id มาด้วยเหมือนกัน
+# -> ข้อความที่คนพิมพ์ถูกนับเป็นของบอท -> ไม่เกิดการรับช่วง
+# แก้: จำ message_id ที่บอทส่งเองไว้ แล้วเทียบตรงๆ ไม่เดาจาก app_id
+# (เทียบ app_id เป็นตัวสำรองอีกชั้น เผื่อ mid หลุด)
+FB_APP_ID = os.environ.get("FB_APP_ID", "9591150740963461").strip()
+_SENT_MIDS: "deque" = deque(maxlen=2000)
+_SENT_MID_SET: set = set()
+_SENT_LOCK = threading.Lock()
+
+
+def _remember_sent(mid: str):
+    if not mid:
+        return
+    with _SENT_LOCK:
+        if len(_SENT_MIDS) == _SENT_MIDS.maxlen:
+            _SENT_MID_SET.discard(_SENT_MIDS[0])
+        _SENT_MIDS.append(mid)
+        _SENT_MID_SET.add(mid)
+
+
+def _was_sent_by_bot(mid: str) -> bool:
+    if not mid:
+        return False
+    with _SENT_LOCK:
+        return mid in _SENT_MID_SET
+
+
 def send_message(recipient_id: str, text: str, page_id: str = "") -> bool:
     """ส่ง 1 บับเบิล — คืน False เมื่อส่งถึงลูกค้าคนนี้ไม่ได้อย่างถาวร
     (ให้ send_reply หยุดยิงบับเบิลที่เหลือ)"""
@@ -419,6 +451,7 @@ def send_message(recipient_id: str, text: str, page_id: str = "") -> bool:
                     return False
             else:
                 body = resp.json() if resp.content else {}
+                _remember_sent(str(body.get("message_id", "") or ""))
                 print(f"[FB SEND OK] message_id={body.get('message_id', '-')}")
                 log_event(
                     "SEND_RESPONSE",
@@ -734,7 +767,13 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
     # -> เช็คว่าเป็นการทักเพื่อรับช่วงเคสไหม แล้วเก็บ log ข้อความเซลไว้ด้วย
     if event.get("message", {}).get("is_echo"):
         _msg = event.get("message", {})
-        _from_app = bool(_msg.get("app_id"))
+        _app_id = str(_msg.get("app_id") or "")
+        _echo_mid = str(_msg.get("mid") or "")
+        _from_app = _was_sent_by_bot(_echo_mid) or (
+            bool(_app_id) and bool(FB_APP_ID) and _app_id == FB_APP_ID)
+        if not _from_app and _app_id:
+            print(f"[ECHO HUMAN] คนพิมพ์จากกล่องข้อความเพจ (app_id={_app_id}) "
+                  f"— ไม่ใช่แอปของเรา ({FB_APP_ID})")
         _customer = event.get("recipient", {}).get("id", "")
         _txt = _msg.get("text", "") or ""
         if _customer and _txt:
