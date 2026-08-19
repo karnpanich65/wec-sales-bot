@@ -66,6 +66,11 @@ import queue
 import hashlib
 import threading
 import requests
+try:
+    import pg_store          # ความจำถาวรบน Postgres (เฟส 1 = เขียนคู่ขนาน)
+except Exception as _e:       # ไม่มีก็ต้องวิ่งต่อได้ ห้ามล้มทั้งบอท
+    pg_store = None
+    print(f'[PG] โหลด pg_store ไม่ได้ ({_e}) — ข้ามไป')
 from datetime import datetime, timedelta, timezone
 from faq_data import (
     FAQ_DATABASE, WEC_SYSTEM_PROMPT, QUALIFY_QUESTIONS, QUALIFY_TRIGGERS,
@@ -1661,6 +1666,14 @@ class BotEngine:
         reply = MSG_SPLIT.join(parts)
         self._log(user_id, user_message, reply)
         self._persist(user_id, state, user_message, reply, bucket)
+        # เฟส 1 Postgres — เขียนคู่ขนาน ไม่รอผล ไม่มีทางทำให้ลูกค้ารอ
+        # ยังไม่ได้ใช้อ่านที่ไหนเลย ทางเดิม (RAM + ชีต) ยังทำงาน 100%
+        if pg_store is not None:
+            try:
+                pg_store.save_turn(page_id, user_id, state,
+                                   user_message, reply, bucket)
+            except Exception as _pe:
+                print(f'[PG] save_turn พลาด: {_pe}')
         return reply, grade
 
     # ==================================================================

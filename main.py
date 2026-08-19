@@ -994,7 +994,16 @@ to you and delete everything else.</p>
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    # เพิ่ม 19 ส.ค. 2026 — ใช้ดูว่า Postgres เฟส 1 เขียนเข้าจริงไหม
+    # เปิด /health?pg=1 แล้วดู written เพิ่มขึ้นเรื่อยๆ errors ต้องเป็น 0
+    out = {"status": "ok"}
+    if request.args.get("pg"):
+        try:
+            from bot_logic import pg_store
+            out["pg"] = pg_store.stats() if pg_store else {"enabled": False}
+        except Exception as e:
+            out["pg"] = {"error": str(e)[:200]}
+    return jsonify(out)
 
 
 # ------------------------------------------------------
