@@ -75,11 +75,55 @@ from faq_data import (
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
     ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
+    GUARD_FALLBACK_MSG,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
+# โมเดลตัวแรง — ใช้เฉพาะเทิร์นที่ "อ่านใจคน" แล้วเปลี่ยนผลลัพธ์จริง
+# (ข้อโต้แย้ง / ลังเล / ข้อความยาว / ลูกค้าสงสัยว่าคุยกับบอท / เคสมูลค่าสูง)
+# เทิร์นธรรมดา ~80% ยังใช้ตัวถูกเหมือนเดิม -> ค่าใช้จ่ายแทบไม่ขยับ
+CLAUDE_MODEL_SMART = os.environ.get("CLAUDE_MODEL_SMART", "claude-sonnet-4-20250514")
+SMART_MIN_CHARS = int(os.environ.get("SMART_MIN_CHARS", "60"))
+
+# คำที่บอกว่าเทิร์นนี้ "มีอารมณ์/มีข้อโต้แย้ง" ไม่ใช่แค่ตอบข้อมูล
+_SMART_TRIGGERS = (
+    "กลัว", "กังวล", "ไม่มั่นใจ", "ลังเล", "คิดดูก่อน", "ขอปรึกษา", "แฟนไม่",
+    "ที่บ้านไม่", "เคยโดน", "หลอก", "จริงเหรอ", "แน่ใจ", "เสี่ยง", "ขาดทุน",
+    "ไม่คุ้ม", "แพงไป", "ทำไม", "ยังไง", "ai", "บอท", "คน", "ไม่เข้าใจ",
+    "ไม่ตรง", "งง", "แล้วถ้า", "สมมติ",
+)
+
+
+# ให้โมเดลอ่าน "คนตรงหน้า" กลับมาด้วย 1 บรรทัด แล้วเราตัดออกก่อนส่งลูกค้า
+# ผลที่อ่านได้จะไปโผล่ในช่องสัญญาณของชีต CRM ให้เซลอ่านก่อนโทร
+# และสะสมเป็นข้อมูลว่าลูกค้าจริงๆ พูดแบบไหนแล้วปิดได้/ไม่ได้
+BEHAVIOR_READ_RULE = (
+    "\n\n[อ่านคน] หลังข้อความตอบลูกค้า ให้ขึ้นบรรทัดใหม่แล้วเขียนบรรทัดเดียวรูปแบบนี้เป๊ะๆ:\n"
+    "<<READ|ท่าที=...|กังวลเรื่อง=...|ความพร้อมซื้อ=1-5|ควรทำต่อ=...>>\n"
+    "ท่าที เช่น สนใจจริง/เปรียบเทียบอยู่/ขอข้อมูลเฉยๆ/ไม่พร้อม · "
+    "กังวลเรื่อง = สิ่งที่เขาลังเลจริงๆ เขียนสั้นๆ · "
+    "ความพร้อมซื้อ 5 = พร้อมคุยกับเซลเลย 1 = ยังไม่ใช่ลูกค้า · "
+    "ควรทำต่อ = สิ่งที่เซลควรทำเป็นอย่างแรก\n"
+    "บรรทัดนี้เป็นข้อมูลภายใน ลูกค้าจะไม่เห็น เขียนเป็นภาษาไทยสั้นๆ"
+)
+
+_BEHAVIOR_RE = re.compile(r"<<READ\|(.+?)>>", re.S)
+
+
+def _needs_smart(msg: str, state: dict) -> bool:
+    """เทิร์นนี้ต้องใช้โมเดลตัวแรงไหม — ตัดสินจาก 'ความยากในการอ่านคน'"""
+    if not msg:
+        return False
+    if len(msg) >= SMART_MIN_CHARS:          # พิมพ์ยาว = มีเนื้อความให้ตีความ
+        return True
+    if _has_any(msg, _SMART_TRIGGERS):
+        return True
+    if (state or {}).get("grade") in ("A", "B"):   # เคสดี ห้ามพลาด
+        return True
+    _inc = ((state or {}).get("data") or {}).get("income_total")
+    return bool(_inc and int(_inc) >= 80000)
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "")
 FB_GRAPH_URL = "https://graph.facebook.com/v19.0"
@@ -1059,6 +1103,56 @@ def _parse_age(msg: str):
     return None
 
 
+# ----------------------------------------------------------------------
+# ตัวกรองขาออก — ด่านสุดท้ายก่อนข้อความถึงลูกค้า (Gift 19 ส.ค. 2026)
+# ----------------------------------------------------------------------
+# บอทคุยกับคนที่ไม่ได้ยืนยันตัวตน ทุกคำถูกบันทึกที่ Meta แคปหน้าจอได้
+# ก่อนหน้านี้เราพึ่ง "สั่งใน prompt แล้วหวังว่า AI จะเชื่อฟัง" อย่างเดียว
+# ซึ่งไม่พอ — ต้องมีโค้ดสแกนจริงก่อนส่ง เจอของต้องห้าม = ไม่ส่งข้อความนั้น
+_NEVER_SAY = (
+    # ชื่อโครงการจริง (กฎเหล็กข้อ 1 — ห้ามหลุดเด็ดขาด)
+    "ชีวาทัย", "chewathai", "คราฟ", "craft", "gravitia", "the rich", "เดอะริช",
+    "richpoint", "rich point", "ริชพอยท์", "the energy", "ดิเอนเนอร์จี้",
+    "cloud thonglor", "the livin", "เดอะลิวิน", "atmoz", "cerocco",
+    "monte", "มอนเต้", "icondo", "ไอคอนโด", "infinity one", "อินฟินิตี้วัน",
+    "kave", "เมโทร สกาย", "metro sky",
+    # คำการันตี — ผิด compliance ทันที
+    "การันตี", "รับประกันผลตอบแทน", "ได้กำไรแน่นอน", "ยังไงก็ผ่าน",
+    "อนุมัติแน่นอน", "ผ่านแน่นอน", "ไม่มีความเสี่ยง", "การันตีค่าเช่า",
+    # คำเสี่ยงตามลิสต์ Facebook ใน KB 09
+    "passive income", "รวยเร็ว", "ไม่ต้องใช้เงินตัวเอง", "เงินทำงานแทนคุณ",
+    # ข้อมูลภายใน ห้ามหลุดสู่สาธารณะ
+    "ราคา net", "ราคาต้นทุน", "คอมมิชชั่น", "ค่าคอม", "ส่วนต่างที่บริษัท",
+    "dsr%", "ราคาประเมินภายใน",
+)
+
+
+# คำที่ "พูดในเชิงปฏิเสธได้" — เช่น "ไม่ได้การันตี" คือพูดถูกต้อง ไม่ควรบล็อก
+_GUARD_NEGATABLE = ("การันตี", "การันตีค่าเช่า", "รับประกันผลตอบแทน", "ไม่มีความเสี่ยง",
+                    "ผ่านแน่นอน", "อนุมัติแน่นอน", "ได้กำไรแน่นอน", "ยังไงก็ผ่าน")
+_GUARD_NEG_PREFIX = ("ไม", "ไมได", "หาม", "ยงไมได")   # หลัง _norm_th ตัดวรรณยุกต์แล้ว
+
+
+def _public_guard(text: str):
+    """คืน (ปลอดภัยไหม, คำที่เจอ) — ใช้ก่อนส่งข้อความออกทุกครั้ง
+
+    ประโยคปฏิเสธไม่นับผิด: "ไม่ได้การันตีว่า..." คือการพูดตามความจริง
+    ถ้าบล็อกด้วยจะกลายเป็นบอทพูดความจริงไม่ได้ ซึ่งแย่กว่าเดิม
+    """
+    t = _norm_th(text)
+    for w in _NEVER_SAY:
+        nw = _norm_th(w)
+        i = t.find(nw)
+        if i < 0:
+            continue
+        if w in _GUARD_NEGATABLE:
+            head = t[max(0, i - 12):i]
+            if any(neg in head for neg in _GUARD_NEG_PREFIX):
+                continue          # พูดในเชิงปฏิเสธ ปล่อยผ่าน
+        return False, w
+    return True, ""
+
+
 def _is_reopen(msg: str) -> bool:
     return _has_any(msg, _REOPEN_WORDS)
 
@@ -1488,6 +1582,19 @@ class BotEngine:
         parts = [b for b in bubbles if b and b.strip()]
         if state.get("gender") == "female":
             parts = [to_female(p) for p in parts]
+        # ด่านสุดท้าย — สแกนทุกบับเบิลก่อนออกจากระบบ
+        # เจอชื่อโครงการ/คำการันตี/ข้อมูลภายใน = ไม่ส่งบับเบิลนั้น ใช้ข้อความสำรองแทน
+        _safe = []
+        for _p in parts:
+            _ok, _bad = _public_guard(_p)
+            if _ok:
+                _safe.append(_p)
+                continue
+            print(f"[GUARD BLOCKED] {user_id[:8]}... พบคำต้องห้าม {_bad!r} — ไม่ส่งบับเบิลนี้")
+            self._add_signal(state, f"⛔ ระบบบล็อกข้อความที่มีคำต้องห้าม: {_bad}")
+            if not _safe:
+                _safe.append(GUARD_FALLBACK_MSG)
+        parts = _safe
         reply = MSG_SPLIT.join(parts)
         self._log(user_id, user_message, reply)
         self._persist(user_id, state, user_message, reply, bucket)
@@ -1555,7 +1662,7 @@ class BotEngine:
             if self._is_question(msg):
                 # ลูกค้าถามจริง ต้องได้คำตอบเสมอ — แต่จบที่คำตอบ ไม่ชวนคุยต่อ
                 return [self._ask_claude(msg, user_id,
-                                         state.get("gender", ""), done=True)], None
+                                         state.get("gender", ""), done=True, state=state)], None
             print(f"[CLOSED SILENT] {user_id[:8]}... ปิดจบแล้ว ไม่ตอบ "
                   f"| {msg[:40]!r}")
             return [], None
@@ -1873,19 +1980,19 @@ class BotEngine:
             elif awaiting:
                 # กำลังรอคำตอบอยู่ แต่ข้อความไม่ใช่ทั้งคำตอบและไม่เข้า FAQ
                 # -> ให้ Claude ตอบ แล้วค่อยถามซ้ำในบับเบิลถัดไป
-                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", "")))
+                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", ""), state=state))
             elif state.get("done"):
                 # ลูกค้าให้ข้อมูลครบไปแล้ว — ห้ามขอเบอร์/ถามชุดเดิมซ้ำเด็ดขาด
                 bubbles.append(STATUS_MSG if self._is_status_ask(msg)
-                               else self._ask_claude(msg, user_id, state.get("gender", ""), done=True))
+                               else self._ask_claude(msg, user_id, state.get("gender", ""), done=True, state=state))
             elif self._is_question(msg):
                 # ลูกค้าถามมา ต้องได้คำตอบเสมอ แม้เป็นข้อความแรกของเธรด
                 # ของเดิมมีเงื่อนไข "and not is_new" -> ข้อความแรกที่เป็นคำถาม
                 # ถูกทิ้งทั้งดุ้น ลูกค้าเห็นแค่คำทักทาย + คำถามสวนกลับ
                 # (เจอเคสจริง 14 ส.ค. "7แสนคือขายราคานี้หรือรูปแบบไหนครับ")
-                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", "")))
+                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", ""), state=state))
             elif not self._should_qualify(msg) and not is_new:
-                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", "")))
+                bubbles.append(self._ask_claude(msg, user_id, state.get("gender", ""), state=state))
 
         # ข้อความที่ลูกค้าพิมพ์มาบอกวัตถุประสงค์อยู่แล้ว -> เก็บเลย ไม่ถามซ้ำ
         # (Gift 17 ส.ค. 2026 "ไม่เวิ่นเว้อ") เจอจริง: ลูกค้าเปิดมาว่า "ลงทุนค่ะ"
@@ -2156,6 +2263,24 @@ class BotEngine:
             "❌ ยังติดบูโรอยู่ ณ ปัจจุบัน — ปิดเคสตั้งแต่ต้นทาง ไม่เข้าคิวแจกเซล "
             "(Gift 19 ส.ค. 69) · เก็บไว้ตามเมื่อนโยบายเปลี่ยน")
         self._close_chat(state)
+
+    def _take_behavior(self, raw: str, state: dict | None, model: str) -> str:
+        """ดึงบรรทัด <<READ|...>> ออกจากคำตอบ เก็บลงสัญญาณ แล้วคืนข้อความที่สะอาด
+
+        ลูกค้าต้องไม่เห็นบรรทัดนี้เด็ดขาด — ถ้าดึงไม่ได้ก็ตัดทิ้งอยู่ดี
+        """
+        m = _BEHAVIOR_RE.search(raw or "")
+        if not m:
+            return raw
+        body = m.group(1).strip()
+        raw = _BEHAVIOR_RE.sub("", raw).strip()
+        if state is not None and body:
+            _short = body.replace("|", " · ")[:220]
+            self._add_signal(state, "🧠 อ่านลูกค้า: " + _short)
+            state["behavior_read"] = _short
+            state["behavior_model"] = model
+            print(f"[READ] {_short[:120]}")
+        return raw
 
     @staticmethod
     def _close_chat(state: dict):
@@ -2956,12 +3081,20 @@ class BotEngine:
     # ==================================================================
     def _ask_claude(self, user_message: str, user_id: str,
                     gender: str = "",
-                    done: bool = False) -> str:
+                    done: bool = False, state: dict | None = None) -> str:
         # done=True -> ลูกค้าให้เบอร์ไปแล้ว ห้ามตอบอะไรที่เป็นการขอเบอร์ซ้ำ
         if not ANTHROPIC_API_KEY:
             return STATUS_MSG if done else FALLBACK_MSG
         history = _conversations.get(user_id, [])[-10:]
         messages = history + [{"role": "user", "content": user_message}]
+        _smart = _needs_smart(user_message, state or {})
+        _model = CLAUDE_MODEL_SMART if _smart else CLAUDE_MODEL
+        _sys_prompt = (WEC_SYSTEM_PROMPT + FEMALE_VOICE_RULE
+                       if gender == "female" else WEC_SYSTEM_PROMPT)
+        if _smart:
+            # เทิร์นที่ต้องอ่านคน — ขอให้อ่านพฤติกรรมกลับมาด้วยในคำตอบเดียวกัน
+            # (ไม่ยิง API รอบสอง = ไม่มีค่าใช้จ่ายเพิ่ม) แล้วเราตัดออกก่อนส่งลูกค้า
+            _sys_prompt += BEHAVIOR_READ_RULE
         try:
             resp = requests.post(
                 ANTHROPIC_URL,
@@ -2969,12 +3102,19 @@ class BotEngine:
                     "x-api-key": ANTHROPIC_API_KEY,
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
                 },
                 json={
-                    "model": CLAUDE_MODEL,
+                    "model": _model,
                     "max_tokens": 400,
-                    "system": (WEC_SYSTEM_PROMPT + FEMALE_VOICE_RULE)
-                              if gender == "female" else WEC_SYSTEM_PROMPT,
+                    # prompt caching — system prompt เหมือนเดิมทุกครั้ง
+                    # เปิด cache แล้วค่า input ของรอบถัดๆ ไปถูกลงมาก
+                    # นี่คือตัวที่ทำให้ "ใส่ความรู้เพิ่ม" กับ "ลดค่าใช้จ่าย" ไปด้วยกันได้
+                    "system": [{
+                        "type": "text",
+                        "text": _sys_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
                     "messages": messages,
                 },
                 timeout=15,
@@ -2991,6 +3131,7 @@ class BotEngine:
                 raw = _trim_to_sentence(raw)
                 if not raw:
                     return STATUS_MSG if done else FALLBACK_MSG
+            raw = self._take_behavior(raw, state, _model)
             text = self._sanitize(raw)
             text = _strip_dup_greeting(text)
             before = len(text)
