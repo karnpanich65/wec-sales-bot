@@ -1662,6 +1662,15 @@ class BotEngine:
                 self._handover_note(state, "cust", user_message)
                 self._log(user_id, user_message, "")
                 self._persist(user_id, state, user_message, "(เซลดูแลเอง — บอทไม่ตอบ)", bucket)
+                # r38 — ตอนเซลรับช่วง เดิมข้ามการเขียน Postgres ทำให้ประวัติขาดช่วง
+                # พอเซลปล่อยกลับมา บอทเลยไม่รู้ว่าคุยอะไรกันไปแล้ว
+                if pg_store is not None:
+                    try:
+                        pg_store.save_turn(page_id, user_id, state,
+                                           user_message, "", bucket,
+                                           _hash_psid(user_id))
+                    except Exception as _pe:
+                        print(f'[PG] save_turn (handover) พลาด: {_pe}')
                 _left = int((HANDOVER_TTL_SEC - _hage) / 3600)
                 print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
                       f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
@@ -3446,6 +3455,14 @@ class BotEngine:
             self._persist(customer_id, state, "", "[เซล] " + (text or ""), "live")
         except Exception as e:
             print(f"[HANDOVER PERSIST ERROR] {e}")
+        # r38 — เก็บลง Postgres ด้วย ไม่งั้นบริบทที่เซลคุยหายไปจากความจำบอท
+        if pg_store is not None and text:
+            try:
+                pg_store.save_human(page_id, customer_id, text,
+                                    state.get("handover_by") or "sale",
+                                    _hash_psid(customer_id))
+            except Exception as _pe:
+                print(f"[PG] save_human พลาด: {_pe}")
         return result
 
     @staticmethod
