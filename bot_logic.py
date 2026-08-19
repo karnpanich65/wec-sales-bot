@@ -2231,6 +2231,35 @@ class BotEngine:
         # แต่ตอนบันทึกใช้ page_id จริง -> คีย์ไม่ตรง -> หาไม่เจอ -> นึกว่าลูกค้าใหม่
         # ผลคือ "ทุกครั้งที่ deploy บอททักทายใหม่ + ถามข้อ 1 ซ้ำ" ทั้งที่คุยไปครึ่งทางแล้ว
         _pid = page_id or (referral or {}).get("_page_id", "") or ""
+
+        # เฟส 2 (19 ส.ค. 2026) — ลอง Postgres ก่อน ~10-30 ms
+        # ตรงนี้คือจุดที่แก้อาการ "AI แนะนำตัวใหม่" จริงๆ เพราะกู้ได้ทั้ง
+        # ข้อมูลลูกค้า "และ" บทสนทนา ซึ่งชีตไม่เคยเก็บบทสนทนาให้
+        # อ่านไม่ได้/ไม่มีข้อมูล -> ตกไปทางเดิมทุกอย่างเหมือนเดิม
+        if pg_store is not None:
+            try:
+                _pgst = pg_store.load_state(_pid, user_id)
+            except Exception as _pe:
+                print(f"[PG] load_state พลาด: {_pe}")
+                _pgst = None
+            if _pgst:
+                _pgst.setdefault("data", {})
+                _pgst.setdefault("awaiting", None)
+                _pgst["psid"] = user_id
+                _lead_states[skey] = _pgst
+                if not _conversations.get(user_id):
+                    try:
+                        _hist = pg_store.load_history(_pid, user_id, 10)
+                    except Exception:
+                        _hist = []
+                    if _hist:
+                        _conversations[user_id] = _hist
+                        print(f"[PG] กู้บทสนทนา {len(_hist)} ท่อน "
+                              f"{user_id[:8]}... — AI จะคุยต่อได้ ไม่แนะนำตัวใหม่")
+                print(f"[PG] restored {user_id[:8]}... "
+                      f"fields={list(_pgst.get('data', {}).keys())}")
+                return _pgst, False
+
         loaded = self._load_session(user_id, _pid)
 
         # กู้ประวัติไม่ได้ (ชีตช้า/ล่ม) — ห้ามทำเหมือนลูกค้าใหม่เด็ดขาด
@@ -3235,6 +3264,16 @@ class BotEngine:
         if not ANTHROPIC_API_KEY:
             return STATUS_MSG if done else FALLBACK_MSG
         history = _conversations.get(user_id, [])[-10:]
+        if not history and pg_store is not None:
+            # RAM ว่าง (เพิ่ง restart) — ถ้าไม่ดึงตรงนี้ AI จะคิดว่าเทิร์นแรก
+            # แล้วแนะนำตัวใหม่ ซึ่งคือเคสที่ Gift เจอ 19 ส.ค. 2026
+            try:
+                history = pg_store.load_history(
+                    (state or {}).get("page_id", ""), user_id, 10)
+            except Exception:
+                history = []
+            if history:
+                print(f"[PG] AI ใช้ประวัติ {len(history)} ท่อนจาก Postgres")
         messages = history + [{"role": "user", "content": user_message}]
         _angry = bool((state or {}).get("angry_now"))
         _smart = _angry or _needs_smart(user_message, state or {})
