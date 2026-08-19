@@ -212,10 +212,122 @@ def save_human(page_id: str, psid: str, text: str, who: str = "sale") -> None:
         pass
 
 
+# ------------------------------------------------------------------ อ่าน --
+# เฟส 2 — บอทอ่าน state + ประวัติแชทจาก Postgres แทนที่จะรอ Apps Script
+# อ่านต้องทำบนเธรดที่ลูกค้ารออยู่ (จะ async ไม่ได้) เลยคุมด้วย 2 อย่าง:
+#   · connect_timeout 5 วิ + statement_timeout 4 วิ  -> แย่สุดคือ 9 วิ ยังดีกว่าชีต 20 วิ
+#   · พังแล้วพัก READ_COOLDOWN -> ไม่ไปจิ้ม DB ที่ล่มอยู่ทุก request
+# อ่านไม่ได้ = คืน None/[] แล้วปล่อยให้ทางเดิม (ชีต) ทำงานต่อ ห้ามทำบอทเงียบ
+READ_ENABLED  = bool(DATABASE_URL) and _HAS_DRIVER and PG_READ
+READ_COOLDOWN = float(os.environ.get("PG_READ_COOLDOWN", "30"))
+
+_read_conn = None
+_read_lock = threading.Lock()
+_read_cool_until = 0.0
+
+STATS["reads"] = 0
+STATS["read_hits"] = 0
+STATS["read_errors"] = 0
+
+
+def _read_get():
+    global _read_conn
+    if _read_conn is not None:
+        try:
+            if _read_conn.closed == 0:
+                return _read_conn
+        except Exception:
+            pass
+    c = psycopg2.connect(DATABASE_URL, connect_timeout=5,
+                         options="-c statement_timeout=4000")
+    c.autocommit = True
+    _read_conn = c
+    return c
+
+
+def _read_fail(e):
+    global _read_conn, _read_cool_until
+    STATS["read_errors"] += 1
+    STATS["last_error"] = f"read {type(e).__name__}: {e}"[:200]
+    try:
+        if _read_conn is not None:
+            _read_conn.close()
+    except Exception:
+        pass
+    _read_conn = None
+    _read_cool_until = time.time() + READ_COOLDOWN
+    print(f"[PG READ ERROR] {STATS['last_error']} — พัก {READ_COOLDOWN:.0f} วิ")
+
+
+def _can_read() -> bool:
+    return READ_ENABLED and time.time() >= _read_cool_until
+
+
+def load_state(page_id: str, psid: str):
+    """คืน state ก้อนล่าสุดของลูกค้าคนนี้ หรือ None ถ้าไม่มี/อ่านไม่ได้"""
+    if not _can_read() or not psid:
+        return None
+    try:
+        STATS["reads"] += 1
+        with _read_lock:
+            conn = _read_get()
+            with conn.cursor() as cur:
+                cur.execute("SELECT state FROM sessions WHERE page_id = %s AND psid = %s",
+                            (str(page_id or "-"), str(psid)))
+                row = cur.fetchone()
+        if row and isinstance(row[0], dict):
+            STATS["read_hits"] += 1
+            return row[0]
+        return None
+    except Exception as e:
+        _read_fail(e)
+        return None
+
+
+def load_history(page_id: str, psid: str, limit: int = 10) -> list:
+    """คืนประวัติแชทรูปแบบที่ Anthropic API รับได้
+
+    รวมท่อน role เดียวกันที่ติดกันเป็นก้อนเดียว และตัดหัวให้เริ่มด้วย user
+    (ไม่งั้น API ตอบ 400) — ตรรกะเดียวกับ _resume_context ในบอท
+    """
+    if not _can_read() or not psid:
+        return []
+    try:
+        with _read_lock:
+            conn = _read_get()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT role, text FROM messages "
+                    "WHERE page_id = %s AND psid = %s "
+                    "ORDER BY created_at DESC, id DESC LIMIT %s",
+                    (str(page_id or "-"), str(psid), int(limit) * 3))
+                rows = cur.fetchall()
+    except Exception as e:
+        _read_fail(e)
+        return []
+    rows = list(reversed(rows))
+    msgs = []
+    for role, text in rows:
+        t = (text or "").strip()
+        if not t:
+            continue
+        r = "user" if role == "user" else "assistant"
+        if msgs and msgs[-1]["role"] == r:
+            msgs[-1]["content"] += "\n" + t
+        else:
+            msgs.append({"role": r, "content": t})
+    msgs = msgs[-limit:]
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
+    return msgs
+
+
 def stats() -> dict:
     d = dict(STATS)
     d["enabled"] = ENABLED
     d["read_mode"] = PG_READ
     d["queue"] = _q.qsize()
     d["cooling"] = max(0, int(_cool_until - time.time()))
+    d["read_enabled"] = READ_ENABLED
+    d["read_cooling"] = max(0, int(_read_cool_until - time.time()))
     return d
