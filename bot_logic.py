@@ -863,7 +863,37 @@ MAX_REPLY_CHARS = 180
 # เกินนี้ = ยาวจนอ่านแล้วเป็นโบรชัวร์ ทิ้งไปใช้ข้อความสำรองดีกว่า
 HARD_REPLY_CHARS = 260
 # โหลด session จากชีต: ยิง 2 ครั้ง ครั้งหลังใจเย็นขึ้น (Apps Script cold start ช้า)
-SESSION_LOAD_TIMEOUTS = (3.0, 5.0)
+SESSION_LOAD_TIMEOUTS = (6.0, 9.0)
+
+# สวิตช์ฉุกเฉิน — สั่งบอทหยุดทั้งเพจได้ทันทีจาก Railway ไม่ต้อง deploy ใหม่
+# ตั้งค่า BOT_PAUSE_PAGES = "102444118935634,108248514185091" (คั่นด้วยคอมมา)
+# ใส่ "all" = หยุดทุกเพจ · ลบค่าออก = กลับมาตอบเหมือนเดิม
+# มีไว้เพราะ 19 ส.ค. 2026 เจอเคสบอทถามวนแล้ว "ไม่มีปุ่มหยุด" ต้องรอ deploy
+BOT_PAUSE_PAGES = {x.strip() for x in
+                   os.environ.get("BOT_PAUSE_PAGES", "").split(",") if x.strip()}
+
+# เคสใหญ่ -> ส่งเจ้าของเพจคนเดียว ไม่เข้าคิวแจกปกติ
+# Gift 19 ส.ค. 2026: "เกิน 5 ล้าน เฉพาะ wealth estate ผมเป็นเจ้าของเฉพาะเพจนั้น"
+BIG_CASE_BAHT = 5_000_000
+BIG_CASE_PAGES = {"108248514185091"}      # Wealth Estate : อสังหาคุ้มค่า
+
+# ลูกค้าไม่พอใจ/โกรธ -> ให้ AI ดับอารมณ์ก่อน แล้วค่อยถามต่อเทิร์นถัดไป
+_ANGER_WORDS = (
+    "โกรธ", "โมโห", "หงุดหงิด", "ไม่พอใจ", "แย่มาก", "แย่จริง", "ห่วย",
+    "เสียเวลา", "หลอกลวง", "ต้มตุ๋น", "โกง", "แจ้งความ", "ร้องเรียน",
+    "ตอบมั่ว", "รำคาญ", "เลิกยุ่ง", "อย่ามายุ่ง", "สแปม", "spam",
+    "ไร้สาระ", "งี่เง่า", "ไม่ไหวแล้ว", "พอแล้ว", "หยุดส่ง",
+)
+
+ANGER_RULE = (
+    "\n\n[โหมดดับอารมณ์] ลูกค้ากำลังไม่พอใจ เทิร์นนี้ห้ามขาย "
+    "และห้ามถามคำถามใดๆ เด็ดขาด\n"
+    "เขียนข้อความเดียว ไม่เกิน 2 ประโยค ทำ 3 อย่างนี้:\n"
+    "1) รับรู้ความรู้สึกเขาด้วยคำของเขาเอง ไม่ใช่คำว่า 'เข้าใจค่ะ' ลอยๆ\n"
+    "2) ขอโทษเฉพาะเรื่องที่เราพลาดจริง ไม่แก้ตัว ไม่โทษระบบ ไม่โทษลูกค้า\n"
+    "3) บอกสิ่งที่จะทำต่อให้ชัด — ให้ที่ปรึกษาตัวจริงติดต่อกลับ\n"
+    "ห้ามลงท้ายด้วยคำถาม"
+)
 _SENT_BOUND_RE = re.compile(r"(?:ครับ|ค่ะ|คะ|[.!?])(?=\s|$)")
 
 
@@ -1475,6 +1505,18 @@ def _who_greeted(text: str, page_id: str = "") -> str:
     return ""
 
 
+def _who_typed(text: str, page_id: str = "") -> str:
+    """หาชื่อเซลจากข้อความ โดยไม่บังคับว่าต้องมีคำทักทาย
+    (เซลจริงพิมพ์ "พี่เจี๊ยบเองค่ะ" เฉยๆ ไม่ได้ขึ้นต้นด้วยสวัสดี)"""
+    t = (text or "").strip().lower()
+    if not t:
+        return ""
+    for name, keys in _sales_of_page(page_id).items():
+        if any(k.lower() in t for k in keys):
+            return name
+    return ""
+
+
 def _is_handover_trigger(text: str, page_id: str = "") -> bool:
     t = (text or "").strip().lower()
     if any(k.lower() in t for k in HANDOVER_TRIGGERS):
@@ -1527,6 +1569,15 @@ class BotEngine:
         """
         referral = referral or {}
         skey = f"{page_id}:{user_id}" if page_id else user_id
+
+        # สวิตช์ฉุกเฉินระดับเพจ — เงียบสนิท แต่ยังเก็บ log ไว้ให้เซลตามอ่านได้
+        if BOT_PAUSE_PAGES and ("all" in BOT_PAUSE_PAGES
+                                or str(page_id) in BOT_PAUSE_PAGES):
+            print(f"[PAUSED] page={page_id} {user_id[:8]}... "
+                  f"— สั่งหยุดทั้งเพจไว้ ข้ามการตอบ | {user_message[:40]!r}")
+            self._log(user_id, user_message, "(บอทถูกสั่งหยุดทั้งเพจ)")
+            return "", None
+
         state, is_new = self._resolve_state(user_id, platform, referral,
                                             skey, page_id)
 
@@ -1621,6 +1672,22 @@ class BotEngine:
                 state["fb_name"] = _nm
                 self._send_name_update(user_id, state)
                 return [f"ขอบคุณครับ คุณ{_nm} 🙏 เดี๋ยวที่ปรึกษาติดต่อไปครับ"], None
+
+        # ---- 0.2) ลูกค้าไม่พอใจ -> ดับอารมณ์ก่อน ค่อยถามต่อเทิร์นถัดไป ----
+        # Gift 19 ส.ค. 2026: "ให้ antropic api ดับอารมณ์โดยใช้สกิลก่อน
+        # แล้วถามคำถามต่อ ถ้าเห็นสัญญาณ ถามต่อให้จบ แล้วส่งรายชื่อพร้อมรีมาร์ค"
+        # วางไว้ก่อนประตูเงียบ เพราะเคสที่ปิดไปแล้วก็ต้องได้รับการดับอารมณ์
+        if _has_any(msg, _ANGER_WORDS):
+            state["was_angry"] = True
+            state["angry_now"] = True
+            state["angry_at"] = _now()
+            self._add_signal(
+                state,
+                "😠 ลูกค้าเคยไม่พอใจในแชท — อ่านแชทก่อนโทร "
+                "ห้ามเปิดสายด้วยการขายทันที")
+            print(f"[ANGER] {user_id[:8]}... ดับอารมณ์ก่อน | {msg[:40]!r}")
+            return [self._ask_claude(msg, user_id, state.get("gender", ""),
+                                     state=state)], None
 
         # ---- 0.4) กลับมาบอกว่า "มีผู้กู้ร่วมแล้ว" -> เปิดเคสใหม่ ถามต่อทันที ----
         # 19 ส.ค. 2026 — ต้องเช็ค "ก่อน" ประตูเงียบ และต้องไม่ผูกกับธง closed
@@ -2142,6 +2209,30 @@ class BotEngine:
         # ผลคือ "ทุกครั้งที่ deploy บอททักทายใหม่ + ถามข้อ 1 ซ้ำ" ทั้งที่คุยไปครึ่งทางแล้ว
         _pid = page_id or (referral or {}).get("_page_id", "") or ""
         loaded = self._load_session(user_id, _pid)
+
+        # กู้ประวัติไม่ได้ (ชีตช้า/ล่ม) — ห้ามทำเหมือนลูกค้าใหม่เด็ดขาด
+        # เพราะเราไม่รู้ว่าเขาคุยไปถึงไหนแล้ว ถามซ้ำ = ลูกค้าหาย
+        # เลือกเงียบแล้วส่งให้คนดูแลแทน — เสียโอกาสน้อยกว่าถามวน
+        if loaded is False:
+            state = self._blank_state(platform, referral)
+            state["psid"] = user_id
+            if _pid:
+                state["page_id"] = _pid
+            state["handover"] = True
+            state["handover_at"] = _now()
+            state["handover_by"] = "ระบบ (กู้ประวัติแชทไม่ได้)"
+            state["recovery_failed"] = True
+            state["handover_log"] = []
+            self._add_signal(
+                state,
+                "🔴 กู้ประวัติแชทไม่ได้ (ชีตตอบช้า) — บอทหยุดตอบแชทนี้ "
+                "ให้เซลเข้ารับช่วงทันที ห้ามปล่อยให้บอทถามซ้ำตั้งแต่ต้น")
+            _lead_states[skey] = state
+            _conversations.setdefault(skey, [])
+            print(f"[SESSION FAIL] {user_id[:8]}... กู้ประวัติไม่ได้ "
+                  f"-> หยุดบอท ส่งให้คนดูแล")
+            return state, False
+
         if loaded:
             loaded.setdefault("data", {})
             loaded.setdefault("awaiting", None)
@@ -2182,7 +2273,7 @@ class BotEngine:
                     timeout=tmo,
                 )
                 if r.status_code != 200:
-                    return None
+                    return False          # ชีตตอบผิดปกติ = กู้ไม่ได้ (ไม่ใช่ "ลูกค้าใหม่")
                 j = r.json()
                 st = j.get("state")
                 return st if isinstance(st, dict) and st else None
@@ -2191,7 +2282,10 @@ class BotEngine:
                 print(f"[SESSION LOAD {'ERROR' if last else 'RETRY'}] "
                       f"attempt {attempt}/{len(SESSION_LOAD_TIMEOUTS)} "
                       f"(timeout={tmo}s): {e}")
-        return None
+        # ⚠️ False = "กู้ประวัติไม่ได้"  ต่างจาก None = "ไม่เคยคุยกันมาก่อนจริงๆ"
+        # 19 ส.ค. 2026 เคสจริง: ชีตช้า -> คืน None -> ระบบนึกว่าลูกค้าใหม่
+        # -> ทักทายซ้ำ + ถามข้อ 1 ใหม่ทั้งที่คุยไปครึ่งทางแล้ว -> ลีดเกรด A หลุด
+        return False
 
     def _persist(self, user_id: str, state: dict,
                  user_msg: str, reply: str, bucket: str):
@@ -2233,6 +2327,8 @@ class BotEngine:
                 "handover_log": state.get("handover_log", []),
                 "handover_by": state.get("handover_by", ""),
                 "ncb_kind": state.get("ncb_kind", ""),
+                "was_angry": state.get("was_angry", False),
+                "route_to": state.get("route_to", ""),
                 "chat_name": state.get("chat_name", ""),
                 # ปิดจบแล้ว — ต้องรอดข้าม restart ไม่งั้น deploy ทีนึง
                 # บอทกลับมาตอบเคสที่ปิดไปแล้วใหม่หมด
@@ -3023,6 +3119,14 @@ class BotEngine:
             _age_calc = _own_age
         cap_now = _capacity(income, debt, _age_calc)
         cap_clear = _capacity(income, 0, _age_calc)
+        # เคสใหญ่ของเพจที่ Gift เป็นเจ้าของ -> กันไม่ให้เข้าคิวแจกปกติ
+        if (state is not None and cap_now >= BIG_CASE_BAHT
+                and str(state.get("page_id", "")) in BIG_CASE_PAGES):
+            state["route_to"] = "Gift"
+            self._add_signal(
+                state,
+                f"🔷 วงเงินประเมิน {cap_now/1e6:.1f} ล้าน (เกิน 5 ล้าน) "
+                f"— เพจ Wealth Estate ส่ง Gift คนเดียว ไม่เข้าคิวแจกปกติ")
         if state is not None and _own_age is not None:
             _solo = _capacity(income, debt, _own_age)
             if _has_cob and _co_age is None:
@@ -3077,9 +3181,9 @@ class BotEngine:
             return ("ขอบคุณครับ ที่ปรึกษาจะโทรกลับหาลูกค้าตั้งแต่ "
                     f"{CALL_START_TXT} น. เป็นต้นไปครับ")
         if grade == "A":
-            return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับหาลูกค้าภายใน 30 นาทีครับ"
+            return "ขอบคุณครับ ที่ปรึกษาจะโทรกลับหาลูกค้าภายใน 2 ชั่วโมงครับ"
         elif grade == "B":
-            return ("ขอบคุณครับ ที่ปรึกษาจะโทรกลับภายใน 1-2 ชั่วโมง "
+            return ("ขอบคุณครับ ที่ปรึกษาจะโทรกลับภายในวันนี้ "
                     f"({CALL_WINDOW_TXT}) ครับ")
         elif grade == "N":
             # ข้อมูลไม่พอ — ยังต้องโทรไปเก็บ ให้ตอบเหมือนเกรด C
@@ -3100,10 +3204,15 @@ class BotEngine:
             return STATUS_MSG if done else FALLBACK_MSG
         history = _conversations.get(user_id, [])[-10:]
         messages = history + [{"role": "user", "content": user_message}]
-        _smart = _needs_smart(user_message, state or {})
+        _angry = bool((state or {}).get("angry_now"))
+        _smart = _angry or _needs_smart(user_message, state or {})
         _model = CLAUDE_MODEL_SMART if _smart else CLAUDE_MODEL
         _sys_prompt = (WEC_SYSTEM_PROMPT + FEMALE_VOICE_RULE
                        if gender == "female" else WEC_SYSTEM_PROMPT)
+        if _angry:
+            # ดับอารมณ์ต้องมาก่อนกฎอื่นเสมอ — ห้ามให้กฎ "ถามต่อ" มาชนะ
+            _sys_prompt += ANGER_RULE
+            state.pop("angry_now", None)
         if _smart:
             # เทิร์นที่ต้องอ่านคน — ขอให้อ่านพฤติกรรมกลับมาด้วยในคำตอบเดียวกัน
             # (ไม่ยิง API รอบสอง = ไม่มีค่าใช้จ่ายเพิ่ม) แล้วเราตัดออกก่อนส่งลูกค้า
@@ -3196,12 +3305,15 @@ class BotEngine:
             result = "resume"
             self._resume_context(customer_id, state)
             print(f"[HANDOVER OFF] {customer_id[:8]}... กลับมาให้บอทตอบ")
-        elif _is_handover_trigger(text, page_id) and not state.get("handover"):
+        elif not state.get("handover"):
+            # 19 ส.ค. 2026 (Gift): เดิมต้องมีคำทักทาย + ชื่อเซล ถึงจะหยุดบอท
+            # เคสจริง: เซลพิมพ์ "พี่เจี๊ยบเองค่ะ" -> ไม่เข้าเงื่อนไข -> บอทตอบแทรกต่อ
+            # กติกาใหม่: มีคนพิมพ์เองจากกล่องข้อความเพจ = รับช่วงทันที ทุกข้อความ
             state["handover"] = True
             state["handover_at"] = _now()
             result = "handover"
             state["handover_log"] = []
-            _who = _who_greeted(text, page_id)
+            _who = _who_greeted(text, page_id) or _who_typed(text, page_id)
             if _who:
                 state["handover_by"] = _who
             self._add_signal(
