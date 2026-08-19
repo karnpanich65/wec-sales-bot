@@ -74,6 +74,7 @@ from faq_data import (
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
+    ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -975,6 +976,50 @@ _NEGATIVE_STARTS = ("ไม่มี", "ไม่ได้", "ยังไม่
                     "ไม่ค่ะ", "ไม่มีครับ", "ไม่มีค่ะ")
 
 
+# ----------------------------------------------------------------------
+# ลูกค้าถามทำเล + เรื่องอายุ (Gift 19 ส.ค. 2026)
+# ----------------------------------------------------------------------
+# คำที่แปลว่า "ขอรู้ทำเล" — คำพวกนี้ส่วนใหญ่ไม่มีคำบ่งชี้คำถาม
+# ลูกค้าพิมพ์ "ทำเล" คำเดียวก็มี ระบบเดิมไม่นับเป็นคำถามเลยเงียบใส่
+_ZONE_ASK_WORDS = (
+    "ทำเล", "ทําเล", "โซนไหน", "ย่านไหน", "แถวไหน", "อยู่ตรงไหน", "อยู่ที่ไหน",
+    "ที่ไหนบ้าง", "มีที่ไหน", "โครงการอยู่", "ทำเลไหน", "ขอทำเล", "บอกทำเล",
+    "มีโซนไหน", "มีย่านไหน", "ตั้งอยู่",
+)
+
+# เพดานอายุที่แบงก์กลุ่มผ่อนยาวให้ (KTB/GSB/GHB/UOB/KK) — rules.json age_cap
+AGE_CAP_MAX = 70
+# ปีกู้ที่ถือว่า "สั้นจนค่างวดพุ่ง" -> ต้องรีบเสนอผู้กู้ร่วมอายุน้อย
+AGE_TERM_ALERT = 20
+# สัญญาณว่าลูกค้าน่าจะอายุเยอะ — ถามอายุเฉพาะตอนเจอสัญญาณ (Gift เคาะ)
+_AGE_SIGNAL_WORDS = (
+    "เกษียณ", "บำนาญ", "บำนาน", "ปลดเกษียณ", "วัยเกษียณ", "เกษียนแล้ว",
+    "ข้าราชการบำนาญ", "รับบำนาญ", "หลังเกษียณ", "อายุมาก", "อายุเยอะ",
+    "สูงวัย", "ใกล้เกษียณ",
+)
+
+
+def _is_zone_ask(msg: str) -> bool:
+    return _has_any(msg, _ZONE_ASK_WORDS)
+
+
+def _has_age_signal(msg: str) -> bool:
+    return _has_any(msg, _AGE_SIGNAL_WORDS)
+
+
+def _parse_age(msg: str):
+    """อ่านอายุจากข้อความ — รับได้ทั้ง '60' '60 ปี' 'อายุ 62' 'หกสิบ'
+
+    กันเลขที่ไม่ใช่อายุ: ปีเกิด (2500+) เงินเดือน (>120) เบอร์โทร
+    """
+    m = _norm_th(msg)
+    for mt in re.finditer(r"(?<!\d)(\d{2})(?!\d)", m):
+        n = int(mt.group(1))
+        if 18 <= n <= 90:
+            return n
+    return None
+
+
 def _is_reopen(msg: str) -> bool:
     return _has_any(msg, _REOPEN_WORDS)
 
@@ -1476,6 +1521,46 @@ class BotEngine:
                   f"| {msg[:40]!r}")
             return [], None
 
+        # ---- 0.46) คำตอบของคำถามอายุ (ถามไปรอบก่อน) --------------------
+        # อายุมีผลกับ "จำนวนปีที่กู้ได้" ตรงๆ -> มีผลกับค่างวดต่อเดือน
+        # ธนาคารกลุ่มผ่อนยาวให้ถึงอายุ 70 (KTB/GSB/GHB/UOB/KK) กลุ่มอื่น 65
+        if state.pop("awaiting_age", False):
+            _age = _parse_age(msg)
+            if _age is not None:
+                data["age"] = _age
+                _term = max(0, AGE_CAP_MAX - _age)
+                data["age_term"] = _term
+                if _term <= AGE_TERM_ALERT:
+                    data["age_short_term"] = True
+                    # ยื่นเดี่ยวที่ปีกู้สั้นขนาดนี้ = ค่างวดสูงจนวงเงินหด
+                    # เปิดเส้นทางถามผู้กู้ร่วมเส้นเดียวกับเคสรายได้ต่ำ
+                    data["low_income"] = True
+                    self._add_signal(
+                        state,
+                        f"⚠️ อายุ {_age} — เพดานผ่อนถึง 70 เหลือกู้ได้ {_term} ปี "
+                        f"ค่างวด/ล้านสูงกว่าปกติเกือบเท่าตัว · แบงก์ที่ปิดที่ 65 "
+                        f"(TTB/SCB/BBL/KBANK/BAY) แทบใช้ไม่ได้ · ต้องหาผู้กู้ร่วมอายุน้อย")
+                    state["awaiting"] = "co_borrower"
+                    state.setdefault("asked", {})["co_borrower"] = 1
+                    print(f"[AGE] {user_id[:8]}... อายุ {_age} เหลือกู้ {_term} ปี "
+                          f"— เสนอผู้กู้ร่วมอายุน้อย")
+                    return [AGE_COBORROWER_MSG.format(years=_term),
+                            AGE_COBORROWER_Q], None
+                self._add_signal(state, f"อายุ {_age} — กู้ได้ถึง {_term} ปี ยังอยู่ในเกณฑ์ปกติ")
+            else:
+                # ตอบไม่ตรง -> ไม่ไล่บี้ ปล่อยไหลไปตามปกติ ให้เซลถามตอนโทร
+                self._add_signal(state, "⚠️ ถามอายุแล้วลูกค้าไม่ตอบ — เซลถามตอนโทร (มีสัญญาณว่าอายุเยอะ)")
+
+        # ---- 0.47) ลูกค้าถามทำเล -> ตอบทันที ห้ามสวนคำถามกลับ -----------
+        # เคสจริง 19 ส.ค. เพจ Wealth Estate: ลูกค้าพิมพ์ "ทำเล" สองรอบ
+        # บอทถามกลับทั้งสองรอบเพราะคำนี้ไม่มีคำบ่งชี้คำถาม (ไหม/อะไร/?)
+        # ตอบเป็นข้อความตายตัว ไม่ส่งให้ AI — ตัวเลขราคาเดาไม่ได้
+        if not state.get("zone_told") and _is_zone_ask(msg) and not state.get("done"):
+            state["zone_told"] = True
+            state["qualifying"] = True
+            print(f"[ZONE] {user_id[:8]}... ตอบทำเล + ช่วงราคา")
+            return [ZONE_MENU_MSG, ZONE_MENU_Q], None
+
         # ---- 0.5) คำตอบของคำถามประวัติเครดิต (ถามไปรอบก่อน) ------------
         # ใช้ธงเฉพาะ ไม่ผ่าน FIELD_ORDER — ไม่งั้นไปแย่งคิวคำถามหลัก
         # (บทเรียน 18 ส.ค.: ใส่ใน FIELD_ORDER แล้วเบอร์โทรถูกกลืนหายไปเลย)
@@ -1538,6 +1623,14 @@ class BotEngine:
                 "อาชีพอิสระ/ไม่มีประกันสังคม — ต้องใช้ statement ย้อนหลัง 6-12 ด. "
                 "เอกสารมากกว่าเคสพนักงานประจำ อย่าเพิ่งฟันว่าผ่าน",
             )
+
+        # อายุเยอะ — ถามอายุเฉพาะตอนเจอสัญญาณ (Gift เคาะ 19 ส.ค. 2026)
+        # ไม่ถามทุกคน เพราะจะทำให้ funnel ยาวขึ้นโดยไม่จำเป็น
+        if (data.get("age") is None and not state.get("age_asked")
+                and not state.get("done") and _has_age_signal(msg)):
+            state["age_asked"] = True
+            state["age_pending"] = True
+            self._add_signal(state, "ลูกค้าพูดถึงเกษียณ/บำนาญ — ระบบถามอายุเพื่อคิดปีกู้")
 
         # เจ้าของห้องอยู่แล้ว แต่ตั้งใจ "ซื้อเพิ่ม" -> อยู่สายนักลงทุนตามเดิม
         # แค่ติดธงให้เซลรู้ว่าคนนี้กู้ผ่านมาแล้ว = โอกาสปิดสูงกว่าคนทักเปล่าๆ
@@ -1756,6 +1849,13 @@ class BotEngine:
             if self._should_qualify(msg) or state.get("qualifying") or consumed:
                 state["qualifying"] = True
                 asked = state.setdefault("asked", {})
+                # อายุมาก่อนข้ออื่น — รู้อายุแล้วเส้นทางที่เหลือถึงจะถูก
+                # (ปีกู้สั้น = ต้องวิ่งไปหาผู้กู้ร่วมทันที ไม่ใช่ไล่ถามตามคิวเดิม)
+                if state.pop("age_pending", False):
+                    state["awaiting_age"] = True
+                    bubbles.append(AGE_Q)
+                    reply_parts = [b for b in bubbles if b and b.strip()]
+                    return reply_parts, grade
                 field, question = self._next_missing(data, state)
                 # ถามข้อนี้ครบ 2 ครั้งแล้วยังไม่ได้ -> ไม่ไล่บี้ต่อ
                 # แต่ "ย้อนไปถามข้อที่ยังขาดข้ออื่น" แทนการเงียบ (Gift 18 ส.ค.)
@@ -1970,6 +2070,9 @@ class BotEngine:
                 # บอทกลับมาตอบเคสที่ปิดไปแล้วใหม่หมด
                 "closed": state.get("closed", False),
                 "closed_at": state.get("closed_at", 0),
+                # ตอบทำเลไปแล้ว / ถามอายุไปแล้ว — ห้ามรีเซ็ตตอน deploy
+                "zone_told": state.get("zone_told", False),
+                "age_asked": state.get("age_asked", False),
             },
             "log": rows,
         })
