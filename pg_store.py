@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_lookup
     ON messages (page_id, psid, created_at DESC);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS source_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS messages_source_uniq ON messages (source_key);
 """
 
 
@@ -320,6 +322,84 @@ def load_history(page_id: str, psid: str, limit: int = 10) -> list:
     while msgs and msgs[0]["role"] != "user":
         msgs.pop(0)
     return msgs
+
+
+# ------------------------------------------------------- นำเข้าของเก่า --
+# ย้าย Chat_Log จากชีตเข้า messages — ยิงซ้ำกี่รอบก็ได้ข้อมูลชุดเดียว
+# เพราะ source_key (ชื่อแท็บ + เลขแถว) มี unique index กันไว้
+# ใช้เวลาจริงจากชีต ไม่ใช่ now() ไม่งั้นประวัติเก่าจะไปกองอยู่บนสุดหมด
+def import_rows(rows: list) -> dict:
+    if not (bool(DATABASE_URL) and _HAS_DRIVER):
+        return {"ok": False, "inserted": 0, "reason": "no driver/url"}
+    if not rows:
+        return {"ok": True, "inserted": 0, "seen": 0}
+    vals = []
+    for r in rows:
+        try:
+            key = str(r.get("key") or "").strip()
+            psid = str(r.get("psid") or "").strip()
+            text = str(r.get("text") or "").strip()
+            ts = str(r.get("ts") or "").strip()
+            if not (key and psid and text and ts):
+                continue
+            role = "user" if str(r.get("role") or "").lower() in (
+                "user", "customer", "cust", "ลูกค้า") else "assistant"
+            vals.append((str(r.get("page_id") or "-"), psid, role, text[:4000],
+                         (str(r.get("stage") or "") or None), ts, key))
+        except Exception:
+            continue
+    if not vals:
+        return {"ok": True, "inserted": 0, "seen": len(rows)}
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=8,
+                                options="-c statement_timeout=25000")
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO messages "
+                "(page_id, psid, role, text, stage, created_at, source_key) "
+                "VALUES %s ON CONFLICT (source_key) DO NOTHING",
+                vals,
+                template="(%s,%s,%s,%s,%s,%s::timestamptz,%s)")
+            n = cur.rowcount
+        return {"ok": True, "inserted": int(n), "seen": len(rows), "valid": len(vals)}
+    except Exception as e:
+        return {"ok": False, "inserted": 0, "seen": len(rows),
+                "error": f"{type(e).__name__}: {e}"[:250]}
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def counts() -> dict:
+    """นับแถวจริงใน DB — ใช้ยืนยันว่านำเข้าครบไหม"""
+    if not (bool(DATABASE_URL) and _HAS_DRIVER):
+        return {"ok": False}
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=8,
+                                options="-c statement_timeout=15000")
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM sessions")
+            se = cur.fetchone()[0]
+            cur.execute("SELECT count(*), count(source_key), "
+                        "min(created_at)::text, max(created_at)::text FROM messages")
+            m, imported, mn, mx = cur.fetchone()
+        return {"ok": True, "sessions": int(se), "messages": int(m),
+                "imported": int(imported), "oldest": mn, "newest": mx}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:250]}
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def stats() -> dict:
