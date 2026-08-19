@@ -1,0 +1,221 @@
+# pg_store.py — ความจำของบอทบน PostgreSQL  (Phase 1 = เขียนคู่ขนานอย่างเดียว)
+# ----------------------------------------------------------------------------
+# Gift 19 ส.ค. 2026
+# ปัญหาที่ตัวนี้มาแก้: _conversations กับ _lead_states อยู่ใน RAM อย่างเดียว
+# Railway restart/deploy ทีเดียว ประวัติแชททุกคนหายหมด
+# -> Anthropic API ได้ history ว่างเปล่า -> ตอบเหมือนเพิ่งเจอกันครั้งแรก
+#
+# กติกาเหล็กของไฟล์นี้ (บทเรียนจาก r26 ที่ทำบอทเงียบทั้งระบบ):
+#   1. ห้ามทำให้ลูกค้ารอ  -> เขียนผ่านคิวเบื้องหลัง ไม่บล็อกเทิร์นการตอบ
+#   2. ห้าม raise ออกไปข้างนอก -> พังยังไงก็กลืนไว้ในนี้
+#   3. DB ล่ม = บอททำงานเหมือนไม่มี DB ไม่ใช่บอทหยุดตอบ
+#
+# เฟส 1 (ตอนนี้): เขียนอย่างเดียว ยังอ่านจาก RAM + ชีตเหมือนเดิม 100%
+# เฟส 2 (ทีหลัง): เปิด PG_READ=1 แล้วค่อยให้บอทอ่านจากที่นี่
+# ----------------------------------------------------------------------------
+
+import os
+import json
+import queue
+import threading
+import time
+
+DATABASE_URL   = os.environ.get("DATABASE_URL", "")
+PG_DUAL_WRITE  = os.environ.get("PG_DUAL_WRITE", "0") == "1"
+PG_READ        = os.environ.get("PG_READ", "0") == "1"      # เฟส 2 ค่อยเปิด
+PG_QUEUE_MAX   = int(os.environ.get("PG_QUEUE_MAX", "2000"))
+PG_COOLDOWN    = float(os.environ.get("PG_COOLDOWN", "60")) # พังแล้วพักกี่วินาที
+
+try:
+    import psycopg2
+    import psycopg2.extras
+    _HAS_DRIVER = True
+except Exception as _e:                                     # ไม่มี driver = ปิดเงียบ
+    psycopg2 = None
+    _HAS_DRIVER = False
+    print(f"[PG] psycopg2 ไม่พร้อม ({_e}) — ข้ามการเขียน Postgres")
+
+ENABLED = bool(DATABASE_URL) and _HAS_DRIVER and PG_DUAL_WRITE
+
+_q: "queue.Queue" = queue.Queue(maxsize=PG_QUEUE_MAX)
+_conn = None
+_conn_lock = threading.Lock()
+_schema_ok = False
+_cool_until = 0.0
+_worker = None
+
+STATS = {"queued": 0, "written": 0, "dropped": 0, "errors": 0, "last_error": ""}
+
+
+DDL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    page_id    TEXT        NOT NULL,
+    psid       TEXT        NOT NULL,
+    state      JSONB       NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (page_id, psid)
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id         BIGSERIAL   PRIMARY KEY,
+    page_id    TEXT        NOT NULL,
+    psid       TEXT        NOT NULL,
+    role       TEXT        NOT NULL,
+    text       TEXT        NOT NULL,
+    stage      TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS messages_lookup
+    ON messages (page_id, psid, created_at DESC);
+"""
+
+
+# ---------------------------------------------------------------- connection --
+def _connect():
+    """เปิด connection ใหม่ + สร้างตารางถ้ายังไม่มี — เรียกจาก worker thread เท่านั้น"""
+    global _conn, _schema_ok
+    c = psycopg2.connect(DATABASE_URL, connect_timeout=8)
+    c.autocommit = True
+    if not _schema_ok:
+        with c.cursor() as cur:
+            cur.execute(DDL)
+        _schema_ok = True
+        print("[PG] ตารางพร้อมแล้ว (sessions, messages)")
+    _conn = c
+    return c
+
+
+def _get_conn():
+    global _conn
+    if _conn is not None:
+        try:
+            if _conn.closed == 0:
+                return _conn
+        except Exception:
+            pass
+    return _connect()
+
+
+def _drop_conn():
+    global _conn
+    try:
+        if _conn is not None:
+            _conn.close()
+    except Exception:
+        pass
+    _conn = None
+
+
+# -------------------------------------------------------------------- worker --
+def _run_job(job):
+    kind = job[0]
+    conn = _get_conn()
+    if kind == "state":
+        _, page_id, psid, state_json = job
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sessions (page_id, psid, state, updated_at) "
+                "VALUES (%s, %s, %s, now()) "
+                "ON CONFLICT (page_id, psid) DO UPDATE "
+                "SET state = EXCLUDED.state, updated_at = now()",
+                (page_id, psid, state_json))
+    elif kind == "msgs":
+        _, page_id, psid, rows = job
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO messages (page_id, psid, role, text, stage) VALUES %s",
+                [(page_id, psid, r[0], r[1], r[2]) for r in rows])
+
+
+def _worker_loop():
+    global _cool_until
+    while True:
+        job = _q.get()
+        try:
+            if time.time() < _cool_until:
+                STATS["dropped"] += 1          # อยู่ในช่วงพักหลังพัง — ทิ้งไปเลย
+                continue
+            _run_job(job)
+            STATS["written"] += 1
+        except Exception as e:
+            STATS["errors"] += 1
+            STATS["last_error"] = f"{type(e).__name__}: {e}"[:200]
+            _drop_conn()
+            _cool_until = time.time() + PG_COOLDOWN
+            print(f"[PG ERROR] {STATS['last_error']} — พัก {PG_COOLDOWN:.0f} วิ")
+        finally:
+            _q.task_done()
+
+
+def _ensure_worker():
+    global _worker
+    if _worker is not None and _worker.is_alive():
+        return
+    _worker = threading.Thread(target=_worker_loop, name="pg-writer", daemon=True)
+    _worker.start()
+    print("[PG] เปิดคิวเขียนเบื้องหลังแล้ว")
+
+
+def _submit(job):
+    if not ENABLED:
+        return
+    _ensure_worker()
+    try:
+        _q.put_nowait(job)
+        STATS["queued"] += 1
+    except queue.Full:
+        STATS["dropped"] += 1                  # คิวเต็ม = ทิ้ง ห้ามบล็อกลูกค้าเด็ดขาด
+
+
+# ------------------------------------------------------------------ public --
+def _clean_state(state: dict) -> dict:
+    """ตัดของที่ serialize ไม่ได้ออก แล้วคืน dict ที่ปลอดภัยจะเก็บลง JSONB"""
+    out = {}
+    for k, v in (state or {}).items():
+        try:
+            json.dumps(v)
+            out[k] = v
+        except Exception:
+            out[k] = str(v)[:500]
+    return out
+
+
+def save_turn(page_id: str, psid: str, state: dict,
+              user_msg: str, reply: str, stage: str = "") -> None:
+    """เรียกท้ายทุกเทิร์น — เขียน state + 2 ข้อความลงคิว (ไม่รอผล)"""
+    if not ENABLED or not psid:
+        return
+    try:
+        pid = str(page_id or "-")
+        _submit(("state", pid, str(psid),
+                 json.dumps(_clean_state(state), ensure_ascii=False)))
+        rows = []
+        if user_msg:
+            rows.append(("user", str(user_msg)[:4000], stage or None))
+        if reply:
+            rows.append(("assistant", str(reply)[:4000], stage or None))
+        if rows:
+            _submit(("msgs", pid, str(psid), rows))
+    except Exception as e:
+        STATS["errors"] += 1
+        STATS["last_error"] = f"save_turn {type(e).__name__}: {e}"[:200]
+
+
+def save_human(page_id: str, psid: str, text: str, who: str = "sale") -> None:
+    """ข้อความที่เซลพิมพ์เองจากกล่องข้อความเพจ — บริบทที่ AI มองไม่เห็นมาตลอด"""
+    if not ENABLED or not psid or not text:
+        return
+    try:
+        _submit(("msgs", str(page_id or "-"), str(psid),
+                 [("assistant", f"[{who}] {str(text)[:4000]}", "human")]))
+    except Exception:
+        pass
+
+
+def stats() -> dict:
+    d = dict(STATS)
+    d["enabled"] = ENABLED
+    d["read_mode"] = PG_READ
+    d["queue"] = _q.qsize()
+    d["cooling"] = max(0, int(_cool_until - time.time()))
+    return d
