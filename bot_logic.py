@@ -147,10 +147,31 @@ def _parse_income(msg: str) -> int | None:
 # ห้ามตั้งเกณฑ์ใหม่ที่นี่ — ถ้าเรตเปลี่ยน ให้แก้ที่ rules.json แล้วซิงก์มา
 UNIT_PRICE_BAHT = 2_300_000          # "ซื้อ 1 ห้อง" = ทรัพย์ถูกสุดในลิสต์ (KB)
 _LOAN_TERM_YEARS = "30"              # บอทไม่ถามอายุ -> สมมุติ 30 ปี
-_BANK_RATE_30Y = {"KTB": 5900, "GSB": 6303, "TTB": 6500}
+# ----------------------------------------------------------------------
+# วงเงินประมาณการ — โหมด A แบบหลวมๆ (Gift สั่ง 19 ส.ค. 2026 "ใช้ Mode A หลวมๆ")
+# ----------------------------------------------------------------------
+# ตัวเลขทั้งหมดยกมาจาก _engine/rules.json (bank-loan-rules v2.6) แหล่งเดียวกับ
+# เครื่องคำนวณเคสจริง — ที่นี่ตัดรายละเอียดออก (ค่าครองชีพ/กฎ 28 ปี/%นับรายได้
+# แยกก้อน) เพราะบอทมีข้อมูลแค่ "รายได้รวม" กับ "ยอดผ่อนรวม" เท่านั้น
+# ใช้จัดลำดับลีดอย่างเดียว **ห้ามบอกตัวเลขนี้กับลูกค้า**
+#
+# ของเดิมใช้เรต 30 ปีตายตัวทุกเคส -> ลูกค้าอายุ 62 ได้วงเงินเท่าคนอายุ 30
+# ซึ่งผิดจากความจริงมาก (เจอเคสจริง 19 ส.ค. คุณป้าเกษียณได้เกรด B)
+_BANK_RATE = {
+    "KTB":   {40: 5600, 30: 5900, 25: 6795, 20: 7200, 15: 7800, 10: 11000},
+    "GSB":   {40: 5500, 30: 6303, 25: 6600, 20: 6900, 15: 7200, 10: 11000},
+    "GHB":   {40: 6000, 30: 6600, 25: 6900, 20: 7200, 15: 7500},
+    "TTB":   {35: 6300, 30: 6500, 25: 7000, 20: 7500, 15: 8000, 10: 11000},
+}
+# เพดานอายุ (อายุ + ปีกู้ ต้องไม่เกินค่านี้) — rules.json §3.6
+_BANK_AGE_CAP = {"KTB": 70, "GSB": 70, "GHB": 70, "TTB": 65}
+_TERM_STEPS = [40, 35, 30, 25, 20, 15, 10]
+DEFAULT_AGE = 35            # ไม่รู้อายุ -> ใช้ค่ากลางวัยทำงาน (ได้ปีกู้เต็ม)
+
 _BANK_DSR_TIERS = {
     "KTB": [(0, 60), (30000, 70), (100000, 80)],
     "GSB": [(0, 60), (30000, 70), (100000, 80)],
+    "GHB": [(0, 50), (30000, 50)],       # ไม่มีสวัสดิการ = 50%
     "TTB": [(30000, 70), (80000, 80)],   # รายได้ <30,000 TTB ไม่รับ
 }
 
@@ -164,15 +185,33 @@ def _dsr_for(bank: str, income: int) -> int | None:
     return dsr
 
 
-def _capacity(income: int, debt_monthly: int) -> int:
-    """วงเงินกู้ประมาณการ (บาท) — เลือกแบงก์ที่ให้ดีที่สุด เหมือน engine
-    ใช้จัดลำดับลีดเท่านั้น **ห้ามบอกตัวเลขนี้กับลูกค้า** (กฎข้อมูลชั้น 2)
+def _term_rate(bank: str, age: int):
+    """ปีกู้ + ค่างวดต่อล้าน ของแบงก์นั้นที่อายุนี้ — คืน (None, None) ถ้าไม่รับ"""
+    cap = _BANK_AGE_CAP.get(bank)
+    rates = _BANK_RATE.get(bank) or {}
+    if not cap or not rates:
+        return None, None
+    room = cap - int(age)
+    for step in _TERM_STEPS:
+        if step <= room and step in rates:
+            return step, rates[step]
+    return None, None
+
+
+def _capacity(income: int, debt_monthly: int, age: int | None = None) -> int:
+    """วงเงินกู้ประมาณการ (บาท) — เลือกแบงก์ที่ให้ดีที่สุด
+
+    อายุมีผลตรงๆ: ปีกู้ = เพดานอายุ − อายุ · ปีกู้สั้น = ค่างวด/ล้านสูง = วงเงินหด
     """
+    a = DEFAULT_AGE if age is None else int(age)
     best = 0
-    for bank, rate in _BANK_RATE_30Y.items():
+    for bank in _BANK_RATE:
         dsr = _dsr_for(bank, income)
         if not dsr:
             continue
+        yrs, rate = _term_rate(bank, a)
+        if not rate:
+            continue                      # อายุเกินเพดานแบงก์นี้
         room = income * dsr / 100 - max(0, debt_monthly)
         if room <= 0:
             continue
@@ -2279,6 +2318,11 @@ class BotEngine:
                 elif cob_n is not None:
                     self._recalc_total(state)
         if field == "co_income":
+            # ลูกค้ามักบอกอายุผู้กู้ร่วมมาเอง ("ลูกสาว 30 พนักงานประจำ 40000")
+            # อายุผู้กู้ร่วมสำคัญมากในเคสผู้กู้หลักอายุเยอะ — เก็บไว้ถ้าได้
+            _ca = _parse_age(msg)
+            if _ca is not None and _ca != _parse_income(msg):
+                data["co_age"] = _ca
             cob_n = _parse_income(msg)
             if cob_n is not None:
                 data["co_borrower_income"] = cob_n
@@ -2827,8 +2871,35 @@ class BotEngine:
         if data.get("co_debt_baht"):
             debt += int(data["co_debt_baht"])
 
-        cap_now = _capacity(income, debt)
-        cap_clear = _capacity(income, 0)
+        # อายุคุมปีกู้ -> คุมค่างวด -> คุมวงเงิน (Gift 19 ส.ค. "ใช้ Mode A หลวมๆ")
+        # ไม่รู้อายุ = ใช้ค่ากลางวัยทำงาน 35 (ได้ปีกู้เต็ม เหมือนพฤติกรรมเดิม)
+        _own_age = data.get("age")
+        _co_age = data.get("co_age")
+        _has_cob = bool(data.get("co_borrower_income"))
+        # ธนาคารยืดปีกู้ตาม "คนอายุน้อยกว่า" ได้เมื่อกู้ร่วม
+        if _co_age is not None:
+            _age_calc = min(_own_age, _co_age) if _own_age else _co_age
+        elif _has_cob:
+            _age_calc = None       # มีผู้กู้ร่วมแต่ไม่รู้อายุ -> ใช้ค่ากลาง 35
+        else:
+            _age_calc = _own_age
+        cap_now = _capacity(income, debt, _age_calc)
+        cap_clear = _capacity(income, 0, _age_calc)
+        if state is not None and _own_age is not None:
+            _solo = _capacity(income, debt, _own_age)
+            if _has_cob and _co_age is None:
+                self._add_signal(
+                    state,
+                    f"⚠️ วงเงิน {cap_now/1e6:.1f}M คิดโดย 'สมมติผู้กู้ร่วมอายุ ~35' "
+                    f"เพราะยังไม่รู้อายุจริง · ถ้ายื่นด้วยอายุผู้กู้หลัก {_own_age} "
+                    f"จะเหลือ {_solo/1e6:.1f}M — โทรถามอายุผู้กู้ร่วมก่อนเสนอห้อง")
+            elif not _has_cob:
+                _young = _capacity(income, debt, DEFAULT_AGE)
+                if _young > cap_now * 1.2:
+                    self._add_signal(
+                        state,
+                        f"อายุ {_own_age} ยื่นเดี่ยวได้ {cap_now/1e6:.1f}M "
+                        f"— ถ้ามีผู้กู้ร่วมอายุ ~35 ขึ้นเป็น ~{_young/1e6:.1f}M")
         # เก็บไว้ให้เซล/ชีตเห็นเหตุผลของเกรด (ห้ามส่งให้ลูกค้า)
         data["capacity_now"] = cap_now
         data["capacity_clear"] = cap_clear
