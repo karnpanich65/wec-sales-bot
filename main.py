@@ -216,6 +216,8 @@ GRAPH_API_URL = "https://graph.facebook.com/v19.0/me/messages"
 
 # คีย์เปิดหน้า /review-log (ให้ผู้ตรวจ Meta / ทีมงานเท่านั้น)
 REVIEW_LOG_KEY = os.environ.get("REVIEW_LOG_KEY", "wec-review-2026")
+# กุญแจของ /import — ไม่ตั้งก็ใช้ตัวเดียวกับ REVIEW_LOG_KEY
+IMPORT_KEY = os.environ.get("IMPORT_KEY", "").strip() or REVIEW_LOG_KEY
 
 # ข้อมูลติดต่อที่โชว์ในหน้า privacy / data-deletion
 CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "karnpanich.phutrakul@gmail.com")
@@ -1068,6 +1070,41 @@ async function tick(){
 }
 tick(); setInterval(tick, 1500);
 </script></body></html>"""
+
+
+@app.route("/import", methods=["POST"])
+def import_chatlog():
+    """นำเข้าประวัติแชทเก่าจาก Chat_Log (Apps Script ยิงมาเป็นชุดๆ)
+
+    ต้องมี ?key=... ตรงกับ IMPORT_KEY (ค่าเริ่มต้นใช้ตัวเดียวกับ REVIEW_LOG_KEY)
+    ยิงซ้ำได้ ข้อมูลไม่ซ้ำ เพราะกันด้วย source_key ฝั่ง Postgres
+    """
+    if request.args.get("key", "") != IMPORT_KEY:
+        return jsonify({"ok": False, "error": "bad key"}), 403
+    body = request.get_json(silent=True) or {}
+    rows = body.get("rows")
+    if not isinstance(rows, list):
+        return jsonify({"ok": False, "error": "rows must be a list"}), 400
+    try:
+        from bot_logic import pg_store
+        if pg_store is None:
+            return jsonify({"ok": False, "error": "pg_store unavailable"}), 503
+        return jsonify(pg_store.import_rows(rows[:1000]))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
+@app.route("/import/status", methods=["GET"])
+def import_status():
+    if request.args.get("key", "") != IMPORT_KEY:
+        return jsonify({"ok": False, "error": "bad key"}), 403
+    try:
+        from bot_logic import pg_store
+        if pg_store is None:
+            return jsonify({"ok": False, "error": "pg_store unavailable"}), 503
+        return jsonify(pg_store.counts())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
 
 
 @app.route("/review-log", methods=["GET"])
