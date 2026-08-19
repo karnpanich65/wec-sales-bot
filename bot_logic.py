@@ -142,7 +142,39 @@ PSID_SALT = os.environ.get("PSID_SALT", "wec-2026")
 
 # RAM cache (ยังใช้เป็นชั้นแรกเสมอ เพื่อความเร็ว)
 _conversations: dict[str, list] = {}; _SELF_REF_FIX = (("Wealth Estate Consultants","เรา"),("ทีมงาน WEC ","ทีมงาน"),("ทีม WEC ","ทีมงาน"),("ที่ปรึกษาของ WEC ","ที่ปรึกษา"),("บริษัท WEC ","เรา"),("ทาง WEC ","ทางเรา"),("ที่ WEC ","ที่เรา"),("ของ WEC ","ของเรา"),("WEC ","เรา"),("WEC","เรา"),("ทาง Wealth Estate ","ทางเรา"),("Wealth Estate ","เรา")); _fix_self_ref = lambda t: __import__("functools").reduce(lambda s, p: s.replace(p[0], p[1]), _SELF_REF_FIX, t or "")  # r30: AI เคยเรียกตัวเองว่า WEC
+# r40: คำที่ AI ชอบใช้แล้วอ่านแล้วไม่เหมือนคนขายจริง (Gift 20 ส.ค. 2026)
+# เคสจริง คุณ Kinnie: "ทำเลอื่นที่ลูกค้าหลงใหลครับ" — ภาษาโฆษณา ไม่ใช่ภาษาคุยงาน
+_TONE_FIX = (("ที่ลูกค้าหลงใหล","ที่ลูกค้าสนใจ"),("หลงใหล","สนใจ"),
+             ("แต่ผมต้องรู้ว่า","ขอทราบก่อนว่า"),("ผมต้องรู้ว่า","ขอทราบว่า"),
+             ("ผมจำเป็นต้องทราบ","ขอทราบ"),
+             ("ในฝัน","ที่ต้องการ"),("สุดพิเศษ",""))
+_fix_tone = lambda t: __import__("functools").reduce(
+    lambda s, p: s.replace(p[0], p[1]), _TONE_FIX, t or "")
 _lead_states: dict[str, dict] = {}
+
+# r40 — กันทักทายซ้ำ (Gift 20 ส.ค. 2026)
+# เคสจริง คุณ Kanda: บอทส่ง "สวัสดีครับ Wealth Estate..." 3 รอบในแชทเดียว
+# สาเหตุ: ทุกครั้งที่ลูกค้า "ตอบกลับโฆษณา" จะมาเป็นอีเวนต์ใหม่
+#         ถ้าตอนนั้นหา state ไม่เจอ (RAM ว่างหลัง deploy / ชีตช้า / page_id
+#         มาไม่เหมือนกันจน key ไม่ตรง) -> is_new=True -> ทักใหม่
+# กันตรงนี้แทน: ผูกกับ psid อย่างเดียว ไม่ผ่าน state เลย
+WELCOME_COOLDOWN = 6 * 60 * 60      # 6 ชั่วโมง
+_WELCOMED: dict[str, float] = {}
+
+
+def _recently_welcomed(psid: str) -> bool:
+    t = _WELCOMED.get(str(psid) or "")
+    return bool(t and (time.time() - t) < WELCOME_COOLDOWN)
+
+
+def _mark_welcomed(psid: str) -> None:
+    key = str(psid) or ""
+    if not key:
+        return
+    _WELCOMED[key] = time.time()
+    if len(_WELCOMED) > 3000:       # กันบวม — ทิ้งครึ่งที่เก่าที่สุด
+        for k in sorted(_WELCOMED, key=_WELCOMED.get)[:1500]:
+            _WELCOMED.pop(k, None)
 
 # ระยะเวลาที่ถือว่า "ยังอยู่ในบทสนทนาเดียวกัน" / "วันเดียวกัน"
 GAP_LIVE = 30 * 60          # 30 นาที
@@ -1875,7 +1907,8 @@ class BotEngine:
         # เจอ 15 ส.ค.: คนตอบกลับโฆษณาได้ข้อความทักทายไปแล้ว 1 ครั้ง
         # พอเขาถามต่อ ระบบทักซ้ำอีก + ตอบ + ถาม = 3 บับเบิล ทักทาย 2 รอบ
         # อ่านแล้วเหมือนบอทค้าง ไม่เหมือนคนคุย
-        if is_new and not self._is_question(msg):
+        if is_new and not self._is_question(msg) and not _recently_welcomed(user_id):
+            _mark_welcomed(user_id)
             bubbles.append(self._welcome(state))
         elif bucket == "cold" and data:
             # หายไปเกิน 1 วัน + เคยให้ข้อมูลไว้ -> ทวนให้ฟังว่าเราจำได้
@@ -2215,7 +2248,25 @@ class BotEngine:
         bubbles = self._dedupe_contact_ask(bubbles)
         bubbles = self._dedupe_greeting(bubbles)
         bubbles = self._dedupe_question(bubbles)
+        bubbles = self._dedupe_exact(bubbles)
         return bubbles, grade
+
+    @staticmethod
+    def _dedupe_exact(bubbles: list[str]) -> list[str]:
+        """ด่านสุดท้าย — ประโยคเดียวกันเป๊ะ ห้ามโผล่ 2 ครั้งในข้อความเดียว
+
+        เคสจริง 19 ส.ค. 2026 คุณ Kanda เพจ Wealth Estate — บอทส่ง 3 บับเบิล:
+          1) "ลูกค้าสนใจลงทุนคอนโดปล่อยเช่าหรือเพื่ออยู่อาศัยเองครับ"
+          2) "ได้ครับ ถ้าลูกค้าพร้อมคุยต่อ..."
+          3) เหมือนข้อ 1 เป๊ะ
+        _dedupe_question จับไม่ได้เพราะดูแค่คำลงท้าย "ไหมครับ"
+        อันนี้เทียบข้อความตรงๆ เก็บอันหลังสุด (คำถามควรอยู่ท้ายเสมอ)
+        """
+        seen_last: dict[str, int] = {}
+        for i, b in enumerate(bubbles):
+            seen_last[" ".join((b or "").split())] = i
+        return [b for i, b in enumerate(bubbles)
+                if seen_last.get(" ".join((b or "").split())) == i]
 
     @staticmethod
     def _dedupe_question(bubbles: list[str]) -> list[str]:
@@ -3409,7 +3460,7 @@ class BotEngine:
 
     @staticmethod
     def _sanitize(text: str) -> str:
-        text = _EMOJI_RE.sub("", _fix_self_ref(text))
+        text = _EMOJI_RE.sub("", _fix_tone(_fix_self_ref(text)))
         text = text.replace("**", "").replace("###", "").replace("##", "")
         text = re.sub(r"^\s*[-*•]\s+", "", text, flags=re.MULTILINE)
         text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
