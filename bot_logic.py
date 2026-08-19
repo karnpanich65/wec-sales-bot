@@ -136,7 +136,7 @@ FEATURE_PERSIST = os.environ.get("FEATURE_PERSIST", "0") == "1"
 PSID_SALT = os.environ.get("PSID_SALT", "wec-2026")
 
 # RAM cache (ยังใช้เป็นชั้นแรกเสมอ เพื่อความเร็ว)
-_conversations: dict[str, list] = {}
+_conversations: dict[str, list] = {}; _SELF_REF_FIX = (("Wealth Estate Consultants","เรา"),("ทีมงาน WEC ","ทีมงาน"),("ทีม WEC ","ทีมงาน"),("ที่ปรึกษาของ WEC ","ที่ปรึกษา"),("บริษัท WEC ","เรา"),("ทาง WEC ","ทางเรา"),("ที่ WEC ","ที่เรา"),("ของ WEC ","ของเรา"),("WEC ","เรา"),("WEC","เรา"),("ทาง Wealth Estate ","ทางเรา"),("Wealth Estate ","เรา")); _fix_self_ref = lambda t: __import__("functools").reduce(lambda s, p: s.replace(p[0], p[1]), _SELF_REF_FIX, t or "")  # r30: AI เคยเรียกตัวเองว่า WEC
 _lead_states: dict[str, dict] = {}
 
 # ระยะเวลาที่ถือว่า "ยังอยู่ในบทสนทนาเดียวกัน" / "วันเดียวกัน"
@@ -3289,7 +3289,7 @@ class BotEngine:
 
     @staticmethod
     def _sanitize(text: str) -> str:
-        text = _EMOJI_RE.sub("", text)
+        text = _EMOJI_RE.sub("", _fix_self_ref(text))
         text = text.replace("**", "").replace("###", "").replace("##", "")
         text = re.sub(r"^\s*[-*•]\s+", "", text, flags=re.MULTILINE)
         text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
