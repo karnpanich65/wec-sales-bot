@@ -694,6 +694,18 @@ _NCB_HARD_WORDS = ("ติดแบค", "ติดแบ็ค", "ติดแ�
 def _is_hard_ncb(msg: str) -> bool:
     """ติดแบล็คลิสต์ชัดเจน — ธนาคารไม่รับ ไม่ต้องไล่ถามต่อ"""
     return _has_any(msg, _NCB_HARD_WORDS)
+# r52 (Gift 20 ส.ค. 2026) — เคสจริงเพจ Intake คุณ Nicha Phu
+# ลูกค้าเปิดมาประโยคแรกเลยว่า "เครดิตไม่ดีคงผ่าน" = บอกปัญหาใหญ่สุดของตัวเอง
+# แต่ไม่มีคำนี้ในลิสต์ไหนเลย -> บอทไม่ได้ยิน -> ไล่ถามข้ออื่นเหมือนไม่มีอะไร
+# แล้วปล่อยให้ AI ไปตอบเรื่องเครดิตเอง (ผิดกฎ ห้าม AI แตะเรื่องนี้)
+# คำกลุ่มนี้ "กว้าง" ไม่รู้ว่าเป็นแบล็คลิสต์ / จ่ายช้า / ปรับโครงสร้าง
+# จึงถามให้ชัดก่อน 1 ข้อ แล้วค่อยเข้าเส้นทางเดิมตามที่เขาตอบ
+_NCB_VAGUE_WORDS = ("เครดิตไม่ดี", "เครดิตไม่ค่อยดี", "เครดิตแย่", "เครดิตเสีย",
+                    "เครดิตมีปัญหา", "เครดิตไม่ผ่าน", "เครดิตต่ำ",
+                    "ประวัติไม่ดี", "ประวัติไม่ค่อยดี", "ประวัติแย่",
+                    "ประวัติการเงินไม่ดี", "ประวัติเสีย",
+                    "เครดิตพัง", "เครดิตไม่สวย", "ประวัติไม่สวย")
+
 _NCB_LATE_WORDS = ("จ่ายช้า", "ผ่อนช้า", "ชำระช้า", "ล่าช้า", "จ่ายไม่ตรง",
                    "ค้างค่างวด", "เลยกำหนด", "จ่ายเลท", "เลทบ้าง")
 _NCB_RESTRUCT_WORDS = ("ปรับโครงสร้างหนี้", "ปรับโครงสร้าง",
@@ -731,6 +743,9 @@ def _ncb_kind(msg: str) -> str:
         return "blacklist"
     if _has_any(msg, _NCB_LATE_WORDS):
         return "late"
+    # r52 — ตัวกว้างไว้ท้ายสุด ให้คำที่ชัดกว่าชนะก่อนเสมอ
+    if _has_any(msg, _NCB_VAGUE_WORDS):
+        return "vague"
     return ""
 
 
@@ -795,6 +810,11 @@ NCB_Q = {
              "เกิน 30 วันไหมครับ"),
     "restruct": ("ขออนุญาตถามครับ ปรับโครงสร้างหนี้มากี่ปีแล้วครับ "
                  "และหลังจากนั้นชำระปกติตลอดไหมครับ"),
+    # r52 — ลูกค้าบอกกว้างๆ ว่า "เครดิตไม่ดี" ยังไม่รู้ว่าแบบไหน
+    # ถามให้ชัดก่อน 1 ข้อ ห้ามเดาแทนเขา และห้ามรับปากว่ากู้ได้/ไม่ได้
+    "vague": ("ขออนุญาตถามให้ชัดนิดนึงนะครับ ที่บอกว่าเครดิตไม่ดี "
+              "คือเคยติดแบล็คลิสต์ เคยจ่ายช้า หรือเคยปรับโครงสร้างหนี้ครับ "
+              "แล้วตอนนี้ปิดไปหมดหรือยังครับ — ธนาคารดูตรงนี้เป็นหลักครับ"),
 }
 
 NCB_SOFT_CLOSE = (
@@ -1744,6 +1764,67 @@ def _name_from_contact_msg(msg: str) -> str:
     return ""
 
 
+def _name_from_log(state: dict, user_id: str = "") -> str:
+    """r52 (Gift 20 ส.ค. 2026) — "ใช้ชื่อจาก log ถ้ามี เพราะถามชื่ออยู่แล้วตอนท้าย"
+
+    เพจ Millionaire Asset โทเค็นดึงชื่อจาก Graph ไม่ได้ (error #3 ต้องรอ Meta
+    อนุมัติสิทธิ์แอป) -> ทุกแถวขึ้น "(ยังไม่ได้ชื่อ)" ทั้งที่ในแชทมีชื่ออยู่
+    โดยเฉพาะเคสที่เซลรับช่วงคุยเอง เซลมักถามชื่อและลูกค้าตอบไปแล้ว
+
+    เข้มไว้ก่อน — เก็บผิดแย่กว่าไม่เก็บ:
+      1. ชื่อที่พิมพ์มาพร้อมเบอร์/ไลน์  ("สมชาย 0812345678")     = แม่นสุด
+      2. ประโยคที่มีคำว่า "ชื่อ" ตรงๆ  ("ชื่อนิชาค่ะ")
+      3. ข้อความสั้นที่ตอบ "หลังจาก" ฝั่งเราถามหาชื่อ
+    """
+    def _pick(texts, prev_asked_name):
+        for t, asked in zip(texts, prev_asked_name):
+            t = (t or "").strip()
+            if not t:
+                continue
+            nm = _name_from_contact_msg(t)
+            if nm:
+                return nm
+            if "ชื่อ" in t:
+                nm = _name_from_reply(t)
+                if nm:
+                    return nm
+            if asked:
+                nm = _name_from_reply(t)
+                if nm:
+                    return nm
+        return ""
+
+    # ---- ล็อกช่วงเซลรับช่วงคุยเอง ----
+    log = state.get("handover_log") or []
+    texts, asked = [], []
+    _prev_asked = False
+    for it in log:
+        _t = (it.get("t") or "")
+        if it.get("w") == "cust":
+            texts.append(_t)
+            asked.append(_prev_asked)
+            _prev_asked = False
+        else:
+            _prev_asked = "ชื่อ" in _t
+    nm = _pick(texts, asked)
+    if nm:
+        return nm
+
+    # ---- บทสนทนาที่บอทจำไว้ (RAM/Postgres) ----
+    conv = _conversations.get(user_id) or []
+    texts, asked = [], []
+    _prev_asked = False
+    for it in conv:
+        _t = (it.get("content") or "")
+        if it.get("role") == "user":
+            texts.append(_t)
+            asked.append(_prev_asked)
+            _prev_asked = False
+        else:
+            _prev_asked = "ชื่อ" in _t
+    return _pick(texts, asked)
+
+
 def _name_from_reply(msg: str) -> str:
     """คำตอบของคำถามขอชื่อ เช่น "กิ๊กครับ" / "ชื่อสมชาย" / "Mild" """
     m = str(msg).strip()
@@ -1820,7 +1901,11 @@ SALES_BY_PAGE = {
     "107182014999194": {"ป๊อป": ("ป๊อป", "pop"),
                         "หลี": ("หลี", "lee")},
     # Millionaire Asset — เพจใหม่ millionaireassetthai (18 ส.ค.) · เซล: ปราช คนเดียว
-    "100899675332209": {"ปราช": ("ปราช", "ปราชญ์", "prach", "เอกภาพันธ์")},
+    # r52 (Gift 20 ส.ค. 2026) — "เซลคือไปป์" · ยืนยันแล้วว่าไปป์ = ชื่อเล่นของปราช
+    # (akepapan@gmail.com คนเดียวกัน) เขาทักลูกค้าด้วยชื่อ "ไปป์" ไม่ใช่ "ปราช"
+    # ของเดิมบอทจับไม่ได้ -> ไม่เกิด handover -> บอทพิมพ์ทับเซลกลางแชท
+    "100899675332209": {"ปราช": ("ปราช", "ปราชญ์", "prach", "เอกภาพันธ์",
+                                 "ไปป์", "ไปป๋", "ไป๊ป์", "pipe", "piph")},
     "115064745022991": {},          # MA เพจเก่า — ยังไม่เคาะว่าเลิกใช้ไหม
     "108941814354248": {},          # New Chapter Investment — ยังไม่มีเซล (MKT=เอย)
 }
@@ -2261,7 +2346,10 @@ class BotEngine:
                     state,
                     {"blacklist": "⚠️ ลูกค้าแจ้งเองว่าเคยติดบูโร/แบล็คลิสต์ — ต้องเช็คว่าปิดแล้วกี่ปี",
                      "late": "⚠️ ลูกค้าแจ้งเองว่าเคยชำระล่าช้า — เกิน 30 วันคือเคสแดง",
-                     "restruct": "⚠️ ลูกค้าแจ้งเองว่าเคยปรับโครงสร้างหนี้ — ต้องพ้น 3 ปีขึ้นไป"}[_k])
+                     "restruct": "⚠️ ลูกค้าแจ้งเองว่าเคยปรับโครงสร้างหนี้ — ต้องพ้น 3 ปีขึ้นไป",
+                     # r52 — ลูกค้าบอกกว้างๆ ว่า "เครดิตไม่ดี" ยังไม่รู้ว่าแบบไหน
+                     "vague": "⚠️ ลูกค้าแจ้งเองว่าเครดิตไม่ดี — ยังไม่รู้ว่าแบบไหน "
+                              "บอทถามให้ชัดแล้ว รอคำตอบ"}[_k])
                 # 19 ส.ค. 2026 — เคสจริงคุณ Nok Kaewsaithong เพจ Intake:
                 # ลูกค้าพิมพ์ "แต่ติดเครดิตบูโร" ตอนที่เคสเดินไปถึงช่วงปิดแล้ว
                 # -> ไม่เข้าเงื่อนไขที่จะหยิบคิวคำถามบูโรออกมาถาม
@@ -2635,9 +2723,24 @@ class BotEngine:
                     # คำเดิมเป๊ะทั้งสองรอบ อ่านแล้วเหมือนบอทไม่ฟัง
                     # ข้ามรอบนี้เฉยๆ ยังรอ field เดิมอยู่ เทิร์นหน้าถามได้ตามปกติ
                     if question and question == state.get("last_q"):
-                        state["awaiting"] = field
-                        state["last_q"] = ""
-                        print(f"[NO REPEAT] {user_id[:8]}... ข้ามคำถามซ้ำ: {question[:40]!r}")
+                        # r52 (Gift 20 ส.ค. 2026) — "ตอบอะไรลูกค้าก็ไม่รู้"
+                        # ของเดิมเจอคำถามซ้ำแล้ว "เงียบ" ทั้งเทิร์น
+                        # ผลคือลูกค้าเห็นแต่ประโยคลอยๆ ของ AI แล้วบทสนทนาตาย
+                        # (เคสจริง Nicha Phu: ตอบเรื่องเครดิตแล้วไม่ถามอะไรต่อเลย)
+                        # ใหม่: ข้ามไปถาม "ข้ออื่นที่ยังขาด" แทนการเงียบ
+                        _f2, _q2 = self._next_missing(
+                            data, state, skip=set(_skipped) | {field})
+                        if _q2 and _q2 != state.get("last_q"):
+                            asked[_f2] = asked.get(_f2, 0) + 1
+                            state["awaiting"] = _f2
+                            bubbles.append(_q2)
+                            state["last_q"] = _q2
+                            print(f"[NO REPEAT] {user_id[:8]}... คำถามซ้ำ "
+                                  f"-> เปลี่ยนไปถาม {_f2} แทน")
+                        else:
+                            state["awaiting"] = field
+                            state["last_q"] = ""
+                            print(f"[NO REPEAT] {user_id[:8]}... ข้ามคำถามซ้ำ: {question[:40]!r}")
                     elif self._already_asked_topic(bubbles, field):
                         # r46 — บับเบิลก่อนหน้า (ที่ AI เขียน) ถามเรื่องนี้ไปแล้ว
                         # ต่อท้ายอีกก็เป็นคำถามเดียวกันสองรอบในจอเดียว
@@ -3033,6 +3136,22 @@ class BotEngine:
         data[field] = msg
         if field == "ncb":
             kind = state.get("ncb_kind") or "blacklist"
+            # r52 — ตอนถามเราไม่รู้ว่าเป็นเครดิตเสียแบบไหน ("เครดิตไม่ดี")
+            # คำตอบมักบอกชัดเอง ("เคยจ่ายช้า" / "เคยปรับโครงสร้าง") -> อัปเกรดชนิด
+            if kind == "vague":
+                _refine = _ncb_kind(msg)
+                if _refine and _refine != "vague":
+                    kind = _refine
+                    state["ncb_kind"] = kind
+                    print(f"[NCB KIND] เครดิตไม่ดี -> ระบุชัดเป็น {kind}")
+                elif _is_hard_ncb(msg):
+                    kind = "blacklist"
+                    state["ncb_kind"] = kind
+                else:
+                    # ยังกว้างอยู่ แต่คำถามเราถามว่า "ปิดหมดหรือยัง" -> อ่านคำตอบนั้น
+                    _st = _ncb_still_stuck(msg)
+                    if _st is not None:
+                        data["ncb_still"] = _st
             yrs = _parse_years(msg) if kind in ("blacklist", "restruct") else None
             if yrs is not None:
                 data["ncb_years"] = yrs
@@ -3691,7 +3810,12 @@ class BotEngine:
 
     def _should_qualify(self, message: str) -> bool:
         # _hit -> "ไม่สนใจแล้วครับ" ไม่ถูกนับว่าสนใจ
-        return _hit_any(message.lower(), QUALIFY_TRIGGERS)
+        if _hit_any(message.lower(), QUALIFY_TRIGGERS):
+            return True
+        # r52 (Gift 20 ส.ค. 2026) — "ควรจะเข้า state คำถามที่หนึ่งเลย"
+        # คนที่เปิดมาว่า "เครดิตไม่ดีคงผ่าน" คือคนที่ "อยากกู้" ชัดเจนที่สุด
+        # ของเดิมไม่นับเป็นสัญญาณสนใจ -> บอทตอบลอยๆ แล้วจบ ไม่เข้าคิวคำถาม
+        return bool(_ncb_kind(message)) or _is_hard_ncb(message)
 
     def _is_disqualified(self, message: str) -> bool:
         msg = message.lower()
@@ -3758,10 +3882,19 @@ class BotEngine:
         # D จึงแปลว่า "ต้องดูแผนปิดหนี้ก่อน" ไม่ใช่ "ไปไม่ได้" -> นัดโทรปกติ
         # 17 ส.ค. 2026 — ใช้ชื่อที่ _ensure_fb_name ดึงไว้แล้วก่อน
         # ยิง Graph ซ้ำเฉพาะตอนที่ยังไม่มีจริงๆ (ประหยัดโควตา + ไม่หน่วงตอนปิดเคส)
-        fb_name = state.get("fb_name") or ""
+        # ลำดับความน่าเชื่อ: ชื่อที่ลูกค้าพิมพ์เอง > ชื่อโปรไฟล์ > ชื่อที่ขุดจากล็อก
+        fb_name = state.get("chat_name") or state.get("fb_name") or ""
         if not fb_name or fb_name == "(ยังไม่ได้ชื่อ)":
             fb_name = self._get_fb_name(user_id, state.get("platform", "facebook"),
                                         state.get("page_id", "")) or fb_name
+        if not fb_name or fb_name == "(ยังไม่ได้ชื่อ)":
+            # r52 — Graph ไม่ให้ชื่อ (เพจ Millionaire Asset ติดสิทธิ์แอป)
+            # ก่อนจะยอมแพ้ ไปหาในสิ่งที่คุยกันจริงก่อน
+            _lg = _name_from_log(state, user_id)
+            if _lg:
+                fb_name = _lg
+                state["chat_name"] = state.get("chat_name") or _lg
+                print(f"[NAME LOG] {user_id[:8]}... = {_lg} (ขุดจากบทสนทนา)")
         state["fb_name"] = fb_name
         # ส่งชุดเต็ม (แถวสมบูรณ์ + สร้างนัดในปฏิทิน) — schema เดิม ไม่แตะ
         self._send_to_sheets(user_id, data, grade, fb_name,
