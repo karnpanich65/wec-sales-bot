@@ -391,10 +391,14 @@ def list_stale(min_hours: int = 20, max_hours: int = 23,
                     "SELECT page_id, psid, state, "
                     "  EXTRACT(EPOCH FROM (now() - updated_at))/3600 AS hrs "
                     "FROM sessions "
-                    "WHERE updated_at < now() - make_interval(hours => %s) "
-                    "AND updated_at > now() - make_interval(hours => %s) "
+                    # r58 — make_interval(hours => ...) รับ int เท่านั้น
+                    # ส่ง float เข้าไป Postgres โยน UndefinedFunction ทิ้งทั้ง query
+                    # -> ตัวกวาดทักกลับ 20 ชม. เงียบมาตั้งแต่ r51 โดยไม่มีใครรู้
+                    # secs รับ double precision ได้ ใช้วินาทีแทนจึงปลอดภัยกว่า
+                    "WHERE updated_at < now() - make_interval(secs => %s) "
+                    "AND updated_at > now() - make_interval(secs => %s) "
                     "ORDER BY updated_at ASC LIMIT %s",
-                    (lo, hi, int(limit)))
+                    (lo * 3600.0, hi * 3600.0, int(limit)))
                 rows = cur.fetchall()
         return [{"page_id": r[0], "psid": r[1], "state": r[2],
                  "hours": round(float(r[3] or 0), 1)}
@@ -506,9 +510,10 @@ def fix_import_ts(hours: int = 14) -> dict:
             todo = int(cur.fetchone()[0])
             cur.execute(
                 "UPDATE messages "
-                "SET created_at = created_at - make_interval(hours => %s), "
+                "SET created_at = created_at - make_interval(secs => %s), "
                 "    ts_fixed = 1 "
-                "WHERE source_key IS NOT NULL AND ts_fixed IS NULL", (hours,))
+                "WHERE source_key IS NOT NULL AND ts_fixed IS NULL",
+                (float(hours) * 3600.0,))
             moved = int(cur.rowcount)
             cur.execute("SELECT max(created_at)::text FROM messages "
                         "WHERE source_key IS NOT NULL")
