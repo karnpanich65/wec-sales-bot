@@ -1890,6 +1890,23 @@ HANDOVER_LEAD_FAST_MSGS = int(os.environ.get("HANDOVER_LEAD_FAST_MSGS", "2"))
 HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 
 # ----------------------------------------------------------------------
+# r54 (Gift เคาะ 20 ส.ค. 2026) — "เซลไม่บอกชื่อ + เงียบเกิน 10 นาที = บอทคุยต่อ"
+#
+# เคสจริง "พี่บ่าว ออฟโรด" เพจ Millionaire Asset:
+# ฝั่งเพจพิมพ์คำถามคัดกรองสำเร็จรูปมา 1 ข้อความ ไม่มีชื่อเซลอยู่ในนั้นเลย
+# ระบบนับเป็น "เซลรับช่วง" -> ล็อกบอทเงียบ 6 ชม.
+# แต่ฝั่งเพจไม่พิมพ์อีกเลย 80 นาที ส่วนลูกค้าตอบคำถาม "ของบอทเอง" ไป 2 ข้อความ
+# ผลคือไม่มีใครคุยกับลูกค้าเลยทั้งคนทั้งบอท
+#
+# กติกา: handover ต้อง "มีคนอยู่จริง" ถึงจะนับ
+#   · เซลแนะนำตัวด้วยชื่อ (ไปป์/เจี๊ยบ/ป๊อป...) -> เชื่อว่าเป็นคน เงียบยาว 6 ชม. ตามเดิม
+#   · ไม่มีชื่อ + ฝั่งเพจเงียบเกิน 10 นาที + ลูกค้าพิมพ์ต่อ -> ดึงแชทกลับมาให้บอท
+# เซลพิมพ์เมื่อไหร่ = ล็อกใหม่ทันที (บอทถอยให้เสมอ)
+# ----------------------------------------------------------------------
+HANDOVER_IDLE_MIN = int(os.environ.get("HANDOVER_IDLE_MIN", "10"))
+HANDOVER_IDLE_SEC = HANDOVER_IDLE_MIN * 60
+
+# ----------------------------------------------------------------------
 # r51 — ทักกลับเคสที่เงียบไปแต่ข้อมูลยังไม่ครบ (ครั้งเดียวจบ)
 # 20 ชม. ไม่ใช่ 2 วัน: Meta ปิดหน้าต่างส่งข้อความที่ 24 ชม. และ main.py
 # ส่งแบบ messaging_type=RESPONSE ไม่มี message tag -> เกินแล้วยิงไม่ผ่าน
@@ -2057,7 +2074,9 @@ class BotEngine:
                 # state เก่าที่ยังไม่มีเวลา -> เริ่มจับเวลาตอนนี้ ไม่ใช่หมดอายุทันที
                 state["handover_at"] = _hat = _now()
             _hage = _now() - _hat
-            if _hage < HANDOVER_TTL_SEC:
+            # r54 — handover ที่ "ไม่มีคนอยู่จริง" ไม่นับว่าเซลดูแล ดึงกลับมาเลย
+            _stale = self._handover_gone_stale(state)
+            if _hage < HANDOVER_TTL_SEC and not _stale:
                 self._handover_note(state, "cust", user_message)
                 # r51 — นับไว้ว่าลูกค้าพิมพ์อะไรระหว่างเซลดูแลกี่ข้อความ
                 # ใช้ตอนหมดเวลา: ถ้ามีการคุยกันจริง คำถามที่บอทค้างไว้
@@ -2084,7 +2103,12 @@ class BotEngine:
                 print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
                       f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
                 return "", None
-            # หมดเวลาแล้ว — คืนแชทให้บอท พร้อมบริบทเดิม
+            if _stale:
+                state["handover_idle_released"] = True
+                print(f"[HANDOVER STALE] {user_id[:8]}... เซลไม่บอกชื่อ + ฝั่งเพจเงียบเกิน "
+                      f"{HANDOVER_IDLE_MIN} นาที — บอทดึงแชทกลับมาคุยต่อ")
+
+            # หมดเวลาแล้ว (หรือ handover ร้าง) — คืนแชทให้บอท พร้อมบริบทเดิม
             # r51 (Gift 20 ส.ค. 2026): "กลับมาต้องต่อเนื่อง อ่านล็อกทั้งหมดที่คุย
             # ถ้าจบข้อมูลได้แล้ว ผ่านเกณฑ์ คำนวณสกอร์ได้ ได้ข้อมูลติดต่อแล้ว
             # ก็ไม่ต้องทำอะไร แต่ถ้าไม่ ไม่ถามคำถามเดิมที่ได้ข้อมูลแล้ว
@@ -2094,6 +2118,9 @@ class BotEngine:
             _hcust = int(state.get("handover_cust") or 0)
             self._add_signal(
                 state,
+                (f"ฝั่งเพจทักมาแต่ไม่ระบุชื่อเซล แล้วเงียบเกิน {HANDOVER_IDLE_MIN} นาที "
+                 "ทั้งที่ลูกค้าตอบอยู่ — บอทกลับมาคุยต่อเอง")
+                if _stale else
                 f"ครบ {HANDOVER_LABEL}หลังเซลรับช่วง — บอทกลับมาตอบต่อจากเดิม")
             # กู้บทสนทนาช่วงเซลคุยกลับเข้าความจำ -> ไม่ทักทายใหม่ ไม่ถามซ้ำ
             self._resume_context(user_id, state)
@@ -2113,7 +2140,7 @@ class BotEngine:
                 print(f"[HANDOVER DONE] {user_id[:8]}... ครบ {HANDOVER_LABEL} "
                       f"ข้อมูลครบแล้ว บอทเงียบต่อ ไม่ถามซ้ำ")
             else:
-                print(f"[HANDOVER EXPIRED] {user_id[:8]}... ครบ {HANDOVER_LABEL} "
+                print(f"[HANDOVER {'STALE' if _stale else 'EXPIRED'}] {user_id[:8]}... "
                       f"บอทกลับมาตอบเอง (ยังขาด: {_f_left or '-'})")
 
         bubbles, grade = self._decide(user_message, user_id, state, bucket, is_new)
@@ -4264,6 +4291,7 @@ class BotEngine:
             result = "handover"
             state["handover_log"] = []
             state["handover_cust"] = 0      # r51 — นับข้อความลูกค้ารอบนี้ใหม่
+            state.pop("handover_idle_released", None)   # r54 — ล็อกรอบใหม่
             _who = _who_greeted(text, page_id) or _who_typed(text, page_id)
             if _who:
                 state["handover_by"] = _who
@@ -4274,6 +4302,9 @@ class BotEngine:
             print(f"[HANDOVER ON] {customer_id[:8]}... "
                   f"เซล{_who or '(ไม่ระบุชื่อ)'} รับช่วงแล้ว | {text[:40]!r}")
         if state.get("handover"):
+            # r54 — ฝั่งเพจพิมพ์ล่าสุดเมื่อไหร่ ใช้ตัดสินว่า "ยังมีคนอยู่ไหม"
+            state["handover_sale_at"] = _now()
+            state["handover_cust"] = 0      # เซลพิมพ์แล้ว เริ่มนับลูกค้าใหม่
             # r50 (Gift 20 ส.ค. 2026) — "มีพิมพ์พี่เจี๊ยบ ก็ควรให้พี่เจี๊ยบนะ"
             # เดิมจับชื่อเฉพาะข้อความแรกที่ทำให้เกิด handover
             # แต่ข้อความแรกมักเป็นคำถามคัดกรองสำเร็จรูปที่ไม่มีชื่ออยู่เลย
@@ -4301,6 +4332,30 @@ class BotEngine:
             except Exception as _pe:
                 print(f"[PG] save_human พลาด: {_pe}")
         return result
+
+    @staticmethod
+    def _handover_gone_stale(state: dict) -> bool:
+        """r54 (Gift เคาะ 20 ส.ค. 2026) — handover นี้ "มีคนอยู่จริง" ไหม
+
+        เงื่อนไขที่ถือว่าร้าง (ต้องครบทั้ง 3 ข้อ):
+          1. ไม่รู้ว่าเซลคนไหน — ข้อความที่ทำให้เกิด handover ไม่มีชื่อเซลอยู่เลย
+             (เซลตัวจริงของ WEC ทักด้วยชื่อตัวเองเสมอ ตามที่ Gift วางไว้)
+          2. ฝั่งเพจเงียบเกิน HANDOVER_IDLE_MIN นาที
+          3. ลูกค้าพิมพ์มาแล้วอย่างน้อย 1 ข้อความหลังจากนั้น = มีคนรอคำตอบอยู่
+
+        เซลพิมพ์เมื่อไหร่ handover ล็อกใหม่ทันที -> บอทถอยให้เสมอ
+        """
+        if not state.get("handover"):
+            return False
+        if state.get("handover_by"):
+            return False            # รู้ชื่อเซล = เชื่อว่าเป็นคนจริง ห้ามแทรก
+        if int(state.get("handover_cust") or 0) < 1:
+            return False            # ลูกค้ายังไม่พิมพ์อะไรเลย ไม่มีใครรออยู่
+        _sale_at = int(state.get("handover_sale_at")
+                       or state.get("handover_at") or 0)
+        if not _sale_at:
+            return False
+        return (_now() - _sale_at) > HANDOVER_IDLE_SEC
 
     def _handover_absorb(self, user_id: str, state: dict, msg: str,
                          dispatch: bool = True) -> bool:
@@ -4492,21 +4547,38 @@ class BotEngine:
         """สแกนหาเคสที่ควรทักกลับ — ดูอย่างเดียว ไม่ส่งอะไรทั้งนั้น"""
         if pg_store is None:
             return {"ok": False, "error": "pg_store ใช้ไม่ได้"}
-        lo = int(hours or FOLLOWUP_HOURS)
-        hi = int(max_hours or FOLLOWUP_MAX_HOURS)
+        lo = float(hours or FOLLOWUP_HOURS)
+        hi = float(max_hours or FOLLOWUP_MAX_HOURS)
         if hi <= lo:
             hi = lo + 3
+        # r54 — เคส "handover ร้าง" (ฝั่งเพจทักแล้วหาย ไม่บอกชื่อ ลูกค้ารออยู่)
+        # ไม่ต้องรอ 20 ชม. รอแค่ช่วงเงียบเท่านั้น -> ดึงขอบล่างของคิวรี่ลงมา
+        _stale_lo = HANDOVER_IDLE_MIN / 60.0
+        _q_lo = min(lo, _stale_lo)
         out = {"ok": True, "window_hours": [lo, hi], "scanned": 0,
                "ready": [], "skipped": []}
-        for row in pg_store.list_stale(lo, hi, limit):
+        for row in pg_store.list_stale(_q_lo, hi, limit):
             out["scanned"] += 1
             psid = str(row.get("psid") or "")
             page_id = str(row.get("page_id") or "")
             state = row.get("state") or {}
             if not psid or not isinstance(state, dict):
                 continue
+            _hrs = float(row.get("hours") or 0)
+            # r54 — handover ที่ร้างแล้ว ไม่นับว่า "เซลกำลังดูแลอยู่"
+            _stale_ho = self._handover_gone_stale(state)
+            if not _stale_ho:
+                if state.get("handover"):
+                    out["skipped"].append({"psid": psid[:8], "why": "เซลกำลังดูแลอยู่"})
+                    continue
+                if _hrs < lo:
+                    out["skipped"].append({"psid": psid[:8], "why": "ยังไม่ถึงเวลาทัก"})
+                    continue
             why = ""
             for flag, label in self._FOLLOWUP_SKIP:
+                # handover ที่ร้างแล้ว ไม่นับว่าเซลดูแลอยู่ (ปลดจริงตอนส่ง)
+                if flag == "handover" and _stale_ho:
+                    continue
                 if state.get(flag):
                     why = label
                     break
@@ -4525,6 +4597,7 @@ class BotEngine:
                 continue
             out["ready"].append({
                 "psid": psid, "page_id": page_id, "field": field,
+                "kind": "handover ร้าง" if _stale_ho else "เงียบไป",
                 "hours": row.get("hours"),
                 "recap": self._recap(state.get("data") or {})[:60],
                 "text": text, "_state": state,
@@ -4557,6 +4630,14 @@ class BotEngine:
             psid, page_id = it["psid"], it["page_id"]
             skey = f"{page_id}:{psid}" if page_id else psid
             st = _lead_states.get(skey)
+            for _cand in (st, snap):
+                # r54 — handover ร้าง = ไม่มีคนอยู่จริง ปลดก่อนบอทจะพิมพ์
+                if _cand is not None and self._handover_gone_stale(_cand):
+                    _cand["handover"] = False
+                    _cand["handover_idle_released"] = True
+                    self._add_signal(_cand,
+                        f"ฝั่งเพจทักมาแต่ไม่ระบุชื่อเซล แล้วเงียบเกิน {HANDOVER_IDLE_MIN} นาที "
+                        "— บอทดึงแชทกลับมาถามต่อเอง")
             if st is not None:
                 # RAM คือของจริง — ลูกค้าอาจเพิ่งคุยต่อ/เซลเพิ่งรับช่วงหลังเราอ่าน DB
                 blocked = next((lbl for fl, lbl in self._FOLLOWUP_SKIP
