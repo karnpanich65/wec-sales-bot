@@ -380,7 +380,7 @@ def list_stale(min_hours: int = 20, max_hours: int = 23,
     """
     if not _can_read():
         return []
-    lo, hi = int(min_hours), int(max_hours)
+    lo, hi = float(min_hours), float(max_hours)
     if hi <= lo:
         hi = lo + 3
     try:
