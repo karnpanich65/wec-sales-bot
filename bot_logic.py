@@ -494,14 +494,35 @@ _CO_INFORMAL_WORDS = (
 
 # r41 — คำจดทะเบียน "ต้องกันคำปฏิเสธ": "ไม่ได้จดทะเบียน" มีคำว่าจดทะเบียนอยู่ด้วย
 # เช็คแบบ substring เฉยๆ จะอ่านเป็น "จดแล้ว" ทันที = ปล่อยเคสที่แบงก์ไม่รับผ่าน
+# r46 (Gift 20 ส.ค. 2026) — "จดทะเบียน" ในภาษาลูกค้ามี 2 ความหมาย
+# จดทะเบียนสมรส (เรื่องคู่) กับ จดทะเบียนการค้า/บริษัท (เรื่องธุรกิจ)
+# เดิมเจอคำว่า "จดทะเบียน" ที่ไหนก็นับเป็นจดธุรกิจหมด
+# -> ลูกค้าอาชีพอิสระที่ตอบว่า "จดทะเบียนสมรสแล้ว" ถูกอ่านว่ามีเอกสารครบ
+#    ผ่านเกณฑ์ธนาคารทันที = เกรดเฟ้อ เซลไปเสียเที่ยว
+_MARRIAGE_PHRASES = ("จดทะเบียนสมรส", "จดทะเบียนหย่า", "ทะเบียนสมรส",
+                     "ทะเบียนหย่า", "จดทะเบียนบ้าน", "ทะเบียนบ้าน",
+                     "จดทะเบียนรถ", "ทะเบียนรถ", "ทะเบียนราษฎร")
+
+
+def _strip_marriage(msg: str) -> str:
+    """ตัดคำจดทะเบียนที่ไม่เกี่ยวกับธุรกิจออก ก่อนไปเช็คเรื่องเอกสารกิจการ"""
+    s = (msg or "").replace(" ", "")
+    for w in _MARRIAGE_PHRASES:
+        s = s.replace(w, "\u00b7")
+    return s
+
+
 _NEG_PREFIX = ("ยังไม่ได้", "ยังไม่มี", "ยังไม่", "ไม่ได้", "ไม่มี", "ไม่")
 _REG_WORDS = ("จดทะเบียน", "จดบริษัท", "มีบริษัท", "หจก", "ห้างหุ้นส่วน",
               "บริษัทจำกัด", "นิติบุคคล", "ทะเบียนพาณิชย์", "ทะเบียนการค้า")
 
 
 def _has_registered(msg: str) -> bool:
-    """จดทะเบียนจริงไหม (ไม่นับที่ถูกปฏิเสธ เช่น "ไม่ได้จดทะเบียน")"""
-    m = (msg or "").replace(" ", "")
+    """จดทะเบียน "ธุรกิจ" จริงไหม
+
+    ไม่นับที่ถูกปฏิเสธ ("ไม่ได้จดทะเบียน") และไม่นับทะเบียนสมรส/บ้าน/รถ
+    """
+    m = _strip_marriage(msg)
     for w in _REG_WORDS:
         i = 0
         while True:
@@ -741,9 +762,11 @@ def _parse_years(msg: str) -> int | None:
 def _parse_tax_flag(msg: str) -> bool | None:
     """มีภาษี/จดบริษัทไหม -> True / False / None (ยังไม่รู้)"""
     m = _norm_th(msg)
-    if _has_any(msg, _TAX_NO_WORDS):
+    # r46 — "จดทะเบียนสมรส" ไม่ใช่เอกสารธุรกิจ ตัดออกก่อนเช็ค
+    _biz = _strip_marriage(msg)
+    if _has_any(_biz, _TAX_NO_WORDS):
         return False
-    if _has_any(msg, _TAX_YES_WORDS):
+    if _has_any(_biz, _TAX_YES_WORDS):
         return True
     if re.fullmatch(r"(ไม่|ไม่มี|ยังไม่มี|ยังไม่|ไม่ครับ|ไม่ค่ะ)[ครับค่ะคะจ้า]*", m):
         return False
@@ -2366,6 +2389,14 @@ class BotEngine:
                         state["awaiting"] = field
                         state["last_q"] = ""
                         print(f"[NO REPEAT] {user_id[:8]}... ข้ามคำถามซ้ำ: {question[:40]!r}")
+                    elif self._already_asked_topic(bubbles, field):
+                        # r46 — บับเบิลก่อนหน้า (ที่ AI เขียน) ถามเรื่องนี้ไปแล้ว
+                        # ต่อท้ายอีกก็เป็นคำถามเดียวกันสองรอบในจอเดียว
+                        state["awaiting"] = field
+                        asked[field] = asked.get(field, 0) + 1
+                        state["last_q"] = ""
+                        print(f"[NO REPEAT] {user_id[:8]}... บับเบิลก่อนหน้าถาม "
+                              f"{field} ไปแล้ว ไม่ต่อท้ายซ้ำ")
                     else:
                         asked[field] = asked.get(field, 0) + 1
                         state["awaiting"] = field
@@ -3027,6 +3058,42 @@ class BotEngine:
                 state,
                 f"กู้ร่วม: {int(own):,} + {int(cob):,} = รายได้รวม {total:,} "
                 f"ผ่านเกณฑ์ยื่น (เกณฑ์ {LOW_INCOME_BAHT:,})")
+
+    # r46 (Gift 20 ส.ค. 2026) — บับเบิลที่ AI เขียนเองมักลงท้ายด้วยคำถาม
+    # เรื่องเดียวกับคำถามตายตัวที่กำลังจะต่อท้าย แต่คำไม่เหมือนกันเป๊ะ
+    # ตัวกันซ้ำเดิม (_dedupe_exact/_dedupe_question) เลยจับไม่ได้
+    # เคสจริงเพจ Wealth Estate คุณนวนิตย์: บอทส่งติดกัน 2 บับเบิล
+    #   "...ลูกค้าสนใจลงทุนปล่อยเช่า หรืออยู่เองครับ"
+    #   "ลูกค้าสนใจลงทุนคอนโดปล่อยเช่าหรือเพื่ออยู่อาศัยเองครับ"
+    # เทียบ "หัวข้อ" แทนการเทียบข้อความ
+    _FIELD_TOPIC = {
+        "objective":   (("ปล่อยเช่า",), ("อยู่เอง", "อยู่อาศัย")),
+        "income":      (("รายได้",),),
+        "debt":        (("ผ่อน",),),
+        "contact":     (("เบอร์",),),
+        "co_borrower": (("กู้ร่วม",),),
+        "co_income":   (("กู้ร่วม",), ("รายได้",)),
+        "co_debt":     (("กู้ร่วม",), ("ผ่อน",)),
+        "self_emp":    (("กี่ปี",),),
+        "co_self_emp": (("กู้ร่วม",), ("กี่ปี",)),
+        "coop":        (("สหกรณ์",),),
+        "age":         (("อายุ",),),
+    }
+    _Q_MARK = ("ไหม", "หรือ", "เท่าไหร่", "เท่าไร", "กี่", "?")
+
+    @classmethod
+    def _already_asked_topic(cls, bubbles: list, field: str) -> bool:
+        """บับเบิลที่สะสมไว้ ถามเรื่องนี้ไปแล้วหรือยัง (คำอาจต่างกัน)"""
+        groups = cls._FIELD_TOPIC.get(field)
+        if not groups:
+            return False
+        for b in bubbles:
+            t = (b or "").replace(" ", "")
+            if not any(q in t for q in cls._Q_MARK):
+                continue
+            if all(any(k in t for k in grp) for grp in groups):
+                return True
+        return False
 
     def _next_missing(self, data: dict,
                       state: dict | None = None,
