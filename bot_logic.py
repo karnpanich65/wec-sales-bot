@@ -671,7 +671,27 @@ _NCB_BLACKLIST_WORDS = ("ติดบูโร", "ติดบูโล", "ต�
                         "ติดแบล็ค", "ติดแบล๊ค", "แบล็คลิสต์", "แบล๊คลิสต์",
                         "แบลคลิสต์", "blacklist", "ติดเครดิตบูโร", "บูโรไม่ผ่าน",
                         "ติดหนี้เสีย", "หนี้เสีย", "npl", "โดนฟ้อง", "ถูกฟ้อง",
-                        "ค้างชำระ", "ค้างอยู่", "ติดบัญชีดำ")
+                        "ค้างชำระ", "ค้างอยู่", "ติดบัญชีดำ",
+                        # r48 — คนไทยพิมพ์สั้นว่า "ติดแบค" กันเยอะมาก
+                        "ติดแบค", "ติดแบ็ค", "ติดแบ๊ค", "โดนแบค", "โดนแบล็ค")
+
+# r48 (Gift เคาะ 20 ส.ค. 2026) — คำที่แปลว่า "ติดแบล็คลิสต์" ชัดเจน
+# ธนาคารไม่รับ -> ปิดสุภาพทันที ไม่ต้องไล่ถามว่าปิดหนี้แล้วกี่ปี
+# เคสจริงเพจ Love Newday: ลูกค้าพิมพ์ "30000 + ปัญหาคือติดแบค"
+# ของเดิมไม่มีคำนี้ในลิสต์เลย บอทอ่านไม่ออก แล้วถามอายุงานอาชีพอิสระต่อ
+# = เหมือนไม่ได้ยินสิ่งที่ลูกค้าเพิ่งบอกว่าเป็นปัญหาใหญ่ที่สุดของเขา
+# หมายเหตุ: "ติดบูโร / หนี้เสีย / ค้างชำระ / ถูกฟ้อง" ยังใช้เส้นทางเดิม
+# (ถามต่อว่าปิดแล้วกี่ปี) เพราะคำพวกนั้นกว้างกว่า และ Gift เคาะไว้ตั้งแต่ 18 ส.ค.
+_NCB_HARD_WORDS = ("ติดแบค", "ติดแบ็ค", "ติดแบ๊ค", "โดนแบค", "โดนแบล็ค",
+                   "ติดแบคลิส", "แบคลิสต์", "แบ็คลิสต์", "แบ๊คลิสต์",
+                   "ติดแบล็ค", "ติดแบล๊ค", "แบล็คลิสต์", "แบล๊คลิสต์",
+                   "แบลคลิสต์", "แบล็คลิส", "blacklist", "backlist",
+                   "ติดบัญชีดำ", "บัญชีดำ")
+
+
+def _is_hard_ncb(msg: str) -> bool:
+    """ติดแบล็คลิสต์ชัดเจน — ธนาคารไม่รับ ไม่ต้องไล่ถามต่อ"""
+    return _has_any(msg, _NCB_HARD_WORDS)
 _NCB_LATE_WORDS = ("จ่ายช้า", "ผ่อนช้า", "ชำระช้า", "ล่าช้า", "จ่ายไม่ตรง",
                    "ค้างค่างวด", "เลยกำหนด", "จ่ายเลท", "เลทบ้าง")
 _NCB_RESTRUCT_WORDS = ("ปรับโครงสร้างหนี้", "ปรับโครงสร้าง",
@@ -1928,6 +1948,28 @@ class BotEngine:
                                            _hash_psid(user_id))
                     except Exception as _pe:
                         print(f'[PG] save_turn (handover) พลาด: {_pe}')
+                # r48 (น็อตรายงาน 20 ส.ค. 2026) — ลูกค้าให้เบอร์ตอนเซลคุยเอง
+                # เดิมข้ามทั้งก้อน: เบอร์ไม่ถูกเก็บ ลีดไม่ถูกสร้าง เซลไม่ได้รับงาน
+                # เจอจริง 2 ห้องในวันเดียว (ให้ 064... และ 096... แล้วเงียบหาย)
+                # ต้องเก็บ + สร้างลีดเงียบๆ แต่ห้ามตอบลูกค้า เพราะเซลคุยอยู่
+                _hd = state.setdefault("data", {})
+                if not _hd.get("contact") and _looks_like_phone(user_message):
+                    try:
+                        self._capture(state, "contact", user_message)
+                        _hnm = _name_from_contact_msg(user_message)
+                        if _hnm and not state.get("chat_name"):
+                            state["chat_name"] = _hnm
+                            state["fb_name"] = _hnm
+                        self._add_signal(
+                            state,
+                            "ลูกค้าให้เบอร์ระหว่างเซลรับช่วงคุยเอง — "
+                            "เก็บลีดให้แล้ว บอทไม่ได้ตอบ")
+                        _hg = self._finish(user_id, state,
+                                           _hd.get("contact") or user_message)
+                        print(f"[HANDOVER LEAD] {user_id[:8]}... ได้เบอร์ระหว่าง"
+                              f"เซลดูแล — สร้างลีดแล้ว เกรด {_hg}")
+                    except Exception as _hfe:
+                        print(f"[HANDOVER LEAD] สร้างลีดพลาด: {_hfe}")
                 _left = int((HANDOVER_TTL_SEC - _hage) / 3600)
                 print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
                       f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
@@ -2152,6 +2194,28 @@ class BotEngine:
         for _sig in _risk_flag_msgs(msg):
             if _sig not in (state.get("signals") or []):
                 self._add_signal(state, _sig)
+
+        # r48 — ติดแบล็คลิสต์ = ธนาคารไม่รับ ปิดสุภาพทันที ไม่ถามต่อ ไม่ขอเบอร์
+        # ต้องอยู่ "ก่อน" คิวคำถามบูโร เพราะเคสนี้ไม่มีอะไรต้องถามเพิ่มแล้ว
+        if (_is_hard_ncb(msg) and not data.get("cash")
+                and not state.get("done") and not state.get("closed")):
+            state["ncb_kind"] = "blacklist"
+            state["ncb_hard"] = True
+            data["ncb_raw"] = msg[:200]
+            data["ncb_still"] = True
+            state["soft_close"] = True
+            state["soft_close_msg"] = NCB_SOFT_CLOSE
+            state.pop("ncb_pending", None)
+            state.pop("awaiting_ncb", None)
+            self._add_signal(
+                state,
+                "❌ ลูกค้าแจ้งเองว่าติดแบล็คลิสต์ — ธนาคารไม่รับ "
+                "ปิดสุภาพ ไม่ขอเบอร์ (Gift เคาะ 20 ส.ค. 2026)")
+            _g = self._finish(user_id, state, data.get("contact", ""),
+                              calendar=False)
+            self._close_chat(state)
+            print(f"[NCB HARD] {user_id[:8]}... ติดแบล็คลิสต์ — ปิดสุภาพ ไม่ขอเบอร์")
+            return [NCB_SOFT_CLOSE], _g
 
         # ธงประวัติเครดิต — ลูกค้าพูดเองเมื่อไหร่ ตั้งธงแล้วถามต่อ 1 ข้อ
         if not state.get("ncb_kind"):
