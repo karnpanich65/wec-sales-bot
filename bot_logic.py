@@ -1780,6 +1780,9 @@ HANDOVER_DAYS = 3
 HANDOVER_TTL_SEC = HANDOVER_DAYS * 86400
 # เก็บบทสนทนาช่วงเซลดูแลไว้กี่ท่อน -> ใช้ต่อบริบทตอนบอทกลับมา
 HANDOVER_LOG_MAX = 20
+# r49 — ถ้าลูกค้าไม่ให้เบอร์เลย รออย่างน้อยกี่ข้อความก่อนแจกเคสแบบไม่มีเบอร์
+# (ยิงเร็วเกินไป = ได้แถวที่ข้อมูลบางมาก · ยิงช้าเกินไป = รีพอร์ตนับไม่เห็น)
+HANDOVER_LEAD_MIN_MSGS = int(os.environ.get("HANDOVER_LEAD_MIN_MSGS", "6"))
 HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 
 # ชื่อเซลรายเพจ (Gift 18 ส.ค.: "ตามชื่อเซลแต่ละเพจเลยนะ")
@@ -1948,28 +1951,12 @@ class BotEngine:
                                            _hash_psid(user_id))
                     except Exception as _pe:
                         print(f'[PG] save_turn (handover) พลาด: {_pe}')
-                # r48 (น็อตรายงาน 20 ส.ค. 2026) — ลูกค้าให้เบอร์ตอนเซลคุยเอง
-                # เดิมข้ามทั้งก้อน: เบอร์ไม่ถูกเก็บ ลีดไม่ถูกสร้าง เซลไม่ได้รับงาน
-                # เจอจริง 2 ห้องในวันเดียว (ให้ 064... และ 096... แล้วเงียบหาย)
-                # ต้องเก็บ + สร้างลีดเงียบๆ แต่ห้ามตอบลูกค้า เพราะเซลคุยอยู่
-                _hd = state.setdefault("data", {})
-                if not _hd.get("contact") and _looks_like_phone(user_message):
-                    try:
-                        self._capture(state, "contact", user_message)
-                        _hnm = _name_from_contact_msg(user_message)
-                        if _hnm and not state.get("chat_name"):
-                            state["chat_name"] = _hnm
-                            state["fb_name"] = _hnm
-                        self._add_signal(
-                            state,
-                            "ลูกค้าให้เบอร์ระหว่างเซลรับช่วงคุยเอง — "
-                            "เก็บลีดให้แล้ว บอทไม่ได้ตอบ")
-                        _hg = self._finish(user_id, state,
-                                           _hd.get("contact") or user_message)
-                        print(f"[HANDOVER LEAD] {user_id[:8]}... ได้เบอร์ระหว่าง"
-                              f"เซลดูแล — สร้างลีดแล้ว เกรด {_hg}")
-                    except Exception as _hfe:
-                        print(f"[HANDOVER LEAD] สร้างลีดพลาด: {_hfe}")
+                # r49 (Gift 20 ส.ค. 2026) — "เงียบ" แปลว่าไม่ถาม ไม่ใช่หยุดทำงาน
+                # บอทยังต้องอ่านข้อมูล แจกเคสให้เซล และให้เคสเข้ารีพอร์ต
+                try:
+                    self._handover_absorb(user_id, state, user_message)
+                except Exception as _hfe:
+                    print(f"[HANDOVER ABSORB ERROR] {_hfe}")
                 _left = int((HANDOVER_TTL_SEC - _hage) / 3600)
                 print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
                       f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
@@ -4078,6 +4065,91 @@ class BotEngine:
             except Exception as _pe:
                 print(f"[PG] save_human พลาด: {_pe}")
         return result
+
+    def _handover_absorb(self, user_id: str, state: dict, msg: str) -> bool:
+        """r49 (Gift เคาะ 20 ส.ค. 2026) — เซลรับช่วง = บอทเงียบ "แต่ไม่หยุดทำงาน"
+
+        เงียบ = ไม่ถาม ไม่ตอบลูกค้า (เซลคุยอยู่ ห้ามพูดทับ)
+        สิ่งที่ยังต้องทำ:
+          1) อ่านคำตอบที่ลูกค้าพิมพ์ เก็บลงสเตทตามปกติ
+          2) แจกเคสให้เซลอัตโนมัติเมื่อข้อมูลพอ — เขียนแถว + นัดโทรเหมือนเคสปกติ
+          3) ให้เคสโผล่ในรีพอร์ต ไม่ใช่หายไปทั้งก้อน
+
+        เดิมข้ามทั้งก้อน: ห้องที่เซลคุยเองไม่มีแถวลีดเลย เซลไม่ได้รับงาน
+        และรีพอร์ตนับไม่เห็น (น็อตรายงาน 20 ส.ค. 2026 — ลูกค้าให้เบอร์ 2 ห้อง
+        แล้วลีดหายทั้งคู่)
+
+        เก็บเฉพาะที่ "ชัดเจน" เท่านั้น ไม่เดา เพราะไม่มีคำถามกำกับว่ากำลังตอบข้อไหน
+        คืนค่า True ถ้าแจกเคสในรอบนี้
+        """
+        data = state.setdefault("data", {})
+        try:
+            self._scan_signals(state, msg)
+        except Exception:
+            pass
+
+        if not data.get("contact") and _looks_like_phone(msg):
+            self._capture(state, "contact", msg)
+            _nm = _name_from_contact_msg(msg)
+            if _nm and not state.get("chat_name"):
+                state["chat_name"] = _nm
+                state["fb_name"] = _nm
+
+        if (not data.get("objective")
+                and _has_any(msg, ("ปล่อยเช่า", "ลงทุน", "อยู่เอง", "อยู่อาศัย"))):
+            self._capture(state, "objective", msg)
+
+        if (not data.get("income") and not _looks_like_phone(msg)
+                and (_parse_income(msg) or _is_unbankable_job(msg)
+                     or _is_self_employed(msg))):
+            self._capture(state, "income", msg)
+
+        if not data.get("debt") and (
+                _says_no_debt(msg)
+                or (_has_any(msg, ("ผ่อน", "หนี้", "บัตรเครดิต")) and _all_amounts(msg))):
+            self._capture(state, "debt", msg)
+
+        if not data.get("co_borrower") and _says_no_coborrower(msg):
+            data["co_borrower_none"] = True
+            data["co_borrower_yes"] = False
+
+        # ---- แจกเคส (ครั้งเดียวต่อ 1 ช่วง handover) ----
+        # ⚠️ ฝั่ง Apps Script ใช้ appendRow ไม่ใช่ upsert — ยิงซ้ำ = ได้ 2 แถว
+        # ต่อลูกค้าคนเดียว เซลจะเห็นงานซ้ำและรีพอร์ตจะนับเกิน
+        # จึงต้องเลือกจังหวะให้ดี ยิงทีเดียวจบ:
+        #   · ได้เบอร์เมื่อไหร่ = แจกทันที (เคสที่น็อตรายงาน สำคัญที่สุด)
+        #   · ไม่ได้เบอร์เลย = รอให้ลูกค้าพิมพ์ครบ HANDOVER_LEAD_MIN_MSGS ข้อความก่อน
+        #     แล้วค่อยแจกแบบไม่มีเบอร์ เพื่อให้เคสโผล่ในรีพอร์ต ไม่หายทั้งก้อน
+        state["handover_msgs"] = int(state.get("handover_msgs") or 0) + 1
+        _partial_sent = bool(state.get("handover_lead_partial"))
+        _has_contact = bool(data.get("contact"))
+        if _has_contact and not state.get("handover_lead_contact"):
+            # ได้เบอร์ = แจกทันที (เคสที่น็อตรายงาน สำคัญที่สุด)
+            # ถ้าเคยแจกแบบยังไม่มีเบอร์ไปแล้ว ต้องยิงอีกครั้งเพื่อให้เซลได้เบอร์จริง
+            # ฝั่งชีตเป็น appendRow เลยได้ 2 แถว — ติดธงบอกให้ชัดว่าแถวนี้คือตัวอัปเดต
+            state["handover_lead_contact"] = True
+            if _partial_sent:
+                self._add_signal(
+                    state, "⚠️ อัปเดต: ได้เบอร์แล้ว — แถวก่อนหน้าของลูกค้าคนนี้ยังไม่มีเบอร์")
+        elif (not _has_contact and not _partial_sent and not state.get("lead_sent")
+                and data.get("objective") and data.get("income")
+                and state["handover_msgs"] >= HANDOVER_LEAD_MIN_MSGS):
+            # คุยมาพอสมควรแล้วยังไม่ให้เบอร์ -> แจกแบบไม่มีเบอร์
+            # เพื่อให้เคสโผล่ในรีพอร์ต ไม่หายไปทั้งก้อน
+            state["handover_lead_partial"] = True
+        else:
+            return False
+        _who = state.get("handover_by") or ""
+        self._add_signal(
+            state,
+            (f"เซล{_who} รับช่วงคุยเอง" if _who else "เซลรับช่วงคุยเอง")
+            + " — บอทเงียบกับลูกค้า แต่เก็บข้อมูลและแจกเคสให้อัตโนมัติ")
+        # calendar ตามเคสปกติ: มีเบอร์ = นัดโทร · ไม่มีเบอร์ = ลงชีตอย่างเดียว
+        _g = self._finish(user_id, state, data.get("contact", ""),
+                          calendar=bool(data.get("contact")))
+        print(f"[HANDOVER LEAD] {user_id[:8]}... แจกเคสอัตโนมัติระหว่างเซลดูแล "
+              f"— เกรด {_g} · เบอร์ {'มี' if data.get('contact') else 'ยังไม่มี'}")
+        return True
 
     @staticmethod
     def _handover_note(state: dict, who: str, text: str):
