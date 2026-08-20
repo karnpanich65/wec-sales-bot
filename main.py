@@ -1219,6 +1219,26 @@ def import_fix_ts():
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
 
 
+@app.route("/recover/handover", methods=["GET", "POST"])
+def recover_handover():
+    """r50 — ดึงเคสที่เซลรับช่วงแล้วลีดตกหล่น (ก่อน r49) กลับมาแจกให้เซล
+
+    ค่าเริ่มต้น dry=1 = ดูรายการอย่างเดียว ไม่เขียนอะไรทั้งนั้น
+    ใส่ dry=0 ถึงจะแจกจริง · ไม่ว่าโหมดไหนก็ไม่ส่งข้อความหาลูกค้า
+    """
+    if request.args.get("key", "") != IMPORT_KEY:
+        return jsonify({"ok": False, "error": "bad key"}), 403
+    try:
+        days = int(request.args.get("days", "3"))
+    except Exception:
+        days = 3
+    dry = request.args.get("dry", "1") != "0"
+    try:
+        return jsonify(bot.recover_handover_leads(days=days, dry=dry))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
 @app.route("/review-log", methods=["GET"])
 def review_log():
     if request.args.get("key", "") != REVIEW_LOG_KEY:

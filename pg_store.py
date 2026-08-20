@@ -348,6 +348,48 @@ def load_history(page_id: str, psid: str, limit: int = 10,
     return msgs
 
 
+def list_handover(days: int = 3, limit: int = 300) -> list:
+    """r50 — แชทที่เซลรับช่วงคุยเอง (ใช้ตอนดึงเคสย้อนหลังกลับมาแจก)"""
+    if not _can_read():
+        return []
+    try:
+        with _read_lock:
+            conn = _read_get()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT page_id, psid, state FROM sessions "
+                    "WHERE updated_at > now() - make_interval(days => %s) "
+                    "AND state->>'handover' = 'true' "
+                    "ORDER BY updated_at DESC LIMIT %s",
+                    (int(days), int(limit)))
+                rows = cur.fetchall()
+        return [{"page_id": r[0], "psid": r[1], "state": r[2]}
+                for r in rows if isinstance(r[2], dict)]
+    except Exception as e:
+        _read_fail(e)
+        return []
+
+
+def load_raw(psid: str, limit: int = 300) -> list:
+    """r50 — ข้อความดิบเรียงเก่า->ใหม่ พร้อมบอกว่าอันไหนเซลพิมพ์ (stage='human')"""
+    if not _can_read() or not psid:
+        return []
+    try:
+        with _read_lock:
+            conn = _read_get()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT role, text, stage FROM messages WHERE psid = %s "
+                    "ORDER BY created_at ASC, id ASC LIMIT %s",
+                    (str(psid), int(limit)))
+                rows = cur.fetchall()
+        return [{"role": r[0], "text": r[1] or "", "stage": r[2] or ""}
+                for r in rows]
+    except Exception as e:
+        _read_fail(e)
+        return []
+
+
 # ------------------------------------------------------- นำเข้าของเก่า --
 # ย้าย Chat_Log จากชีตเข้า messages — ยิงซ้ำกี่รอบก็ได้ข้อมูลชุดเดียว
 # เพราะ source_key (ชื่อแท็บ + เลขแถว) มี unique index กันไว้
