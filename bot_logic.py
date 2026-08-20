@@ -4334,6 +4334,24 @@ class BotEngine:
         return result
 
     @staticmethod
+    def _sale_is_live(state: dict) -> bool:
+        """r55 — ตอนนี้ "มีคนฝั่งเพจกำลังคุยอยู่จริง" ไหม
+
+        ใช้ตัดสินว่าจะรีบแจกแถวที่ยังไม่มีเบอร์ดีไหม
+        เซลกำลังไล่ถามอยู่ = เดี๋ยวเบอร์ก็มา รอแป๊บเดียวได้แถวเดียวจบ
+        เซลหายไปแล้ว = รอไปก็ไม่มีใครเก็บ ต้องแจกทันที
+        (เคสจริง 20 ส.ค.: คุณมอส เซลไล่ถามทุก 30 วิ แล้วได้เบอร์ใน 4 นาที
+         ถ้าแจกทันทีที่รู้รายได้ = ได้ 2 แถวของลูกค้าคนเดียว
+         ส่วนพี่บ่าว ฝั่งเพจหายไป 80 นาที = ต้องแจกเลย ไม่มีใครมาเก็บ)
+        """
+        if state.get("handover_by"):
+            return True             # รู้ชื่อเซล = เชื่อว่ามีคนดูแลอยู่
+        _sale_at = int(state.get("handover_sale_at") or 0)
+        if not _sale_at:
+            return False
+        return (_now() - _sale_at) <= HANDOVER_IDLE_SEC
+
+    @staticmethod
     def _handover_gone_stale(state: dict) -> bool:
         """r54 (Gift เคาะ 20 ส.ค. 2026) — handover นี้ "มีคนอยู่จริง" ไหม
 
@@ -4453,7 +4471,10 @@ class BotEngine:
                 # เพดานนั้นมีไว้กัน "แถวข้อมูลบางเกินไป" ไม่ใช่กันแถวที่ตีเกรดได้แล้ว
                 # รู้ตัวเลขรายได้เมื่อไหร่ = คิดวงเงิน/ตีเกรดได้ = แจกได้ทันที
                 and (state["handover_msgs"] >= HANDOVER_LEAD_MIN_MSGS
-                     or (state["handover_msgs"] >= HANDOVER_LEAD_FAST_MSGS
+                     # r55 — ทางลัด "รู้รายได้แล้วแจกเลย" ใช้เฉพาะตอนไม่มีเซลอยู่
+                     # เซลกำลังไล่ถามอยู่ = รอเบอร์อีกนิด จะได้แถวเดียวจบ
+                     or (not self._sale_is_live(state)
+                         and state["handover_msgs"] >= HANDOVER_LEAD_FAST_MSGS
                          and (data.get("income_baht")
                               or _parse_income(str(data.get("income") or "")))))):
             # คุยมาพอสมควรแล้วยังไม่ให้เบอร์ -> แจกแบบไม่มีเบอร์

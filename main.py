@@ -367,12 +367,16 @@ def verify_fb_signature(body: bytes, signature: str) -> bool:
 # ทำได้เพราะย้ายการส่งไปเธรดเบื้องหลังแล้ว (ดู send_reply) webhook ตอบ 200 ทันที
 # ไม่งั้นหน่วงนานๆ Meta จะยิง event ซ้ำ = ลูกค้าได้ข้อความซ้ำ
 TYPING_ENABLED = os.environ.get("TYPING_DELAY", "1").strip() != "0"
-TYPING_BASE_SEC = float(os.environ.get("TYPING_BASE_SEC", "1.8"))
-TYPING_CPS = float(os.environ.get("TYPING_CPS", "11"))        # ตัวอักษร/วินาที
-TYPING_MAX_SEC = float(os.environ.get("TYPING_MAX_SEC", "7"))
-TYPING_BUDGET_SEC = float(os.environ.get("TYPING_BUDGET_SEC", "26"))
-TYPING_READ_SEC = float(os.environ.get("TYPING_READ_SEC", "1.5"))   # อ่านก่อนเริ่มพิมพ์
-TYPING_GAP_SEC = float(os.environ.get("TYPING_GAP_SEC", "1.8"))     # หยุดระหว่างบับเบิล
+# r55 (Gift 20 ส.ค. 2026) — "ไอ้ที่พิมพ์ๆ หยุดๆ มันนานไปไหม ขอแค่ 3-5 วิพอ"
+# ของเดิมเทิร์นนึงกินเวลาได้ถึง 26 วิ (อ่าน 1.5 + พิมพ์ 7 + หยุด 1.8 + พิมพ์ 7 ...)
+# เจตนาเดิมคือ "ให้เหมือนคนพิมพ์" แต่นานขนาดนั้นกลายเป็น "เหมือนบอทค้าง"
+# ตัดเหลือรวมทั้งเทิร์นไม่เกิน 5 วิ — ยังเห็นจุดไข่ปลาขยับ แต่ไม่ต้องรอนาน
+TYPING_BASE_SEC = float(os.environ.get("TYPING_BASE_SEC", "0.6"))
+TYPING_CPS = float(os.environ.get("TYPING_CPS", "28"))        # ตัวอักษร/วินาที
+TYPING_MAX_SEC = float(os.environ.get("TYPING_MAX_SEC", "2.2"))
+TYPING_BUDGET_SEC = float(os.environ.get("TYPING_BUDGET_SEC", "5"))
+TYPING_READ_SEC = float(os.environ.get("TYPING_READ_SEC", "0.8"))   # อ่านก่อนเริ่มพิมพ์
+TYPING_GAP_SEC = float(os.environ.get("TYPING_GAP_SEC", "0.6"))     # หยุดระหว่างบับเบิล
 
 
 def send_sender_action(recipient_id: str, action: str, page_id: str = ""):
