@@ -79,7 +79,7 @@ from faq_data import (
     CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
-    CO_SELF_EMP_Q, CONTACT_GOT_MSG,
+    CO_SELF_EMP_Q, CONTACT_GOT_MSG, COOP_Q,
     ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
     GUARD_FALLBACK_MSG,
 )
@@ -197,7 +197,8 @@ GAP_SAME_DAY = 24 * 60 * 60  # 1 วัน
 # co_borrower ถามเฉพาะเคสรายได้ต่ำกว่า LOW_INCOME_BAHT (ดู _next_missing)
 # co_income/co_debt ถามเฉพาะเคสที่ตอบว่า "มีผู้กู้ร่วม" (co_borrower_yes)
 FIELD_ORDER = ["objective", "income", "self_emp", "co_borrower",
-               "co_income", "co_self_emp", "co_debt", "debt", "contact"]
+               "co_income", "co_self_emp", "co_debt", "debt", "coop",
+               "contact"]
 FIELD_Q_INDEX = {"objective": 0, "income": 1, "debt": 2, "contact": 3,
                  "co_borrower": 4}
 
@@ -512,6 +513,41 @@ def _has_registered(msg: str) -> bool:
                 return True
             i = j + 1
     return False
+
+
+# r44 (Gift 20 ส.ค. 2026) — "เพิ่งลาออกจากงานประจำ" = ไม่ใช่พนักงานประจำแล้ว
+# เคสจริง คุณเจล: ตอบ "พึ่งลาออกจากงานประจำมาได้ 1 เดือนค่ะ" บอทตอบ "ดีเลยค่ะ"
+# แล้วเดินหน้าถามต่อ ทั้งที่รายได้เดิมใช้ยื่นไม่ได้แล้ว และอายุงานใหม่ = 1 เดือน
+_LEFT_JOB_WORDS = ("ลาออกจากงานประจำ", "ออกจากงานประจำ", "ลาออกจากงาน",
+                   "เพิ่งลาออก", "พึ่งลาออก", "เพิ่งออกจากงาน", "พึ่งออกจากงาน",
+                   "ตกงาน", "ว่างงาน", "ออกจากงานมา")
+
+
+def _just_left_job(msg: str) -> bool:
+    return any(w in (msg or "").replace(" ", "") for w in _LEFT_JOB_WORDS)
+
+
+# r44 — โดนหักสหกรณ์: ไม่ขึ้นบูโร แต่หักหน้าซองจริง กระทบ DSR เต็มๆ
+# เคสจริง คุณ Aeedsy: "เงินเดือน 23,000 (แต่โดนหักสหกรณ์)" บอทข้ามไปขอเบอร์เลย
+_COOP_WORDS = ("สหกรณ์", "หักหน้าซอง", "หักณที่จ่าย", "กยศ", "กรอ.")
+
+
+def _has_coop_deduction(msg: str) -> bool:
+    m = (msg or "").replace(" ", "")
+    return any(w in m for w in _COOP_WORDS)
+
+
+def _all_amounts(msg: str) -> list[int]:
+    """ดึงจำนวนเงินทุกก้อนในข้อความ (>=300 กันเลขปี/อายุปนมา)"""
+    out = []
+    for x in re.findall(r"\d[\d,]*", (msg or "")):
+        try:
+            n = int(x.replace(",", ""))
+        except ValueError:
+            continue
+        if 300 <= n <= 50_000_000:
+            out.append(n)
+    return out
 
 
 def _is_co_self_employed(msg: str) -> bool:
@@ -2017,7 +2053,12 @@ class BotEngine:
                 return [NCB_Q.get(_k, NCB_Q["blacklist"])], None
 
         # ธงอาชีพอิสระ/ไม่มีประกันสังคม — ติดครั้งเดียว ไม่ตัดเกรด
-        if not state.get("self_employed") and _is_self_employed(msg):
+        # r44 — ห้ามติดธงจากคำตอบที่พูดถึง "ผู้กู้ร่วม" (Gift 20 ส.ค. 2026)
+        # เคสจริง คุณเจล: บอทถามเรื่องผู้กู้ร่วม ลูกค้าตอบ "มีแฟน ... ตอนนี้ฟรีแลนซ์ค่ะ"
+        # (ฟรีแลนซ์ = แฟน) แต่บอทเอาไปติดธงให้ "ผู้กู้หลัก" แล้วถาม SELF_EMP_Q ผิดคน
+        if (not state.get("self_employed") and _is_self_employed(msg)
+                and state.get("awaiting") not in ("co_borrower", "co_income",
+                                                  "co_self_emp", "co_debt")):
             state["self_employed"] = True
             self._add_signal(
                 state,
@@ -2718,11 +2759,21 @@ class BotEngine:
                 data["self_emp_years"] = yrs
             if tax is not None:
                 data["self_emp_tax"] = tax
-            m = (msg or "").replace(" ", "")
-            if any(w in m for w in ("จดทะเบียน", "จดบริษัท", "มีบริษัท", "หจก",
-                                    "ห้างหุ้นส่วน", "บริษัทจำกัด", "นิติบุคคล")):
+            # r44 — ใช้ตัวกันคำปฏิเสธ ไม่งั้น "ไม่ได้จดทะเบียน" ถูกอ่านเป็น "จดแล้ว"
+            if _has_registered(msg):
                 data["biz_registered"] = True
                 data["self_emp_tax"] = True
+            # r44 — เพิ่งลาออกจากงานประจำ: รายได้เดิมใช้ยื่นไม่ได้แล้ว
+            # ติดธงตั้งแต่ตอนนี้ ไม่ต้องรอตอนตีเกรด บอทจะได้ไม่ตอบ "ดีเลยครับ"
+            if _just_left_job(msg):
+                data["just_left_job"] = True
+                if yrs is None:
+                    data["self_emp_years"] = yrs = 0
+                self._add_signal(
+                    state,
+                    "เพิ่งออกจากงานประจำ — สลิปเดิมใช้ยื่นไม่ได้แล้ว "
+                    f"อายุงานอาชีพใหม่ {yrs} ปี (เกณฑ์ {FREELANCE_MIN_YEARS} ปี) "
+                    "ต้องรอ statement ชุดใหม่")
             return
         if field == "contact":
             # แยกเบอร์ออกจากคำห้อยท้าย ("0863692660ค่ะ" / "081-234-5678 ครับ")
@@ -2734,6 +2785,46 @@ class BotEngine:
                 extra = re.sub(r"[\d\-\s\.]+", " ", msg).strip()
                 if extra and ("ไลน์" in extra or "line" in extra.lower()):
                     self._add_signal(state, "ลูกค้าบอกไลน์ = เบอร์เดียวกัน")
+        # r44 — เอ่ยถึงสหกรณ์/หักหน้าซองตรงไหนก็ตาม ต้องตามเก็บ 2 ตัวเลข
+        # (หักเดือนละเท่าไหร่ = ภาระจริงที่ไม่ขึ้นบูโร · ยอดคงเหลือ = ไว้คิดเคสปิดภาระ)
+        if (field in ("income", "debt") and _has_coop_deduction(msg)
+                and not data.get("coop_flagged")):
+            data["coop_flagged"] = True
+            self._add_signal(
+                state,
+                "โดนหักสหกรณ์/หน้าซอง — ไม่ขึ้นบูโรแต่กระทบ DSR เต็มๆ "
+                "ต้องได้ยอดหักต่อเดือน + ยอดคงเหลือก่อนประเมินวงเงิน")
+        if field == "coop":
+            nums = _all_amounts(msg)
+            if len(nums) >= 2:
+                data["coop_monthly"] = min(nums)
+                data["coop_balance"] = max(nums)
+            elif len(nums) == 1:
+                # ตัวเดียว — เดาจากขนาด: แสนขึ้นไป = ยอดคงเหลือ ไม่ใช่ค่างวด
+                if nums[0] >= 100_000:
+                    data["coop_balance"] = nums[0]
+                else:
+                    data["coop_monthly"] = nums[0]
+            data["coop"] = msg
+            _mo = data.get("coop_monthly")
+            _bal = data.get("coop_balance")
+            if _mo:
+                # หักสหกรณ์ = ภาระต่อเดือนจริง เอาไปรวมกับยอดผ่อนที่ตอบไว้
+                if not data.get("coop_in_debt"):
+                    data["debt_baht"] = (data.get("debt_baht") or 0) + _mo
+                    data["coop_in_debt"] = True
+                self._add_signal(
+                    state,
+                    f"หักสหกรณ์เดือนละ {_mo:,} บาท — รวมเข้าภาระต่อเดือนแล้ว "
+                    f"(ภาระรวม {data.get('debt_baht') or 0:,} บาท/เดือน)")
+            if _bal:
+                self._add_signal(
+                    state,
+                    f"ยอดสหกรณ์คงเหลือ ~{_bal:,} บาท — ใช้ตั้งต้นคิดเคสปิดภาระ "
+                    "ว่าปิดก้อนนี้แล้ววงเงินขึ้นเท่าไหร่")
+            if not nums:
+                self._add_signal(state, "ถามยอดสหกรณ์แล้วแต่ยังไม่ได้ตัวเลข — เซลถามตอนโทร")
+            return
         if field == "debt":
             # ยอดผ่อนรวมต่อเดือน — ตัวตั้งของเกรด A/B/C/D และของ engine โหมด A
             data["debt_baht"] = _parse_debt_monthly(msg)
@@ -2954,6 +3045,11 @@ class BotEngine:
             # r41 — ถามเฉพาะผู้กู้ร่วมที่ไม่ใช่พนักงานประจำ (เกณฑ์เดียวกับผู้กู้หลัก)
             if f == "co_self_emp" and not data.get("co_self_employed"):
                 continue
+            # r44 — ถามเรื่องสหกรณ์เฉพาะเคสที่ลูกค้าเอ่ยเองว่าโดนหัก
+            if f == "coop" and not data.get("coop_flagged"):
+                continue
+            if f == "coop" and data.get("cash"):
+                continue          # ซื้อสด = ไม่ได้กู้ ไม่ต้องคิด DSR
             if f == "contact" and state.get("contact_refused"):
                 continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
             if not data.get(f):
@@ -2979,6 +3075,8 @@ class BotEngine:
                     return f, CO_SELF_EMP_Q
                 if f == "co_debt":
                     return f, CO_DEBT_Q
+                if f == "coop":
+                    return f, COOP_Q
                 return f, QUALIFY_QUESTIONS[FIELD_Q_INDEX[f]]
         return None, None
 
@@ -3193,6 +3291,9 @@ class BotEngine:
         if field == "self_emp":
             # ต้องมีตัวเลขปี หรือคำตอบเรื่องภาษี/จดทะเบียน อย่างน้อย 1 อย่าง
             return (_parse_years(m) is not None) or (_parse_tax_flag(m) is not None)
+        if field == "coop":
+            # ต้องมีตัวเลข หรือบอกว่าไม่รู้/ไม่มี
+            return bool(_all_amounts(m)) or _says_no_debt(m) or _refuses_income(m)
         if field in ("income", "co_income", "debt", "co_debt") and _looks_like_phone(m):
             # 19 ส.ค. 2026 — เจอจริง: ลูกค้าส่งเบอร์มาตอนบอทกำลังถามยอดผ่อน
             # เบอร์ถูกเก็บเป็น "ยอดผ่อน" แล้วบอทถามยอดผ่อนซ้ำ ส่วนเบอร์หายไปเลย
