@@ -1904,6 +1904,13 @@ HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 # เซลพิมพ์เมื่อไหร่ = ล็อกใหม่ทันที (บอทถอยให้เสมอ)
 # ----------------------------------------------------------------------
 HANDOVER_IDLE_MIN = int(os.environ.get("HANDOVER_IDLE_MIN", "10"))
+
+# r57 — handover ต้องมี "ชื่อเซล" ถึงจะหยุดบอท (ตั้ง 0 = กลับไปแบบ echo ทุกข้อความ)
+HANDOVER_NEEDS_NAME = os.environ.get("HANDOVER_NEEDS_NAME", "1").strip() != "0"
+
+# r57 — คำที่บอกว่า "นี่คือรายได้" ใช้กันคำตอบไปลงช่องผิด
+_INCOME_SAYS = ("เงินเดือน", "รายได้", "สลิป", "เดือนละ", "ต่อเดือน", "ได้เดือนละ")
+_DEBT_SAYS = ("ผ่อน", "หนี้", "บัตรเครดิต", "ค่างวด", "สินเชื่อ", "ยอดคงเหลือ")
 HANDOVER_IDLE_SEC = HANDOVER_IDLE_MIN * 60
 
 # ----------------------------------------------------------------------
@@ -3203,6 +3210,22 @@ class BotEngine:
     # ==================================================================
     def _capture(self, state: dict, field: str, msg: str):
         data = state["data"]
+        # r57 (เคสมอส เพจ Millionaire Asset 20 ส.ค. 2026) — คำตอบมาช้ากว่าคำถาม
+        # บอทถาม "รายได้เท่าไหร่" -> ลูกค้าถามกลับก่อน -> NO-REPEAT สลับไปถาม "หนี้"
+        # -> ลูกค้าเพิ่งมาตอบคำถามรายได้ "เงินเดือนตามสลิปรวม 55,000 ... เบี้ยเลี้ยง 5,000"
+        # ของเดิมเก็บลงช่องที่ค้างอยู่ = บันทึกเป็น "หนี้ 5,000" ทั้งที่เป็นรายได้ 55,000
+        # เกรดเพี้ยนทั้งเคส และ income ยังว่าง -> ไม่แจกเคสให้เซลสักที
+        # กติกา: เนื้อความชนะช่องที่ค้าง ถ้าอ่านออกชัดว่าเป็นรายได้ ไม่ใช่หนี้
+        if (field == "debt" and not data.get("income")
+                and _has_any(msg, _INCOME_SAYS)
+                and not _has_any(msg, _DEBT_SAYS)
+                and _parse_income(msg)):
+            print(f"[SLOT FIX] ข้อความนี้คือรายได้ ไม่ใช่หนี้ — เก็บเป็น income แทน")
+            field = "debt_was_income"
+            data.pop("debt", None)
+            data.pop("debt_baht", None)
+            state["awaiting"] = None
+            field = "income"
         data[field] = msg
         if field == "ncb":
             kind = state.get("ncb_kind") or "blacklist"
@@ -4310,24 +4333,43 @@ class BotEngine:
             self._resume_context(customer_id, state)
             print(f"[HANDOVER OFF] {customer_id[:8]}... กลับมาให้บอทตอบ")
         elif not state.get("handover"):
-            # 19 ส.ค. 2026 (Gift): เดิมต้องมีคำทักทาย + ชื่อเซล ถึงจะหยุดบอท
-            # เคสจริง: เซลพิมพ์ "พี่เจี๊ยบเองค่ะ" -> ไม่เข้าเงื่อนไข -> บอทตอบแทรกต่อ
-            # กติกาใหม่: มีคนพิมพ์เองจากกล่องข้อความเพจ = รับช่วงทันที ทุกข้อความ
-            state["handover"] = True
-            state["handover_at"] = _now()
-            result = "handover"
-            state["handover_log"] = []
-            state["handover_cust"] = 0      # r51 — นับข้อความลูกค้ารอบนี้ใหม่
-            state.pop("handover_idle_released", None)   # r54 — ล็อกรอบใหม่
+            # r57 (Gift 21 ส.ค. 2026) — "ยกเลิก echo เปลี่ยนเป็นแนะนำตัวชื่อเซลของเพจนั้นๆ"
+            #
+            # ของเดิม (19 ส.ค.): ฝั่งเพจพิมพ์อะไรก็ได้ = หยุดบอททันที
+            # ปัญหาจริงที่เจอทั้งวัน 20 ส.ค. — ข้อความที่ "ไม่ใช่คน" เข้าเงื่อนไขหมด:
+            #   · ข้อความตอบกลับอัตโนมัติของเพจ
+            #   · "ข้อความระบุว่าไม่อยู่" (Wealth Owner ปิดจาก Meta ไม่ได้)
+            #   · ข้อความติดตามผลจากโฆษณา ("สวัสดี วิว! เราต้องการติดตามผล...")
+            #   · คำถามคัดกรองสำเร็จรูป (โผล่ 4 ครั้งในวันเดียว)
+            # -> บอทเงียบทั้งที่ไม่มีคนอยู่ ลูกค้าถูกทิ้งกลางคัน
+            #
+            # กติกาใหม่: หยุดบอทเมื่อ "เซลตัวจริงแนะนำตัว" เท่านั้น
+            # ต้องอ่านชื่อออกจากรายชื่อเซลของเพจนั้น (SALES_BY_PAGE / SALES_ANY_PAGE)
+            # อ่านชื่อไม่ออก = ถือว่าเป็นระบบอัตโนมัติ บอทคุยต่อ
+            # แต่ยังเก็บ log ครบทุกบรรทัดเหมือนเดิม (กติกา Gift: หยุดคือหยุดตอบเฉยๆ)
+            #
+            # ปิดกติกานี้ได้ทันทีโดยไม่ต้อง deploy: HANDOVER_NEEDS_NAME=0
             _who = _who_greeted(text, page_id) or _who_typed(text, page_id)
-            if _who:
-                state["handover_by"] = _who
-            self._add_signal(
-                state,
-                (f"เซล{_who} " if _who else "เซล")
-                + f"เข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_LABEL}")
-            print(f"[HANDOVER ON] {customer_id[:8]}... "
-                  f"เซล{_who or '(ไม่ระบุชื่อ)'} รับช่วงแล้ว | {text[:40]!r}")
+            if HANDOVER_NEEDS_NAME and not _who:
+                print(f"[ECHO IGNORE] {customer_id[:8]}... ฝั่งเพจพิมพ์แต่ไม่มีชื่อเซล "
+                      f"— ถือว่าเป็นข้อความอัตโนมัติ บอทคุยต่อ | {text[:40]!r}")
+                self._add_signal(
+                    state, "ฝั่งเพจมีข้อความออกไปแต่ไม่ได้แนะนำตัว — บอทคุยต่อตามปกติ")
+            else:
+                state["handover"] = True
+                state["handover_at"] = _now()
+                result = "handover"
+                state["handover_log"] = []
+                state["handover_cust"] = 0      # r51 — นับข้อความลูกค้ารอบนี้ใหม่
+                state.pop("handover_idle_released", None)   # r54 — ล็อกรอบใหม่
+                if _who:
+                    state["handover_by"] = _who
+                self._add_signal(
+                    state,
+                    (f"เซล{_who} " if _who else "เซล")
+                    + f"เข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_LABEL}")
+                print(f"[HANDOVER ON] {customer_id[:8]}... "
+                      f"เซล{_who or '(ไม่ระบุชื่อ)'} รับช่วงแล้ว | {text[:40]!r}")
         if state.get("handover"):
             # r54 — ฝั่งเพจพิมพ์ล่าสุดเมื่อไหร่ ใช้ตัดสินว่า "ยังมีคนอยู่ไหม"
             state["handover_sale_at"] = _now()
