@@ -228,6 +228,56 @@ app = Flask(__name__)
 bot = BotEngine()
 
 # ======================================================
+# r51 (Gift 20 ส.ค. 2026) — ทักกลับเคสที่เงียบไปแต่ข้อมูลยังไม่ครบ
+# "ถ้าข้อมูลที่เค้าส่งมาล่าสุดยังไม่ครบและขาดการติดต่อไป ให้ทักหาลูกค้า"
+#
+# ทำไมยิงที่ 20 ชม. ไม่ใช่ 2 วันตามที่คิดไว้ตอนแรก:
+#   Meta ปิดหน้าต่างส่งข้อความที่ 24 ชม. หลังลูกค้าพิมพ์ครั้งสุดท้าย
+#   และเราส่งแบบ messaging_type=RESPONSE ไม่มี message tag
+#   -> เลย 24 ชม. ยิงไปก็ได้ error 10 กลับมา ลูกค้าไม่เห็นอะไรเลย
+#
+# กันพัง 3 ชั้น:
+#   1. FOLLOWUP_ENABLED=0 = ปิดสวิตช์ทันที ไม่ต้อง deploy
+#   2. เพดานต่อรอบ (FOLLOWUP_MAX_PER_RUN) — บั๊กเดียวห้ามยิงเป็นร้อยคน
+#   3. เช็คธงใน RAM ซ้ำก่อนส่งจริงทุกเคส (เซลอาจเพิ่งรับช่วงไปเมื่อกี้)
+# ======================================================
+FOLLOWUP_ENABLED = os.environ.get("FOLLOWUP_ENABLED", "1") != "0"
+FOLLOWUP_SWEEP_SEC = int(os.environ.get("FOLLOWUP_SWEEP_SEC", "1800"))
+# ตื่นมาแล้วรอสักพักก่อนกวาดรอบแรก — ให้ Postgres/ชีตพร้อมก่อน
+FOLLOWUP_BOOT_DELAY = int(os.environ.get("FOLLOWUP_BOOT_DELAY", "300"))
+
+
+def _followup_sweeper():
+    if not FOLLOWUP_ENABLED or FOLLOWUP_SWEEP_SEC <= 0:
+        print("[FOLLOWUP] ปิดไว้ (FOLLOWUP_ENABLED=0 หรือ FOLLOWUP_SWEEP_SEC<=0)")
+        return
+    time.sleep(FOLLOWUP_BOOT_DELAY)
+    while True:
+        try:
+            res = bot.sweep_followups(send=send_reply, dry=False)
+            _n = res.get("sent", 0)
+            if _n or res.get("ready_count"):
+                print(f"[FOLLOWUP] กวาด {res.get('scanned', 0)} เคส "
+                      f"· เข้าเกณฑ์ {res.get('ready_count', 0)} "
+                      f"· ทักไป {_n}")
+            for it in (res.get("ready") or []):
+                if it.get("ok") is False:
+                    print(f"[FOLLOWUP SKIP] {str(it.get('psid'))[:8]}... "
+                          f"{it.get('error')}")
+        except Exception as e:
+            print(f"[FOLLOWUP ERROR] {e}")
+        time.sleep(FOLLOWUP_SWEEP_SEC)
+
+
+try:
+    threading.Thread(target=_followup_sweeper, daemon=True,
+                     name="wec-followup").start()
+    print(f"[FOLLOWUP] เปิดแล้ว — กวาดทุก {FOLLOWUP_SWEEP_SEC}s "
+          f"(เริ่มอีก {FOLLOWUP_BOOT_DELAY}s)")
+except Exception as _e:
+    print(f"[FOLLOWUP BOOT ERROR] {_e}")
+
+# ======================================================
 # Event log สำหรับหน้า /review-log (in-memory, ไม่เก็บลงดิสก์)
 # เก็บเฉพาะ 80 รายการล่าสุด + ปิดบัง PSID บางส่วน
 # ======================================================
@@ -1235,6 +1285,31 @@ def recover_handover():
     dry = request.args.get("dry", "1") != "0"
     try:
         return jsonify(bot.recover_handover_leads(days=days, dry=dry))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
+@app.route("/followup/sweep", methods=["GET", "POST"])
+def followup_sweep():
+    """r51 — ดูว่ารอบนี้จะทักใครบ้าง (dry=1) หรือสั่งกวาดเองทันที (dry=0)
+
+    เธรดเบื้องหลังกวาดให้อยู่แล้วทุก FOLLOWUP_SWEEP_SEC วินาที
+    route นี้มีไว้ตรวจสอบด้วยตา + สั่งยิงนอกรอบตอนอยากทดสอบ
+    """
+    if request.args.get("key", "") != IMPORT_KEY:
+        return jsonify({"ok": False, "error": "bad key"}), 403
+    def _int(name, dflt):
+        try:
+            return int(request.args.get(name, str(dflt)))
+        except Exception:
+            return dflt
+    dry = request.args.get("dry", "1") != "0"
+    try:
+        res = bot.sweep_followups(
+            send=None if dry else send_reply,
+            hours=_int("hours", 0), max_hours=_int("max_hours", 0),
+            dry=dry, cap=_int("cap", 0))
+        return jsonify(res)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
 

@@ -370,6 +370,40 @@ def list_handover(days: int = 3, limit: int = 300) -> list:
         return []
 
 
+def list_stale(min_hours: int = 20, max_hours: int = 23,
+               limit: int = 200) -> list:
+    """r51 — แชทที่เงียบมาแล้ว min_hours ชม. แต่ยังไม่เกิน max_hours
+
+    ขอบบน max_hours มีไว้กันชนหน้าต่าง 24 ชม. ของ Meta
+    เกินไปแล้วยิงยังไงก็ไม่ถึงลูกค้า ได้แค่ error 10 กลับมา
+    เรียงจากเงียบนานสุดก่อน — ถ้าติด cap ต่อรอบ อยากได้เคสที่ใกล้หมดเวลาก่อน
+    """
+    if not _can_read():
+        return []
+    lo, hi = int(min_hours), int(max_hours)
+    if hi <= lo:
+        hi = lo + 3
+    try:
+        with _read_lock:
+            conn = _read_get()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT page_id, psid, state, "
+                    "  EXTRACT(EPOCH FROM (now() - updated_at))/3600 AS hrs "
+                    "FROM sessions "
+                    "WHERE updated_at < now() - make_interval(hours => %s) "
+                    "AND updated_at > now() - make_interval(hours => %s) "
+                    "ORDER BY updated_at ASC LIMIT %s",
+                    (lo, hi, int(limit)))
+                rows = cur.fetchall()
+        return [{"page_id": r[0], "psid": r[1], "state": r[2],
+                 "hours": round(float(r[3] or 0), 1)}
+                for r in rows if isinstance(r[2], dict)]
+    except Exception as e:
+        _read_fail(e)
+        return []
+
+
 def load_raw(psid: str, limit: int = 300) -> list:
     """r50 — ข้อความดิบเรียงเก่า->ใหม่ พร้อมบอกว่าอันไหนเซลพิมพ์ (stage='human')"""
     if not _can_read() or not psid:
