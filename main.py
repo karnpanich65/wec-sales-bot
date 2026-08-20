@@ -312,11 +312,17 @@ def verify_fb_signature(body: bytes, signature: str) -> bool:
 # รวมทั้งเทิร์นไม่เกิน TYPING_BUDGET_SEC — ปรับได้จาก env ไม่ต้องแก้โค้ด
 # ปิดทั้งหมดด้วย TYPING_DELAY=0
 # ======================================================
+# r44 (Gift 20 ส.ค. 2026) — "อยากให้รู้สึกว่าพิมพ์ หยุด แล้วพิมพ์ต่อ นานกว่านี้หน่อย
+# เขาจะได้รู้สึกรอบ้าง ลุ้นบ้าง" -> ช้าลง + มีจังหวะหยุดจริงระหว่างบับเบิล
+# ทำได้เพราะย้ายการส่งไปเธรดเบื้องหลังแล้ว (ดู send_reply) webhook ตอบ 200 ทันที
+# ไม่งั้นหน่วงนานๆ Meta จะยิง event ซ้ำ = ลูกค้าได้ข้อความซ้ำ
 TYPING_ENABLED = os.environ.get("TYPING_DELAY", "1").strip() != "0"
-TYPING_BASE_SEC = float(os.environ.get("TYPING_BASE_SEC", "1.0"))
-TYPING_CPS = float(os.environ.get("TYPING_CPS", "18"))        # ตัวอักษร/วินาที
-TYPING_MAX_SEC = float(os.environ.get("TYPING_MAX_SEC", "3.5"))
-TYPING_BUDGET_SEC = float(os.environ.get("TYPING_BUDGET_SEC", "8"))
+TYPING_BASE_SEC = float(os.environ.get("TYPING_BASE_SEC", "1.8"))
+TYPING_CPS = float(os.environ.get("TYPING_CPS", "11"))        # ตัวอักษร/วินาที
+TYPING_MAX_SEC = float(os.environ.get("TYPING_MAX_SEC", "7"))
+TYPING_BUDGET_SEC = float(os.environ.get("TYPING_BUDGET_SEC", "26"))
+TYPING_READ_SEC = float(os.environ.get("TYPING_READ_SEC", "1.5"))   # อ่านก่อนเริ่มพิมพ์
+TYPING_GAP_SEC = float(os.environ.get("TYPING_GAP_SEC", "1.8"))     # หยุดระหว่างบับเบิล
 
 
 def send_sender_action(recipient_id: str, action: str, page_id: str = ""):
@@ -340,28 +346,73 @@ def _typing_pause(text: str) -> float:
     return min(TYPING_MAX_SEC, TYPING_BASE_SEC + len(text) / TYPING_CPS)
 
 
-def send_reply(recipient_id: str, text: str, page_id: str = ""):
+# ล็อกรายคน — กันสองข้อความของคนเดียวกันพิมพ์ทับกันจนสลับลำดับ
+_SEND_LOCKS: dict = {}
+_SEND_LOCKS_GUARD = threading.Lock()
+
+
+def _send_lock(recipient_id: str):
+    with _SEND_LOCKS_GUARD:
+        lk = _SEND_LOCKS.get(recipient_id)
+        if lk is None:
+            lk = threading.Lock()
+            _SEND_LOCKS[recipient_id] = lk
+            if len(_SEND_LOCKS) > 2000:
+                for k in [k for k, v in list(_SEND_LOCKS.items())
+                          if k != recipient_id and not v.locked()][:1000]:
+                    _SEND_LOCKS.pop(k, None)
+        return lk
+
+
+def _send_reply_blocking(recipient_id: str, text: str, page_id: str = ""):
     """ส่งคำตอบของบอท — แยกเป็นหลายบับเบิลถ้ามี MSG_SPLIT
 
     เหตุผล: คำถามที่อยู่รวมก้อนเดียวกับข้อความอื่นจะถูกลูกค้าสแกนผ่าน
     ส่งคำถามเป็นบับเบิลสุดท้ายเดี่ยวๆ ได้อัตราตอบกลับสูงกว่าชัดเจน
+
+    จังหวะ (r44): อ่านข้อความ -> พิมพ์ -> ส่ง -> หยุด -> พิมพ์ -> ส่ง
+    ช่วง "หยุด" ต้องไม่มี typing_on ลูกค้าถึงจะเห็นจุดไข่ปลาหายไปจริงๆ
     """
+    parts = [p.strip() for p in text.split(MSG_SPLIT) if p.strip()]
+    if not parts:
+        return
     budget = TYPING_BUDGET_SEC
-    for part in text.split(MSG_SPLIT):
-        part = part.strip()
-        if not part:
-            continue
+    with _send_lock(recipient_id):
         if TYPING_ENABLED and budget > 0.2:
-            pause = min(_typing_pause(part), budget)
-            send_sender_action(recipient_id, "typing_on", page_id)
-            time.sleep(pause)
-            budget -= pause
-        if not send_message(recipient_id, part, page_id):
-            # ส่งถึงคนนี้ไม่ได้แล้ว (บล็อกเพจ / ปิดบัญชี / หลุด 24 ชม.)
-            # บับเบิลที่เหลือก็ไม่ถึงเหมือนกัน ยิงต่อได้แค่ error ซ้ำ
-            print(f"[SEND ABORT] {_mask(recipient_id)} ติดต่อไม่ได้ "
-                  f"— ข้ามบับเบิลที่เหลือ")
-            break
+            # เห็นข้อความแล้ว แต่ยังไม่เริ่มพิมพ์ทันที = เหมือนคนกำลังอ่าน
+            send_sender_action(recipient_id, "mark_seen", page_id)
+            _read = min(TYPING_READ_SEC, budget)
+            time.sleep(_read)
+            budget -= _read
+        for i, part in enumerate(parts):
+            if TYPING_ENABLED and budget > 0.2:
+                if i:
+                    # หยุดพิมพ์ให้เห็นชัดก่อนขึ้นบับเบิลถัดไป
+                    gap = min(TYPING_GAP_SEC, budget)
+                    time.sleep(gap)
+                    budget -= gap
+                pause = min(_typing_pause(part), budget)
+                if pause > 0.2:
+                    send_sender_action(recipient_id, "typing_on", page_id)
+                    time.sleep(pause)
+                    budget -= pause
+            if not send_message(recipient_id, part, page_id):
+                # ส่งถึงคนนี้ไม่ได้แล้ว (บล็อกเพจ / ปิดบัญชี / หลุด 24 ชม.)
+                # บับเบิลที่เหลือก็ไม่ถึงเหมือนกัน ยิงต่อได้แค่ error ซ้ำ
+                print(f"[SEND ABORT] {_mask(recipient_id)} ติดต่อไม่ได้ "
+                      f"— ข้ามบับเบิลที่เหลือ")
+                break
+
+
+def send_reply(recipient_id: str, text: str, page_id: str = ""):
+    """ยิงในเธรดเบื้องหลัง — webhook จะได้ตอบ 200 ให้ Meta ภายในไม่กี่ ms
+
+    ถ้าหน่วงพิมพ์อยู่ใน request เลย Meta จะถือว่า timeout แล้วยิง event ซ้ำ
+    ลูกค้าจะได้ข้อความซ้ำสองรอบ — เคยเจอมาแล้วตอน budget 8 วิ
+    """
+    threading.Thread(target=_send_reply_blocking,
+                     args=(recipient_id, text, page_id),
+                     daemon=True).start()
 
 
 # Meta บอกว่า "ส่งถึงคนนี้ไม่ได้อีกแล้ว" — ยิงซ้ำก็ได้ error เดิม
