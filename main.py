@@ -209,6 +209,15 @@ except Exception as _e:
     print(f"[KEEPWARM BOOT ERROR] {_e}")
 
 
+# ======================================================
+# r55b — บอกให้ชัดว่า "ตอนนี้เครื่องกำลังรันโค้ดรอบไหน"
+# คืน 20 ส.ค. 2026 เจอปัญหา: merge แล้วแต่ Railway ไม่หยิบไป deploy
+# มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
+# ดูได้ที่ log ตอนบูต หรือเปิด /health
+# ======================================================
+BOT_REVISION = "r55"
+print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
+
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
 FB_APP_SECRET = os.environ.get("FB_APP_SECRET", "")  # เว้นว่าง = dev mode (ข้าม signature check)
 GIFT_FB_PSID = os.environ.get("GIFT_FB_PSID", "")
@@ -1142,7 +1151,7 @@ to you and delete everything else.</p>
 def health():
     # เพิ่ม 19 ส.ค. 2026 — ใช้ดูว่า Postgres เฟส 1 เขียนเข้าจริงไหม
     # เปิด /health?pg=1 แล้วดู written เพิ่มขึ้นเรื่อยๆ errors ต้องเป็น 0
-    out = {"status": "ok"}
+    out = {"status": "ok", "revision": BOT_REVISION}
     if request.args.get("pg"):
         try:
             from bot_logic import pg_store
