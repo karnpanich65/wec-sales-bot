@@ -83,6 +83,7 @@ from faq_data import (
     CO_SELF_EMP_Q, CONTACT_GOT_MSG, COOP_Q,
     ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
     GUARD_FALLBACK_MSG,
+    FOLLOWUP_OPEN, FOLLOWUP_OPEN_PLAIN,
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1776,15 +1777,31 @@ def _name_from_reply(msg: str) -> str:
 # ======================================================================
 HANDOVER_TRIGGERS = ("ที่ปรึกษา", "#รับเคส", "#หยุดบอท", "#takeover")
 
-# หยุดกี่วัน — ครบแล้วบอทกลับมาตอบเอง (นับจากตอนเซลทักครั้งแรกของแชทนั้น)
-HANDOVER_DAYS = 3
-HANDOVER_TTL_SEC = HANDOVER_DAYS * 86400
+# หยุดกี่ชั่วโมง — ครบแล้วบอทกลับมาตอบเอง (นับจากตอนเซลทักครั้งแรกของแชทนั้น)
+# r51 (Gift 20 ส.ค. 2026) — "เซลล์เข้าแทรก ปิดบอทแค่ 6 ชั่วโมงพอ"
+# ของเดิม 3 วัน = เซลแวะทักทีเดียวแล้วหายไป เคสค้างเงียบข้ามสัปดาห์
+# กลับมาแล้วต้อง "ต่อเนื่อง" ไม่ใช่เริ่มใหม่ -> ดู _resume_context + r49 absorb
+HANDOVER_HOURS = int(os.environ.get("HANDOVER_HOURS", "6"))
+HANDOVER_TTL_SEC = HANDOVER_HOURS * 3600
+HANDOVER_LABEL = (f"{HANDOVER_HOURS} ชั่วโมง" if HANDOVER_HOURS < 24
+                  else f"{HANDOVER_HOURS // 24} วัน")
 # เก็บบทสนทนาช่วงเซลดูแลไว้กี่ท่อน -> ใช้ต่อบริบทตอนบอทกลับมา
 HANDOVER_LOG_MAX = 20
 # r49 — ถ้าลูกค้าไม่ให้เบอร์เลย รออย่างน้อยกี่ข้อความก่อนแจกเคสแบบไม่มีเบอร์
 # (ยิงเร็วเกินไป = ได้แถวที่ข้อมูลบางมาก · ยิงช้าเกินไป = รีพอร์ตนับไม่เห็น)
 HANDOVER_LEAD_MIN_MSGS = int(os.environ.get("HANDOVER_LEAD_MIN_MSGS", "6"))
 HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
+
+# ----------------------------------------------------------------------
+# r51 — ทักกลับเคสที่เงียบไปแต่ข้อมูลยังไม่ครบ (ครั้งเดียวจบ)
+# 20 ชม. ไม่ใช่ 2 วัน: Meta ปิดหน้าต่างส่งข้อความที่ 24 ชม. และ main.py
+# ส่งแบบ messaging_type=RESPONSE ไม่มี message tag -> เกินแล้วยิงไม่ผ่าน
+# ขอบบน 23 ชม. = กันชนไว้ 1 ชม. เผื่อคิวส่ง/หน่วงพิมพ์
+# ----------------------------------------------------------------------
+FOLLOWUP_HOURS = int(os.environ.get("FOLLOWUP_HOURS", "20"))
+FOLLOWUP_MAX_HOURS = int(os.environ.get("FOLLOWUP_MAX_HOURS", "23"))
+# เพดานต่อรอบกวาด — บั๊กตัวเดียวห้ามยิงหาลูกค้าเป็นร้อยคนพร้อมกัน
+FOLLOWUP_MAX_PER_RUN = int(os.environ.get("FOLLOWUP_MAX_PER_RUN", "20"))
 
 # ชื่อเซลรายเพจ (Gift 18 ส.ค.: "ตามชื่อเซลแต่ละเพจเลยนะ")
 # ทักด้วยชื่อตัวเอง เช่น "สวัสดีค่ะ ที่ปรึกษาเจี๊ยบค่ะ" หรือ "สวัสดีครับ ป๊อปครับ"
@@ -1932,7 +1949,7 @@ class BotEngine:
         self._ensure_fb_name(user_id, state)
 
         # เซลรับช่วงแชทนี้แล้ว -> ไม่ตอบอัตโนมัติ แต่ยังเก็บ log ครบ
-        # ครบ HANDOVER_DAYS วัน -> ปลดล็อกเอง บอทคุยต่อจากของเดิม
+        # ครบ HANDOVER_HOURS ชม. -> ปลดล็อกเอง บอทคุยต่อจากของเดิม
         if state.get("handover"):
             _hat = int(state.get("handover_at") or 0)
             if not _hat:
@@ -1941,6 +1958,10 @@ class BotEngine:
             _hage = _now() - _hat
             if _hage < HANDOVER_TTL_SEC:
                 self._handover_note(state, "cust", user_message)
+                # r51 — นับไว้ว่าลูกค้าพิมพ์อะไรระหว่างเซลดูแลกี่ข้อความ
+                # ใช้ตอนหมดเวลา: ถ้ามีการคุยกันจริง คำถามที่บอทค้างไว้
+                # ก่อนเซลแทรก ถือว่าตกยุคแล้ว ห้ามเอาคำตอบใหม่ไปลงช่องเก่า
+                state["handover_cust"] = int(state.get("handover_cust") or 0) + 1
                 self._log(user_id, user_message, "")
                 self._persist(user_id, state, user_message, "(เซลดูแลเอง — บอทไม่ตอบ)", bucket)
                 # r38 — ตอนเซลรับช่วง เดิมข้ามการเขียน Postgres ทำให้ประวัติขาดช่วง
@@ -1958,19 +1979,41 @@ class BotEngine:
                     self._handover_absorb(user_id, state, user_message)
                 except Exception as _hfe:
                     print(f"[HANDOVER ABSORB ERROR] {_hfe}")
-                _left = int((HANDOVER_TTL_SEC - _hage) / 3600)
+                _left = round((HANDOVER_TTL_SEC - _hage) / 3600, 1)
                 print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
                       f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
                 return "", None
             # หมดเวลาแล้ว — คืนแชทให้บอท พร้อมบริบทเดิม
+            # r51 (Gift 20 ส.ค. 2026): "กลับมาต้องต่อเนื่อง อ่านล็อกทั้งหมดที่คุย
+            # ถ้าจบข้อมูลได้แล้ว ผ่านเกณฑ์ คำนวณสกอร์ได้ ได้ข้อมูลติดต่อแล้ว
+            # ก็ไม่ต้องทำอะไร แต่ถ้าไม่ ไม่ถามคำถามเดิมที่ได้ข้อมูลแล้ว
+            # เก็บส่วนที่ขาดอย่างเดียว"
             state["handover"] = False
             state["handover_ended_at"] = _now()
+            _hcust = int(state.get("handover_cust") or 0)
             self._add_signal(
                 state,
-                f"ครบ {HANDOVER_DAYS} วันหลังเซลรับช่วง — บอทกลับมาตอบต่อจากเดิม")
+                f"ครบ {HANDOVER_LABEL}หลังเซลรับช่วง — บอทกลับมาตอบต่อจากเดิม")
+            # กู้บทสนทนาช่วงเซลคุยกลับเข้าความจำ -> ไม่ทักทายใหม่ ไม่ถามซ้ำ
             self._resume_context(user_id, state)
-            print(f"[HANDOVER EXPIRED] {user_id[:8]}... ครบ {HANDOVER_DAYS} วัน "
-                  f"บอทกลับมาตอบเอง")
+            # คำถามที่บอทค้างไว้ "ก่อน" เซลแทรก ใช้ไม่ได้แล้วถ้าคุยกันไปหลายข้อความ
+            # ปล่อยไว้ = คำตอบของลูกค้าจะถูกยัดลงช่องผิด (เช่น ตอบเรื่องอาชีพ
+            # แต่ระบบยังรอ "เบอร์โทร" อยู่) -> ล้างทิ้ง ให้ _next_missing คิดใหม่
+            if _hcust:
+                state["awaiting"] = None
+                state["last_q"] = ""
+            _d = state.get("data") or {}
+            _f_left, _ = self._next_missing(_d, state)
+            if state.get("lead_sent") and _d.get("contact") and not _f_left:
+                # ข้อมูลครบ + แจกเคสให้เซลไปแล้ว = ไม่มีอะไรต้องถามอีก
+                # เงียบไว้ แต่ยังตอบถ้าลูกค้าถามจริง (ประตู closed เดิม)
+                self._close_chat(state)
+                self._add_signal(state, "ข้อมูลครบแล้วตั้งแต่ช่วงเซลดูแล — บอทไม่ถามซ้ำ")
+                print(f"[HANDOVER DONE] {user_id[:8]}... ครบ {HANDOVER_LABEL} "
+                      f"ข้อมูลครบแล้ว บอทเงียบต่อ ไม่ถามซ้ำ")
+            else:
+                print(f"[HANDOVER EXPIRED] {user_id[:8]}... ครบ {HANDOVER_LABEL} "
+                      f"บอทกลับมาตอบเอง (ยังขาด: {_f_left or '-'})")
 
         bubbles, grade = self._decide(user_message, user_id, state, bucket, is_new)
 
@@ -2886,6 +2929,11 @@ class BotEngine:
                 "handover_at": state.get("handover_at", 0),
                 "handover_log": state.get("handover_log", []),
                 "handover_by": state.get("handover_by", ""),
+                # r51 — ธงพวกนี้ต้องรอดข้าม restart ด้วย
+                # followup_sent หายเมื่อไหร่ = ทักลูกค้าซ้ำรอบสอง
+                "handover_cust": state.get("handover_cust", 0),
+                "followup_sent": state.get("followup_sent", False),
+                "followup_at": state.get("followup_at", 0),
                 "ncb_kind": state.get("ncb_kind", ""),
                 # r39 — จำคำถามล่าสุดข้าม restart ไม่งั้น deploy ทีนึง
                 # กันถามซ้ำหลุดทันที (ดูบล็อก NO REPEAT ที่ :2185)
@@ -4066,13 +4114,14 @@ class BotEngine:
             state["handover_at"] = _now()
             result = "handover"
             state["handover_log"] = []
+            state["handover_cust"] = 0      # r51 — นับข้อความลูกค้ารอบนี้ใหม่
             _who = _who_greeted(text, page_id) or _who_typed(text, page_id)
             if _who:
                 state["handover_by"] = _who
             self._add_signal(
                 state,
                 (f"เซล{_who} " if _who else "เซล")
-                + f"เข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_DAYS} วัน")
+                + f"เข้ารับช่วงคุยเอง — บอทหยุดตอบแชทนี้ {HANDOVER_LABEL}")
             print(f"[HANDOVER ON] {customer_id[:8]}... "
                   f"เซล{_who or '(ไม่ระบุชื่อ)'} รับช่วงแล้ว | {text[:40]!r}")
         if state.get("handover"):
@@ -4191,6 +4240,206 @@ class BotEngine:
         print(f"[HANDOVER LEAD] {user_id[:8]}... แจกเคสอัตโนมัติระหว่างเซลดูแล "
               f"— เกรด {_g} · เบอร์ {'มี' if data.get('contact') else 'ยังไม่มี'}")
         return True
+
+    # ==================================================================
+    # r51 (Gift 20 ส.ค. 2026) — ทักกลับเคสที่เงียบไป แต่ข้อมูลยังไม่ครบ
+    # "ถ้าข้อมูลที่เค้าส่งมาล่าสุดยังไม่ครบ และขาดการติดต่อไป ให้ทักหาลูกค้า"
+    #
+    # เงื่อนไขที่ตกลงกันไว้ (ห้ามเพี้ยน):
+    #   · ทักครั้งเดียวจบ ไม่ตื๊อ           -> ธง followup_sent
+    #   · เปิดด้วยการทวนสิ่งที่เขาเคยบอก      -> _recap()
+    #   · ขอเฉพาะ "ข้อที่ยังไม่เคยตอบ"       -> _next_missing() ตัวเดียวกับตอนคุยสด
+    #   · ยิงที่ 20 ชม. ไม่ใช่ 2 วัน         -> Meta ปิดหน้าต่างที่ 24 ชม.
+    # ==================================================================
+    # ธงที่เจอแล้ว "ห้ามทัก" — เรียงจากที่เจอบ่อยสุด
+    _FOLLOWUP_SKIP = (
+        ("handover",        "เซลกำลังดูแลอยู่"),
+        ("lead_sent",       "แจกเคสให้เซลแล้ว"),
+        ("closed",          "ปิดจบไปแล้ว"),
+        ("done",            "ปิดเคสแล้ว"),
+        ("soft_close",      "ปิดสุภาพไปแล้ว"),
+        ("below_threshold", "ยังไม่ถึงเกณฑ์"),
+        ("followup_sent",   "ทักตามไปแล้ว 1 ครั้ง"),
+        ("owner",           "เจ้าของห้องฝากขาย ไม่ใช่ลีดซื้อ"),
+        ("renter",          "ผู้เช่า ไม่ใช่ลีดซื้อ"),
+        ("ncb_hard",        "ติดแบล็คลิสต์ — ปิดไปแล้ว"),
+    )
+
+    def _recap_short(self, data: dict) -> str:
+        """ทวนสั้นๆ สำหรับข้อความทักกลับ
+
+        ต่างจาก _recap ตรงที่ตัดคำซ้ำออก — ลูกค้าพิมพ์มาเองว่า "สนใจคอนโด..."
+        ถ้าเอาไปต่อท้าย "สนใจ" ตรงๆ จะได้ "สนใจสนใจคอนโด" อ่านแล้วเหมือนบอทเสีย
+        """
+        parts = []
+        obj = self._tidy(data.get("objective", ""))
+        inc = self._tidy(data.get("income", ""))
+        if obj:
+            obj = re.sub(r"^(สนใจ|อยาก|ต้องการ|กำลังหา|มองหา)\s*", "", obj).strip()
+            if obj:
+                parts.append(f"สนใจ{obj}")
+        if inc and not data.get("income_unknown"):
+            parts.append(inc)
+        return " ".join(parts)
+
+    def build_followup(self, state: dict) -> tuple[str, str]:
+        """สร้างข้อความทักกลับ — คืน (ข้อความพร้อมส่ง, ชื่อฟิลด์ที่ขาด)
+
+        ไม่มีข้อไหนต้องถามต่อ = คืน ("", "") แปลว่า "ไม่ต้องทัก"
+        ใช้ _next_missing ตัวเดียวกับตอนคุยสด จึงไม่มีทางถามข้อที่ตอบไปแล้ว
+        """
+        data = state.get("data") or {}
+        field, question = self._next_missing(data, state)
+        if not question:
+            return "", ""
+        recap = self._recap_short(data)
+        parts = [FOLLOWUP_OPEN.format(recap=f" {recap} ") if recap
+                 else FOLLOWUP_OPEN_PLAIN, question]
+        if state.get("gender") == "female":
+            parts = [to_female(x) for x in parts]
+        safe = []
+        for x in parts:
+            ok, bad = _public_guard(x)
+            if ok:
+                safe.append(x)
+            else:
+                print(f"[FOLLOWUP GUARD] ตัดบับเบิลที่มีคำต้องห้าม {bad!r}")
+        if len(safe) < 2:
+            return "", ""       # เหลือแต่คำทักทาย ไม่มีคำถาม = ไม่ต้องส่ง
+        return MSG_SPLIT.join(safe), field or ""
+
+    def followup_candidates(self, hours: int = 0, max_hours: int = 0,
+                            limit: int = 200) -> dict:
+        """สแกนหาเคสที่ควรทักกลับ — ดูอย่างเดียว ไม่ส่งอะไรทั้งนั้น"""
+        if pg_store is None:
+            return {"ok": False, "error": "pg_store ใช้ไม่ได้"}
+        lo = int(hours or FOLLOWUP_HOURS)
+        hi = int(max_hours or FOLLOWUP_MAX_HOURS)
+        if hi <= lo:
+            hi = lo + 3
+        out = {"ok": True, "window_hours": [lo, hi], "scanned": 0,
+               "ready": [], "skipped": []}
+        for row in pg_store.list_stale(lo, hi, limit):
+            out["scanned"] += 1
+            psid = str(row.get("psid") or "")
+            page_id = str(row.get("page_id") or "")
+            state = row.get("state") or {}
+            if not psid or not isinstance(state, dict):
+                continue
+            why = ""
+            for flag, label in self._FOLLOWUP_SKIP:
+                if state.get(flag):
+                    why = label
+                    break
+            if not why:
+                data = state.get("data") or {}
+                # ยังไม่เคยตอบอะไรเลย = ไม่มีอะไรให้ทวน ทักไปก็เหมือนสแปม
+                if not any(data.get(f) for f in FIELD_ORDER):
+                    why = "ยังไม่เคยให้ข้อมูลอะไรเลย"
+            if why:
+                out["skipped"].append({"psid": psid[:8], "why": why})
+                continue
+            text, field = self.build_followup(state)
+            if not text:
+                out["skipped"].append({"psid": psid[:8],
+                                       "why": "ตอบครบแล้ว ไม่มีข้อให้ถามต่อ"})
+                continue
+            out["ready"].append({
+                "psid": psid, "page_id": page_id, "field": field,
+                "hours": row.get("hours"),
+                "recap": self._recap(state.get("data") or {})[:60],
+                "text": text, "_state": state,
+            })
+        out["ready_count"] = len(out["ready"])
+        out["skipped_count"] = len(out["skipped"])
+        return out
+
+    def sweep_followups(self, send=None, hours: int = 0, max_hours: int = 0,
+                        dry: bool = True, cap: int = 0) -> dict:
+        """กวาดรอบหนึ่ง แล้วทักกลับ
+
+        send(psid, text, page_id) = ฟังก์ชันส่งจริง (main.py ส่ง send_reply มาให้)
+        dry=True หรือไม่ส่ง send มา -> ดูรายการอย่างเดียว ไม่ยิงหาลูกค้าเลย
+        """
+        res = self.followup_candidates(hours, max_hours)
+        if not res.get("ok"):
+            return res
+        cap = int(cap or FOLLOWUP_MAX_PER_RUN)
+        res.update({"dry": bool(dry), "cap": cap, "sent": 0})
+        for it in res["ready"]:
+            snap = it.pop("_state", None)
+            text = it.get("text") or ""
+            if dry or send is None:
+                continue
+            if res["sent"] >= cap:
+                it["skipped_by_cap"] = True
+                it.pop("text", None)
+                continue
+            psid, page_id = it["psid"], it["page_id"]
+            skey = f"{page_id}:{psid}" if page_id else psid
+            st = _lead_states.get(skey)
+            if st is not None:
+                # RAM คือของจริง — ลูกค้าอาจเพิ่งคุยต่อ/เซลเพิ่งรับช่วงหลังเราอ่าน DB
+                blocked = next((lbl for fl, lbl in self._FOLLOWUP_SKIP
+                                if st.get(fl)), "")
+                if blocked:
+                    it["ok"] = False
+                    it["error"] = f"สถานะเปลี่ยนแล้ว ({blocked}) — ไม่ทัก"
+                    it.pop("text", None)
+                    continue
+                text, _fld = self.build_followup(st)
+                if not text:
+                    it["ok"] = False
+                    it["error"] = "ตอบครบแล้วระหว่างนี้ — ไม่ทัก"
+                    it.pop("text", None)
+                    continue
+                it["field"] = _fld
+            else:
+                st = snap
+            if st is None:
+                it["ok"] = False
+                it["error"] = "โหลด state ไม่ได้"
+                it.pop("text", None)
+                continue
+            # ปักธงก่อนส่ง — ส่งพลาดยังดีกว่าส่งซ้ำสองรอบ
+            st["followup_sent"] = True
+            st["followup_at"] = _now()
+            _fld = it.get("field") or ""
+            if _fld:
+                st["awaiting"] = _fld
+                _asked = st.setdefault("asked", {})
+                _asked[_fld] = _asked.get(_fld, 0) + 1
+                st["last_q"] = text.split(MSG_SPLIT)[-1]
+            st["page_id"] = page_id or st.get("page_id", "")
+            self._add_signal(st, f"บอททักกลับเองหลังเงียบไป ~{it.get('hours')} ชม. "
+                                 f"— ขอข้อมูลที่ยังขาด ({_fld or '-'})")
+            _lead_states[skey] = st
+            try:
+                send(psid, text, page_id)
+                it["ok"] = True
+                res["sent"] += 1
+                print(f"[FOLLOWUP SENT] {psid[:8]}... เงียบ {it.get('hours')} ชม. "
+                      f"ขอข้อ {_fld or '-'}")
+            except Exception as e:
+                it["ok"] = False
+                it["error"] = str(e)[:150]
+                print(f"[FOLLOWUP SEND ERROR] {psid[:8]}...: {e}")
+            try:
+                self._persist(psid, st, "", "(บอททักกลับเอง) " + text[:150],
+                              "followup")
+            except Exception as e:
+                print(f"[FOLLOWUP PERSIST] {e}")
+            if pg_store is not None:
+                try:
+                    pg_store.save_turn(page_id, psid, st, "", text,
+                                       "followup", _hash_psid(psid))
+                except Exception as e:
+                    print(f"[FOLLOWUP PG] {e}")
+            it.pop("text", None)
+        if dry:
+            for it in res["ready"]:
+                it.pop("text", None)
+        return res
 
     def recover_handover_leads(self, days: int = 3, dry: bool = True) -> dict:
         """r50 (Gift 20 ส.ค. 2026) — ดึงเคสที่เซลรับช่วง "ก่อน r49" กลับมาแจก
