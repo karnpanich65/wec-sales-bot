@@ -76,7 +76,8 @@ from faq_data import (
     FAQ_DATABASE, WEC_SYSTEM_PROMPT, QUALIFY_QUESTIONS, QUALIFY_TRIGGERS,
     DISQUALIFY_KEYWORDS, WELCOME_MSG, FALLBACK_MSG, BRAND_NAME,
     MSG_SPLIT, RETURNING_MSG, DONE_MSG, STATUS_MSG,
-    CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, TIER2_GUARD_MSG,
+    CONTACT_REFUSED_MSG, CASH_BUYER_MSG, CASH_INVITE_MSG, CASH_BUDGET_Q,
+    TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
     CO_SELF_EMP_Q, CONTACT_GOT_MSG, COOP_Q,
@@ -2316,9 +2317,34 @@ class BotEngine:
             data.setdefault("income", "ซื้อเงินสด")
             data.setdefault("debt", "-")
             state["awaiting"] = None
-            state["cash_invited"] = True
             self._upsert_lead(state)
             bubbles.append(CASH_BUYER_MSG)
+            # r50 (Gift 20 ส.ค. 2026) — สายเงินสดต้องรู้ "งบ" ก่อนชวนนัดดูห้อง
+            # เคสจริงคุณ Ratana: ตอบ "จ่ายสด" แล้วบอทข้ามไปนัดดูห้องเลย
+            # ยังไม่รู้งบ = คัดห้องให้ไม่ได้ เซลต้องไปเริ่มถามใหม่ตอนนัด
+            if data.get("cash_budget"):
+                state["cash_invited"] = True
+                bubbles.append(CASH_INVITE_MSG)
+            else:
+                state["awaiting"] = "cash_budget"
+                bubbles.append(CASH_BUDGET_Q)
+            return bubbles, None
+
+        # ข.1) ตอบงบของสายเงินสดกลับมา -> เก็บงบ แล้วค่อยชวนนัดดูห้อง
+        if (state.get("awaiting") == "cash_budget" and data.get("cash")
+                and not self._is_question(msg)):
+            _amts = _all_amounts(msg)
+            _bud = max(_amts) if _amts else None
+            if _bud is not None:
+                data["cash_budget"] = _bud
+                data["debt"] = f"งบเงินสด {_bud:,}"
+                self._add_signal(state, f"ซื้อเงินสด งบประมาณ {_bud:,}")
+            else:
+                self._add_signal(state, f"ซื้อเงินสด งบที่ลูกค้าบอก: {msg[:60]}")
+                data["cash_budget"] = msg[:60]
+            state["awaiting"] = None
+            state["cash_invited"] = True
+            self._upsert_lead(state)
             bubbles.append(CASH_INVITE_MSG)
             return bubbles, None
 
@@ -3697,7 +3723,8 @@ class BotEngine:
                              state.get("sheet_tab", ""),
                              signals=state.get("signals", []),
                              contact_refused=state.get("contact_refused", False),
-                             calendar=calendar)
+                             calendar=calendar,
+                             sale=state.get("handover_by", ""))
         state["lead_sent"] = True
         return grade
 
@@ -4049,6 +4076,17 @@ class BotEngine:
             print(f"[HANDOVER ON] {customer_id[:8]}... "
                   f"เซล{_who or '(ไม่ระบุชื่อ)'} รับช่วงแล้ว | {text[:40]!r}")
         if state.get("handover"):
+            # r50 (Gift 20 ส.ค. 2026) — "มีพิมพ์พี่เจี๊ยบ ก็ควรให้พี่เจี๊ยบนะ"
+            # เดิมจับชื่อเฉพาะข้อความแรกที่ทำให้เกิด handover
+            # แต่ข้อความแรกมักเป็นคำถามคัดกรองสำเร็จรูปที่ไม่มีชื่ออยู่เลย
+            # (ทั้ง 9 ห้องวันที่ 20 ส.ค. log ขึ้นว่า "เซล(ไม่ระบุชื่อ)")
+            # เซลมาแนะนำตัวทีหลัง เช่น "พี่เจี๊ยบเองค่ะ" -> ต้องจับให้ทัน
+            if not state.get("handover_by"):
+                _w2 = _who_greeted(text, page_id) or _who_typed(text, page_id)
+                if _w2:
+                    state["handover_by"] = _w2
+                    self._add_signal(state, f"เซลที่ดูแลเคสนี้: {_w2}")
+                    print(f"[HANDOVER BY] {customer_id[:8]}... = {_w2}")
             self._handover_note(state, "sale", text)
         _lead_states[skey] = state
         # เก็บข้อความของเซลลง Chat_Log ด้วย (ไม่ให้ log ขาดช่วง)
@@ -4066,7 +4104,8 @@ class BotEngine:
                 print(f"[PG] save_human พลาด: {_pe}")
         return result
 
-    def _handover_absorb(self, user_id: str, state: dict, msg: str) -> bool:
+    def _handover_absorb(self, user_id: str, state: dict, msg: str,
+                         dispatch: bool = True) -> bool:
         """r49 (Gift เคาะ 20 ส.ค. 2026) — เซลรับช่วง = บอทเงียบ "แต่ไม่หยุดทำงาน"
 
         เงียบ = ไม่ถาม ไม่ตอบลูกค้า (เซลคุยอยู่ ห้ามพูดทับ)
@@ -4144,12 +4183,102 @@ class BotEngine:
             state,
             (f"เซล{_who} รับช่วงคุยเอง" if _who else "เซลรับช่วงคุยเอง")
             + " — บอทเงียบกับลูกค้า แต่เก็บข้อมูลและแจกเคสให้อัตโนมัติ")
+        if not dispatch:
+            return True          # โหมดดูอย่างเดียว — จะแจก แต่ยังไม่เขียนอะไร
         # calendar ตามเคสปกติ: มีเบอร์ = นัดโทร · ไม่มีเบอร์ = ลงชีตอย่างเดียว
         _g = self._finish(user_id, state, data.get("contact", ""),
                           calendar=bool(data.get("contact")))
         print(f"[HANDOVER LEAD] {user_id[:8]}... แจกเคสอัตโนมัติระหว่างเซลดูแล "
               f"— เกรด {_g} · เบอร์ {'มี' if data.get('contact') else 'ยังไม่มี'}")
         return True
+
+    def recover_handover_leads(self, days: int = 3, dry: bool = True) -> dict:
+        """r50 (Gift 20 ส.ค. 2026) — ดึงเคสที่เซลรับช่วง "ก่อน r49" กลับมาแจก
+
+        ก่อน r49 ช่วง handover บอทข้ามการอ่านข้อความทั้งก้อน -> ไม่มีแถวลีด
+        เซลไม่ได้รับงาน และรีพอร์ตนับไม่เห็น (วันที่ 20 ส.ค. ตกไป 9 ห้อง)
+        ข้อความยังอยู่ครบใน Postgres — r38 เขียนไว้ทั้งฝั่งลูกค้าและฝั่งเซล
+        จึงเล่นซ้ำได้
+
+        dry=True  -> ดูรายการอย่างเดียว ไม่เขียนชีต ไม่แตะ state จริง
+        dry=False -> แจกจริง (เขียนแถวลีด + นัดโทร) แล้วบันทึก state กลับ
+        ไม่ว่าโหมดไหน "ไม่ส่งข้อความหาลูกค้าเด็ดขาด" — เซลคุยอยู่
+        """
+        if pg_store is None:
+            return {"ok": False, "error": "pg_store ใช้ไม่ได้"}
+        out = {"ok": True, "dry": dry, "days": days,
+               "scanned": 0, "recovered": [], "skipped": []}
+        for row in pg_store.list_handover(days=days):
+            out["scanned"] += 1
+            psid = str(row.get("psid") or "")
+            page_id = str(row.get("page_id") or "")
+            state = row.get("state") or {}
+            if not psid:
+                continue
+            if state.get("lead_sent"):
+                out["skipped"].append({"psid": psid[:8], "why": "แจกไปแล้ว"})
+                continue
+            msgs = pg_store.load_raw(psid)
+            if not msgs:
+                out["skipped"].append({"psid": psid[:8], "why": "ไม่มีข้อความใน Postgres"})
+                continue
+            if dry:
+                state = json.loads(json.dumps(state, ensure_ascii=False, default=str))
+            state.setdefault("data", {})
+            state.setdefault("signals", [])
+            state.setdefault("asked", {})
+            state["page_id"] = page_id or state.get("page_id", "")
+            # หาชื่อเซลจากข้อความที่เซลพิมพ์ — ดูทุกข้อความ ไม่ใช่แค่อันแรก
+            if not state.get("handover_by"):
+                for m in msgs:
+                    if m.get("stage") != "human" and not str(m.get("text", "")).startswith("["):
+                        continue
+                    _t = str(m.get("text", "")).split("]", 1)[-1]
+                    _w = _who_greeted(_t, page_id) or _who_typed(_t, page_id)
+                    if _w:
+                        state["handover_by"] = _w
+                        break
+            # เริ่มนับใหม่ทุกครั้ง ไม่งั้นธงเก่าจะกันไม่ให้แจก
+            for _k in ("handover_lead_done", "handover_lead_partial",
+                       "handover_lead_contact"):
+                state.pop(_k, None)
+            state["handover_msgs"] = 0
+            would = False
+            for m in msgs:
+                if m.get("role") != "user":
+                    continue
+                t = str(m.get("text") or "").strip()
+                if not t:
+                    continue
+                try:
+                    if self._handover_absorb(psid, state, t, dispatch=not dry):
+                        would = True
+                except Exception as e:
+                    print(f"[RECOVER] {psid[:8]}... absorb พลาด: {e}")
+            d = state.get("data", {})
+            item = {"psid": psid[:8], "page_id": page_id,
+                    "sale": state.get("handover_by") or "(ไม่ระบุชื่อ)",
+                    "contact": d.get("contact") or "",
+                    "objective": (d.get("objective") or "")[:40],
+                    "income": (d.get("income") or "")[:40],
+                    "grade": d.get("grade") or "",
+                    "msgs": sum(1 for m in msgs if m.get("role") == "user")}
+            if would:
+                out["recovered"].append(item)
+                if not dry:
+                    try:
+                        pg_store.save_turn(page_id, psid, state, "", "", "recover",
+                                           _hash_psid(psid))
+                    except Exception as e:
+                        print(f"[RECOVER] {psid[:8]}... บันทึก state พลาด: {e}")
+            else:
+                item["why"] = "ข้อมูลไม่พอจะแจก"
+                out["skipped"].append(item)
+        out["recovered_count"] = len(out["recovered"])
+        out["skipped_count"] = len(out["skipped"])
+        print(f"[RECOVER] scan {out['scanned']} · แจกได้ {out['recovered_count']} "
+              f"· ข้าม {out['skipped_count']} · dry={dry}")
+        return out
 
     @staticmethod
     def _handover_note(state: dict, who: str, text: str):
@@ -4363,7 +4492,8 @@ class BotEngine:
                         fb_name: str = "", referral: dict | None = None,
                         platform: str = "facebook", page_id: str = "",
                         sheet_tab: str = "", signals=None,
-                        contact_refused: bool = False, calendar: bool = True):
+                        contact_refused: bool = False, calendar: bool = True,
+                        sale: str = ""):
         """POST lead ชุดเต็มไป Apps Script -> Sheets + Calendar (schema เดิม)"""
         if not APPS_SCRIPT_URL:
             print("[SHEETS] APPS_SCRIPT_URL not set — skipped")
@@ -4388,6 +4518,8 @@ class BotEngine:
             "cash":          "ใช่" if data.get("cash") else "",
             "no_call":       "ไม่สะดวกให้โทร" if contact_refused else "",
             "no_calendar":   "1" if not calendar else "",
+            # r50 — เซลที่รับช่วงคุยเองแล้ว ต้องได้เคสนี้ ไม่ใช่วนคิวไปหาคนอื่น
+            "sale":          sale or "",
             **self._income_numbers(data),
         }
         try:
