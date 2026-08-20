@@ -1781,13 +1781,24 @@ def _name_from_log(state: dict, user_id: str = "") -> str:
             t = (t or "").strip()
             if not t:
                 continue
-            nm = _name_from_contact_msg(t)
-            if nm:
-                return nm
-            if "ชื่อ" in t:
-                nm = _name_from_reply(t)
+            # r53 — บั๊กที่ผมทำพังใน r52: _name_from_contact_msg ตัดเลข/ไอดีทิ้ง
+            # แล้วเอา "อะไรก็ตามที่เหลือ" เป็นชื่อ -> "ทำงานประจำครับ"
+            # กลายเป็นชื่อลูกค้าว่า "ทำงานประจำ" (เจอจริงตอนเทสต์เคสพี่บ่าว)
+            # ใช้ฟังก์ชันนี้ได้เฉพาะข้อความที่มีเบอร์/ไอดีจริงเท่านั้น
+            if _looks_like_phone(t) or len(re.sub(r"\D", "", t)) >= 6:
+                nm = _name_from_contact_msg(t)
                 if nm:
                     return nm
+            # พูดคำว่า "ชื่อ" มาตรงๆ -> จับเฉพาะคำถัดจาก "ชื่อ" คำเดียว
+            # ("ชื่อกิ๊กค่ะ สนใจห้องแถวรัชดา" ต้องได้ "กิ๊ก" ไม่ใช่ทั้งประโยค)
+            if "ชื่อ" in t:
+                g = re.search(r"ชื่อ(?:เล่น)?\s*(?:ว่า)?\s*"
+                              r"([A-Za-zก-๙][A-Za-zก-๙์ิีึืุูัํ็่้๊๋]{1,24})", t)
+                if g:
+                    cand = _clean_name_token(g.group(1))
+                    if _looks_like_name(cand):
+                        return cand
+            # ฝั่งเราเพิ่งถามชื่อไป -> ข้อความถัดมาถือว่าเป็นคำตอบชื่อได้
             if asked:
                 nm = _name_from_reply(t)
                 if nm:
@@ -1871,6 +1882,11 @@ HANDOVER_LOG_MAX = 20
 # r49 — ถ้าลูกค้าไม่ให้เบอร์เลย รออย่างน้อยกี่ข้อความก่อนแจกเคสแบบไม่มีเบอร์
 # (ยิงเร็วเกินไป = ได้แถวที่ข้อมูลบางมาก · ยิงช้าเกินไป = รีพอร์ตนับไม่เห็น)
 HANDOVER_LEAD_MIN_MSGS = int(os.environ.get("HANDOVER_LEAD_MIN_MSGS", "6"))
+# r53 — ถ้ารู้ "ตัวเลขรายได้" แล้ว ข้อมูลพอตีเกรดได้จริง ไม่ต้องรอครบ 6
+# แต่ยังรออย่างน้อย 2 ข้อความ เผื่อลูกค้ากำลังจะพิมพ์เบอร์ตามมา
+# (ยิงทันทีที่ข้อความแรก = ได้แถวไม่มีเบอร์ แล้วได้อีกแถวตอนเบอร์มา = ซ้ำ 2 แถว
+#  เพราะฝั่ง Apps Script ใช้ appendRow ไม่ใช่ upsert)
+HANDOVER_LEAD_FAST_MSGS = int(os.environ.get("HANDOVER_LEAD_FAST_MSGS", "2"))
 HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 
 # ----------------------------------------------------------------------
@@ -4309,6 +4325,21 @@ class BotEngine:
         except Exception:
             pass
 
+        # r53 (Gift 20 ส.ค. 2026) — เคสจริง "พี่บ่าว ออฟโรด" เพจ Millionaire Asset
+        # บอทถามไปเองว่า "ทำงานประจำหรือเปล่าคะ รายได้เท่าไหร่คะ"
+        # แล้วเซลพิมพ์แทรกพอดี -> handover ติด -> ลูกค้าตอบ "ทำงานประจำครับ"
+        # ของเดิมไม่เก็บ เพราะไม่มีตัวเลข = ทิ้งคำตอบของคำถามที่ "เราถามเอง"
+        # กติกาใหม่: ถ้ามีคำถามค้างอยู่ (awaiting) และข้อความตอบได้จริง -> เก็บ
+        _aw = state.get("awaiting")
+        if (_aw and _aw in FIELD_ORDER and not data.get(_aw)
+                and not _looks_like_phone(msg)
+                and not self._is_question(msg)):
+            try:
+                if self._is_valid_answer(_aw, msg):
+                    self._capture(state, _aw, msg)
+            except Exception:
+                pass
+
         if not data.get("contact") and _looks_like_phone(msg):
             self._capture(state, "contact", msg)
             _nm = _name_from_contact_msg(msg)
@@ -4324,6 +4355,13 @@ class BotEngine:
                 and (_parse_income(msg) or _is_unbankable_job(msg)
                      or _is_self_employed(msg))):
             self._capture(state, "income", msg)
+        # r53 — ลูกค้าตอบเป็น 2 ข้อความ: "ทำงานประจำครับ" แล้วค่อย "60,000บาทครับ"
+        # ก้อนแรกไม่มีตัวเลข _capture เก็บเป็น income_note ไว้ (ยังไม่ใช่ income)
+        # พอได้ตัวเลขแล้ว เอาอาชีพมาต่อหน้าให้เซลอ่านรู้เรื่องว่า "พนักงานประจำ 60,000"
+        _note = (data.get("income_note") or "").strip()
+        if (_note and data.get("income") and _note not in data["income"]):
+            data["income"] = f"{_note} {data['income']}".strip()[:200]
+            data.pop("income_note", None)
 
         if not data.get("debt") and (
                 _says_no_debt(msg)
@@ -4354,7 +4392,15 @@ class BotEngine:
                     state, "⚠️ อัปเดต: ได้เบอร์แล้ว — แถวก่อนหน้าของลูกค้าคนนี้ยังไม่มีเบอร์")
         elif (not _has_contact and not _partial_sent and not state.get("lead_sent")
                 and data.get("objective") and data.get("income")
-                and state["handover_msgs"] >= HANDOVER_LEAD_MIN_MSGS):
+                # r53 (Gift 20 ส.ค. 2026) — เคสจริง "พี่บ่าว ออฟโรด" เพจ Millionaire Asset:
+                # ปล่อยเช่า + พนักงานประจำ + 60,000 = เกรด A เต็มๆ
+                # แต่พิมพ์มาแค่ 2 ข้อความ ติดเพดาน 6 -> ลีดหายทั้งเคส บอทเงียบสนิท
+                # เพดานนั้นมีไว้กัน "แถวข้อมูลบางเกินไป" ไม่ใช่กันแถวที่ตีเกรดได้แล้ว
+                # รู้ตัวเลขรายได้เมื่อไหร่ = คิดวงเงิน/ตีเกรดได้ = แจกได้ทันที
+                and (state["handover_msgs"] >= HANDOVER_LEAD_MIN_MSGS
+                     or (state["handover_msgs"] >= HANDOVER_LEAD_FAST_MSGS
+                         and (data.get("income_baht")
+                              or _parse_income(str(data.get("income") or "")))))):
             # คุยมาพอสมควรแล้วยังไม่ให้เบอร์ -> แจกแบบไม่มีเบอร์
             # เพื่อให้เคสโผล่ในรีพอร์ต ไม่หายไปทั้งก้อน
             state["handover_lead_partial"] = True
