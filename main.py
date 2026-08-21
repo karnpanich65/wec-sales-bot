@@ -35,7 +35,7 @@ from collections import deque
 import requests
 from flask import Flask, request, jsonify, Response
 from dotenv import load_dotenv
-from bot_logic import BotEngine
+from bot_logic import BotEngine, page_muted
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -215,7 +215,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r59"
+BOT_REVISION = "r60"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -473,6 +473,10 @@ def send_reply(recipient_id: str, text: str, page_id: str = ""):
     ถ้าหน่วงพิมพ์อยู่ใน request เลย Meta จะถือว่า timeout แล้วยิง event ซ้ำ
     ลูกค้าจะได้ข้อความซ้ำสองรอบ — เคยเจอมาแล้วตอน budget 8 วิ
     """
+    # r60 — เพจที่สั่งปิดบอท: ไม่ยิงข้อความหาลูกค้าเลย (ด่านสุดท้ายก่อนส่งจริง)
+    if page_muted(page_id):
+        print(f"[MUTE] เพจ {page_id} ปิดบอทไว้ — ไม่ส่งข้อความ | {text[:60]!r}")
+        return
     threading.Thread(target=_send_reply_blocking,
                      args=(recipient_id, text, page_id),
                      daemon=True).start()
@@ -618,6 +622,9 @@ def _comment_handled(cid: str) -> bool:
 
 def reply_to_comment(comment_id: str, text: str, page_id: str = "") -> bool:
     """ตอบใต้คอมเมนต์แบบสาธารณะ (ต้องมีสิทธิ์ pages_manage_engagement)"""
+    if page_muted(page_id):          # r60 — เพจปิดบอท: ไม่ตอบใต้คอมเมนต์
+        print(f"[MUTE] เพจ {page_id} ปิดบอทไว้ — ไม่ตอบคอมเมนต์")
+        return False
     token = page_token(page_id)
     if not token:
         return False
@@ -679,6 +686,9 @@ def private_reply(page_id: str, comment_id: str, text: str,
     ข้อจำกัดของ Meta: ยิงได้ครั้งเดียวต่อคอมเมนต์
     -> ต้องรวมทุกอย่างที่อยากพูดไว้ในข้อความเดียว ห้ามแตกบับเบิล
     """
+    if page_muted(page_id):          # r60 — เพจปิดบอท: ไม่ทักเข้าแชทจากคอมเมนต์
+        print(f"[MUTE] เพจ {page_id} ปิดบอทไว้ — ไม่ private reply")
+        return ""
     token = page_token(page_id)
     if not token or not page_id:
         return ""
