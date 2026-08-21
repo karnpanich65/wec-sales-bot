@@ -80,6 +80,7 @@ from faq_data import (
     TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
+    NO_OWN_INCOME_CLOSE,
     CO_SELF_EMP_Q, CONTACT_GOT_MSG, COOP_Q,
     ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
     GUARD_FALLBACK_MSG,
@@ -253,6 +254,12 @@ def _hard_reject(data: dict, state: dict) -> str | None:
     """
     if data.get("cash") or data.get("contact"):
         return None
+    # r64 (Gift เคาะ 21 ส.ค. 2026) — "นักศึกษาไม่ได้"
+    # ไม่มีรายได้ของตัวเอง = ปิดได้เลย ไม่ต้องรอคำตอบเรื่องผู้กู้ร่วม
+    # (ต่างจากเคสรายได้น้อย/อาชีพอิสระ ที่ผู้กู้ร่วมพลิกเคสได้จริง)
+    # ยกเว้นลูกค้าบอกมาแล้วว่ามีรายได้ผู้กู้ร่วม -> ปล่อยให้เดินเส้นเดิม
+    if data.get("no_own_income") and not data.get("co_borrower_income"):
+        return NO_OWN_INCOME_CLOSE
     if not data.get("co_borrower_none"):
         return None
     if _self_emp_below_bar(data, state):
@@ -1164,6 +1171,37 @@ def _is_unbankable_job(msg: str) -> bool:
             or any(d in m for d in _DEPENDENT_INCOME))
 
 
+# r64 (Gift เคาะ 21 ส.ค. 2026) — "นักศึกษาไม่ได้"
+# เคสจริง Chaiwat Pantong เพจ Realty Smart 21 ส.ค. 18:13 น.
+# ลูกค้าตอบ "เป็นนักศึกษาครับ ยังไม่มีงานประจำครับ"
+# -> ประโยคนี้ตรงกับ _SELF_EMP_WORDS ("ยังไม่มีงานประจำ") ด้วย
+# -> ติดธง self_employed -> บอทถาม "ทำอาชีพนี้มากี่ปีแล้วคะ มีเสียภาษี
+#    หรือจดบริษัทไว้ไหมคะ" ซึ่งไม่มีความหมายกับนักศึกษาเลย
+#
+# ลิสต์นี้ "แคบกว่า" _UNBANKABLE_JOBS โดยตั้งใจ:
+#   · ที่อยู่ในลิสต์นี้ = ไม่มีรายได้ของตัวเองเลย -> ปิดสุภาพทันที
+#   · เกษตรกร / หาบเร่ / รับจ้างรายวัน / แม่ค้า = มีรายได้จริง แค่เอกสารยาก
+#     -> ยังเดินเส้นผู้กู้ร่วมเหมือนเดิม ห้ามปิด
+# ห้ามใส่ "ไม่มีงาน" เข้ามา เพราะมันเป็น substring ของ "ไม่มีงานประจำ"
+# ซึ่งเป็นคำที่ฟรีแลนซ์ใช้บอกว่าตัวเองไม่ได้เป็นพนักงานประจำ
+_NO_OWN_INCOME_WORDS = (
+    "นักเรียน", "นักศึกษา", "กำลังเรียน", "เรียนอยู่", "ยังเรียนอยู่",
+    "เพิ่งจบ", "ยังไม่ได้ทำงาน", "ยังไม่มีรายได้", "ไม่มีรายได้",
+    "ว่างงาน", "ตกงาน", "แม่บ้าน", "พ่อบ้าน", "เกษียณ",
+)
+
+
+def _has_no_own_income(msg: str) -> bool:
+    """ไม่มีรายได้ของตัวเองเลย -> ยื่นกู้ไม่ได้จริงๆ ไม่ใช่แค่เอกสารยาก
+
+    กันปิดผิดคน: ถ้าประโยคเดียวกันมีตัวเลขรายได้ติดมาด้วย
+    ("เกษียณแล้วแต่มีค่าเช่าเดือนละ 50,000") = มีรายได้จริง ห้ามปิด
+    """
+    if _parse_income(msg):
+        return False
+    return _has_any(msg, _NO_OWN_INCOME_WORDS)
+
+
 MAX_REPLY_SENTENCES = 2
 # เพดานตัวอักษร — ด่านที่สำคัญกว่าจำนวนประโยค
 # เจอ 15 ส.ค.: AI เขียน 2 ย่อหน้ายาว จบด้วย "ครับ" แค่ 2 ครั้ง
@@ -1907,6 +1945,37 @@ HANDOVER_LEAD_MIN_MSGS = int(os.environ.get("HANDOVER_LEAD_MIN_MSGS", "6"))
 HANDOVER_LEAD_FAST_MSGS = int(os.environ.get("HANDOVER_LEAD_FAST_MSGS", "2"))
 HANDOVER_RESUME = ("#เปิดบอท", "#คืนบอท", "#resume")
 
+# ======================================================================
+# r64 (Gift เคาะ 21 ส.ค. 2026) — "ปิดบอทถาวรสำหรับแชทนั้น"
+# ----------------------------------------------------------------------
+# ของเดิมมีแค่ handover 6 ชม. แล้วบอทกลับมาเอง · กับปิดทั้งเพจที่ Railway
+# "ปิดถาวรเฉพาะแชทนี้" ไม่มี
+#
+# Gift เลือกวิธี "ประโยคปิดที่สะกดผิดนิดเดียว" — ลูกค้าอ่านแล้วเห็นเป็น
+# ข้อความปิดสุภาพปกติ ไม่มีแฮชแท็กแปลกๆ โผล่ในแชท
+#
+# ⚠️ ต้องเป็น "ทั้งประโยค" ห้ามจับแค่คำลงท้าย:
+#    คนไทยพิมพ์ "ครับบ / ครับบบ / ค่ะะ" เพื่อความเป็นกันเองบ่อยมาก
+#    ถ้าจับแค่ท้ายคำ เซลจะฆ่าบอททิ้งโดยไม่รู้ตัวเป็นประจำ
+# เทียบแบบตัดช่องว่างทิ้ง เผื่อเซลพิมพ์เว้นวรรคไม่เหมือนกัน
+# ครอบทั้งเพจชาย-หญิง และการสะกดที่เซลใช้จริง (คับ/คะ/ค่ะ)
+# ตัวสะกดผิดคือ "ตัวท้ายซ้ำ" เสมอ: ครับบ · คับบ · ค่ะะ · คะะ
+BOT_KILL_PHRASES = (
+    "ขอบคุณที่สนใจครับบ",
+    "ขอบคุณที่สนใจคับบ",
+    "ขอบคุณที่สนใจค่ะะ",
+    "ขอบคุณที่สนใจคะะ",
+)
+BOT_KILL_RESUME = HANDOVER_RESUME     # #เปิดบอท = ปลดล็อกได้ทั้งสองแบบ
+
+
+def _is_kill_phrase(text: str) -> bool:
+    """ประโยคสั่งปิดบอทถาวรของแชทนี้ (เซลพิมพ์จากกล่องข้อความเพจ)"""
+    t = re.sub(r"\s+", "", (text or "")).lower()
+    if not t:
+        return False
+    return any(re.sub(r"\s+", "", k).lower() in t for k in BOT_KILL_PHRASES)
+
 # ----------------------------------------------------------------------
 # r54 (Gift เคาะ 20 ส.ค. 2026) — "เซลไม่บอกชื่อ + เงียบเกิน 10 นาที = บอทคุยต่อ"
 #
@@ -2131,6 +2200,20 @@ class BotEngine:
 
         state, is_new = self._resolve_state(user_id, platform, referral,
                                             skey, page_id)
+
+        # r64 — แชทนี้ถูกสั่งปิดบอทถาวร (เซลพิมพ์ประโยคปิด)
+        # Gift เคาะ: เงียบ + ปิดเคสเลย ไม่แจกเซล ไม่ทักกลับ แต่ยังเก็บ log
+        # ปลดล็อกได้ด้วย #เปิดบอท จากกล่องข้อความเพจ
+        if state.get("bot_off"):
+            state["last_seen"] = _now()
+            print(f"[BOT OFF] {user_id[:8]}... แชทนี้ปิดบอทถาวรแล้ว "
+                  f"— ไม่ตอบ | {user_message[:40]!r}")
+            self._log(user_id, user_message, "(แชทนี้ปิดบอทถาวร)")
+            try:
+                self._persist(user_id, state, user_message, "", "bot_off")
+            except Exception as _e:
+                print(f"[BOT OFF PERSIST] {_e}")
+            return "", None
 
         gap = _now() - state.get("last_seen", _now())
         bucket = self._gap_bucket(gap) if not is_new else "new"
@@ -2510,6 +2593,10 @@ class BotEngine:
         # เคสจริง คุณเจล: บอทถามเรื่องผู้กู้ร่วม ลูกค้าตอบ "มีแฟน ... ตอนนี้ฟรีแลนซ์ค่ะ"
         # (ฟรีแลนซ์ = แฟน) แต่บอทเอาไปติดธงให้ "ผู้กู้หลัก" แล้วถาม SELF_EMP_Q ผิดคน
         if (not state.get("self_employed") and _is_self_employed(msg)
+                # r64 — "เป็นนักศึกษาครับ ยังไม่มีงานประจำครับ" ตรงกับทั้งสองลิสต์
+                # ไม่มีรายได้ของตัวเองชนะเสมอ ห้ามติดธงอาชีพอิสระ
+                # ไม่งั้นจะไปโผล่คำถามอายุงาน + จดทะเบียนบริษัท
+                and not _has_no_own_income(msg)
                 and state.get("awaiting") not in ("co_borrower", "co_income",
                                                   "co_self_emp", "co_debt")):
             state["self_employed"] = True
@@ -3483,6 +3570,17 @@ class BotEngine:
             # รายได้ไม่ชัด -> ข้าม Q3 (บูโร) ไม่ต้องถาม ไม่ทิ้งลีด
             data["income_unknown"] = True
             data.setdefault("debt", "-")
+        if field == "income" and _has_no_own_income(msg):
+            # r64 — ไม่มีรายได้ของตัวเอง = ปิดสุภาพทันที (Gift เคาะ 21 ส.ค. 2026)
+            # ไม่ถามอายุงาน ไม่ถามจดทะเบียน ไม่ถามผู้กู้ร่วม ไม่ขอเบอร์
+            data["no_own_income"] = True
+            data["low_income"] = True
+            data["income_unbankable"] = True
+            data.setdefault("income_baht", 0)
+            self._add_signal(
+                state,
+                "⚠️ ไม่มีรายได้ของตัวเอง (นักศึกษา/ว่างงาน/แม่บ้าน/เกษียณ) "
+                "— ผู้กู้หลักไม่เข้าเกณฑ์ธนาคาร ปิดสุภาพ ไม่ต้องโทร")
         if field == "income" and _is_unbankable_job(msg):
             # อาชีพ/ที่มารายได้ที่ธนาคารไม่รับรอง = ยื่นเดี่ยวไม่ผ่านแน่นอน
             # ต้องเช็คก่อนดูตัวเลข เพราะ "แม่บ้าน สามีให้เดือนละ 30,000"
@@ -3709,6 +3807,8 @@ class BotEngine:
                 continue          # พนักงานประจำ = ไม่ต้องถาม
             if f == "self_emp" and data.get("cash"):
                 continue          # ซื้อสด = ไม่ได้กู้
+            if f == "self_emp" and data.get("no_own_income"):
+                continue          # r64 — นักศึกษา/ว่างงาน: อายุงาน+จดทะเบียนไม่มีความหมาย
             # r47 — ลูกค้าบอกครบในประโยคเดียว ("ทำมา 6 ปี จดทะเบียนพาณิชย์ด้วย")
             # ห้ามถาม SELF_EMP_Q ซ้ำในสิ่งที่เขาเพิ่งตอบไปเอง
             if (f == "self_emp" and data.get("self_emp_years") is not None
@@ -4520,9 +4620,30 @@ class BotEngine:
         if page_id:
             state["page_id"] = page_id
         result = "logged"
-        if _is_resume_trigger(text):
+        if _is_kill_phrase(text):
+            # r64 — ปิดบอทถาวรของแชทนี้ + ปิดเคสไปเลย (Gift เคาะ)
+            state["bot_off"] = True
+            state["bot_off_at"] = _now()
+            state["handover"] = True
+            state["closed"] = True
+            state["done"] = True
+            state["soft_close"] = True
+            state["below_threshold"] = True
+            state["contact_refused"] = True
+            self._add_signal(
+                state, "🔇 เซลสั่งปิดบอทถาวรสำหรับแชทนี้ (ประโยคปิด) "
+                       "— ไม่ตอบ ไม่แจกเคส ไม่ทักกลับ · ปลดล็อกด้วย #เปิดบอท")
+            result = "bot_off"
+            print(f"[BOT OFF] {customer_id[:8]}... เซลสั่งปิดบอทถาวรของแชทนี้")
+        elif _is_resume_trigger(text):
             state["handover"] = False
             state["handover_ended_at"] = _now()
+            if state.get("bot_off"):
+                state["bot_off"] = False
+                state["closed"] = False
+                state["done"] = False
+                state["soft_close"] = False
+                print(f"[BOT OFF] {customer_id[:8]}... ปลดล็อก — บอทกลับมาตอบ")
             result = "resume"
             self._resume_context(customer_id, state)
             print(f"[HANDOVER OFF] {customer_id[:8]}... กลับมาให้บอทตอบ")
@@ -4771,6 +4892,7 @@ class BotEngine:
     # ==================================================================
     # ธงที่เจอแล้ว "ห้ามทัก" — เรียงจากที่เจอบ่อยสุด
     _FOLLOWUP_SKIP = (
+        ("bot_off",         "แชทนี้ปิดบอทถาวร"),   # r64
         ("handover",        "เซลกำลังดูแลอยู่"),
         ("lead_sent",       "แจกเคสให้เซลแล้ว"),
         ("closed",          "ปิดจบไปแล้ว"),
