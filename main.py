@@ -215,7 +215,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r66"
+BOT_REVISION = "r67"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -1162,6 +1162,16 @@ def health():
     # เพิ่ม 19 ส.ค. 2026 — ใช้ดูว่า Postgres เฟส 1 เขียนเข้าจริงไหม
     # เปิด /health?pg=1 แล้วดู written เพิ่มขึ้นเรื่อยๆ errors ต้องเป็น 0
     out = {"status": "ok", "revision": BOT_REVISION}
+    # r67 — เช็คเองได้ว่ามีเพจไหนโดน "ปิดบอททั้งเพจ" ค้างอยู่ไหม
+    # เปิด /health?mute=1  ต้องได้ muted_pages: []  = ไม่มีเพจไหนถูกปิด
+    # (ปิดรายแชทใช้ประโยคปิดของเซล ไม่โผล่ตรงนี้ เป็นคนละกลไกกัน)
+    if request.args.get("mute"):
+        try:
+            from bot_logic import BOT_MUTED_PAGES, BOT_PAUSE_PAGES
+            out["muted_pages"] = sorted(BOT_MUTED_PAGES)
+            out["paused_pages"] = sorted(BOT_PAUSE_PAGES)
+        except Exception as e:
+            out["muted_pages"] = {"error": str(e)[:200]}
     if request.args.get("pg"):
         try:
             from bot_logic import pg_store
