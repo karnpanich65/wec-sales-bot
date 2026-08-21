@@ -80,7 +80,7 @@ from faq_data import (
     TIER2_GUARD_MSG,
     LOW_INCOME_BAHT, NO_COBORROWER_MSG, COBORROWER_INVITE_MSG, WEAK_COBORROWER_MSG,
     NO_COBORROWER_CLOSE, WEAK_COBORROWER_CLOSE, CO_INCOME_Q, CO_DEBT_Q,
-    NO_OWN_INCOME_CLOSE,
+    NO_OWN_INCOME_CLOSE, CALLBACK_NOTED_MSG,
     CO_SELF_EMP_Q, CONTACT_GOT_MSG, COOP_Q,
     ZONE_MENU_MSG, ZONE_MENU_Q, AGE_Q, AGE_COBORROWER_MSG, AGE_COBORROWER_Q,
     GUARD_FALLBACK_MSG,
@@ -2145,6 +2145,63 @@ def _is_handover_trigger(text: str, page_id: str = "") -> bool:
     return bool(_who_greeted(text, page_id))
 
 
+# ======================================================================
+# r65 (Gift 21 ส.ค. 2026) — "เวลาก็ไม่แจ้ง"
+# ----------------------------------------------------------------------
+# เคสจริง เพจ Wealth Estate 21 ส.ค. 11:12 น. (FB-WE-20260821-108):
+#   ลูกค้า: "โทรหลัง 17.30 น. ครับ"
+#   บอท  : "ได้ครับ บันทึกไว้แล้ว ที่ปรึกษาจะโทรหลังเวลา 17.30 น."  <- AI แต่งเอง
+#   ชีต  : วันนัดหมายถัดไป = 2026-08-21 12:11   <- เวลาอัตโนมัติตามเกรด B (+1 ชม.)
+#
+# ของเดิมไม่เคยเก็บเวลาที่ลูกค้าขอเลยแม้แต่ที่เดียว — มีแค่ประโยคตอบสำเร็จรูป
+# ใน _grade_reply ที่เปลี่ยน "ข้อความ" เฉยๆ ไม่ได้เขียนอะไรลงชีต
+# ผลคือบอทสัญญากับลูกค้า แล้วเซลโทรผิดเวลา = เสียเคสและเสียความน่าเชื่อถือ
+# ======================================================================
+_CALLBACK_MONEY_WORDS = ("บาท", "ล้าน", "แสน", "หมื่น", "พัน", "เงินเดือน",
+                         "รายได้", "ผ่อน", "หนี้", "ดอกเบี้ย", "ราคา", "งบ",
+                         "ตร.ม", "ตารางเมตร", "ปี")
+_CALLBACK_CUE = ("โทร", "ติดต่อ", "ว่าง", "สะดวก", "นัด", "คุย", "รับสาย")
+_CALLBACK_DAY = ("วันนี้", "พรุ่งนี้", "มะรืน", "เย็นนี้", "คืนนี้", "เช้านี้",
+                 "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "เสาร์", "อาทิตย์",
+                 "วันหยุด", "วันธรรมดา")
+_CALLBACK_PART = ("เช้า", "สาย", "เที่ยง", "บ่าย", "เย็น", "ค่ำ", "กลางคืน",
+                  "หลังเลิกงาน", "เลิกงาน", "พักเที่ยง", "กลางวัน", "ดึก")
+_CALLBACK_TIME_RE = re.compile(
+    r"(\d{1,2}\s*[.:]\s*\d{2}|\d{1,2}\s*โมง|\d{1,2}\s*ทุ่ม|ตี\s*\d{1,2})")
+# ชัดในตัวเอง ไม่ต้องมีคำว่าโทร/ว่าง กำกับ ("หลังเลิกงานครับ")
+_CALLBACK_STANDALONE = ("เลิกงาน", "เลิกเรียน", "พักเที่ยง", "หลังเที่ยงคืน")
+# เบอร์โทรที่พิมพ์ปนมาในประโยคเดียวกัน — ตัดทิ้งก่อนเก็บเป็น "เวลา"
+# ไม่งั้นช่องสัญญาณจะขึ้นว่า "ลูกค้าขอให้โทร: 0812345678 โทรหลัง 6 โมงเย็น"
+_CALLBACK_PHONE_RE = re.compile(r"0[\d\-\s]{8,12}\d")
+
+
+def _parse_callback_time(msg: str) -> str:
+    """ลูกค้าบอกเวลาที่สะดวกให้โทร -> คืนข้อความเวลา ("" = ไม่ใช่)
+
+    เข้มไว้ก่อน เก็บผิดแย่กว่าไม่เก็บ:
+      · มีคำเรื่องเงิน/ตัวเลขราคา = ไม่ใช่เวลา ("ผ่อน 3,500 บาทต่อเดือน")
+      · มีนาฬิกา (17.30 / 6 โมง / 2 ทุ่ม / ตี 5) หรือชื่อวัน = พอ
+      · มีแค่ช่วงเวลาลอยๆ ("เย็น") ต้องมีคำว่าโทร/ว่าง/สะดวก กำกับด้วย
+    """
+    t = (msg or "").strip()
+    if not t or len(t) > 120:
+        return ""
+    if _has_any(t, _CALLBACK_MONEY_WORDS):
+        return ""
+    has_clock = bool(_CALLBACK_TIME_RE.search(t))
+    has_day = _has_any(t, _CALLBACK_DAY)
+    has_part = _has_any(t, _CALLBACK_PART)
+    if not (has_clock or has_day or has_part):
+        return ""
+    if (not (has_clock or has_day)
+            and not _has_any(t, _CALLBACK_STANDALONE)
+            and not _has_any(t, _CALLBACK_CUE)):
+        return ""
+    t = _CALLBACK_PHONE_RE.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip(" ,.-")
+    return t[:80] if len(t) >= 3 else ""
+
+
 def _is_resume_trigger(text: str) -> bool:
     t = (text or "").strip().lower()
     return any(k.lower() in t for k in HANDOVER_RESUME)
@@ -2844,6 +2901,17 @@ class BotEngine:
                 if _nm and not state.get("chat_name"):
                     state["chat_name"] = _nm
                     state["fb_name"] = _nm   # ชื่อจากแชทชนะชื่อโปรไฟล์
+                # r65 — "0812345678 โทรหลัง 6 โมงเย็นครับ" มาในข้อความเดียว
+                # ต้องเก็บก่อน _finish จะได้ติดไปกับแถวเลย ไม่ต้องเขียนซ้ำ
+                _when = _parse_callback_time(msg)
+                if _when:
+                    data["callback_req"] = _when
+                    self._add_signal(
+                        state,
+                        f"📞 ลูกค้าขอให้โทร: {_when} — โทรตามเวลานี้ "
+                        f"(ช่องวันนัดหมายเป็นเวลาอัตโนมัติตามเกรด "
+                        f"ไม่ใช่เวลาที่ลูกค้าขอ)")
+                    print(f"[CALLBACK TIME] {user_id[:8]}... {_when!r} (มากับเบอร์)")
                 grade = self._finish(user_id, state, msg)
                 if state.get("soft_close"):
                     # ปิดจบแบบสุภาพ = ข้อความเดียวจบ ไม่พ่วงคำถามอื่นต่อท้าย
@@ -2884,9 +2952,17 @@ class BotEngine:
                 # -> ให้ Claude ตอบ แล้วค่อยถามซ้ำในบับเบิลถัดไป
                 bubbles.append(self._ask_claude(msg, user_id, state.get("gender", ""), state=state))
             elif state.get("done"):
-                # ลูกค้าให้ข้อมูลครบไปแล้ว — ห้ามขอเบอร์/ถามชุดเดิมซ้ำเด็ดขาด
-                bubbles.append(STATUS_MSG if self._is_status_ask(msg)
-                               else self._ask_claude(msg, user_id, state.get("gender", ""), done=True, state=state))
+                # r65 — ลูกค้าบอกเวลาที่สะดวกให้โทร (มักมาหลังให้เบอร์)
+                # ต้องดักก่อนส่งให้ AI ไม่งั้น AI จะแต่งว่า "บันทึกไว้แล้ว"
+                # ทั้งที่ไม่มีใครบันทึกอะไรเลย (เคสจริง FB-WE-20260821-108)
+                _when = _parse_callback_time(msg)
+                if _when:
+                    self._note_callback_time(user_id, state, _when)
+                    bubbles.append(CALLBACK_NOTED_MSG)
+                else:
+                    # ลูกค้าให้ข้อมูลครบไปแล้ว — ห้ามขอเบอร์/ถามชุดเดิมซ้ำเด็ดขาด
+                    bubbles.append(STATUS_MSG if self._is_status_ask(msg)
+                                   else self._ask_claude(msg, user_id, state.get("gender", ""), done=True, state=state))
             elif self._is_question(msg):
                 # ลูกค้าถามมา ต้องได้คำตอบเสมอ แม้เป็นข้อความแรกของเธรด
                 # ของเดิมมีเงื่อนไข "and not is_new" -> ข้อความแรกที่เป็นคำถาม
@@ -3948,6 +4024,29 @@ class BotEngine:
         sig = state.setdefault("signals", [])
         if tag not in sig:
             sig.append(tag)
+
+    def _note_callback_time(self, user_id: str, state: dict, when: str) -> bool:
+        """r65 — เก็บ "เวลาที่ลูกค้าขอให้โทร" จริงๆ แล้วส่งขึ้นชีตทันที
+
+        ช่อง "วันนัดหมายถัดไป" ฝั่ง Apps Script คิดเองจากเกรด (A/B/C = กี่ชั่วโมง)
+        แตะจากฝั่งบอทไม่ได้ถ้าไม่แก้ Apps Script -> จึงเขียนลงช่อง "สัญญาณ"
+        ซึ่งบอทคุมเต็มร้อย และเป็นช่องที่เซลอ่านก่อนโทรอยู่แล้ว
+        คืน True ถ้าเพิ่งบันทึกรอบนี้
+        """
+        data = state.setdefault("data", {})
+        if not when or data.get("callback_req") == when:
+            return False
+        data["callback_req"] = when
+        self._add_signal(
+            state,
+            f"📞 ลูกค้าขอให้โทร: {when} — โทรตามเวลานี้ "
+            f"(ช่องวันนัดหมายเป็นเวลาอัตโนมัติตามเกรด ไม่ใช่เวลาที่ลูกค้าขอ)")
+        print(f"[CALLBACK TIME] {user_id[:8]}... {when!r}")
+        try:
+            self._upsert_lead(state)
+        except Exception as e:
+            print(f"[CALLBACK TIME ERROR] {e}")
+        return True
 
     @staticmethod
     def _flag_high_burden(data: dict, state: dict) -> bool:
