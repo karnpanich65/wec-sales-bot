@@ -983,6 +983,19 @@ INCOME_REASK_MSGS = [
 ]
 INCOME_REASK_MAX = len(INCOME_REASK_MSGS)
 
+
+def _income_known(data: dict) -> bool:
+    """r61 (Gift 21 ส.ค. 2026) — ถือว่า "รู้รายได้แล้ว" เมื่อ
+       · ได้คำตอบเรื่องรายได้มาแล้ว (ตัวเลขหรือโน้ต)  หรือ
+       · ลูกค้าบอกเองว่าไม่สะดวกบอก / ไม่มีรายได้ประจำ (income_unknown)  หรือ
+       · ซื้อเงินสด ไม่ได้กู้ (cash) — ไม่มีเหตุผลต้องรู้รายได้
+
+    ใช้เป็นด่านเดียวกันทั้งตอนเลือกคำถามและตอนจะขอเบอร์
+    """
+    return bool(data.get("income")
+                or data.get("income_unknown")
+                or data.get("cash"))
+
 # ปฏิเสธชัดเจน -> หยุดถามทันที (กติกาเดียวกับตอนขอเบอร์)
 _INCOME_REFUSE_WORDS = (
     "ไม่สะดวกบอก", "ขอไม่บอก", "ไม่อยากบอก", "ไม่ขอบอก", "ไม่บอก",
@@ -2835,51 +2848,95 @@ class BotEngine:
                 # แต่ "ย้อนไปถามข้อที่ยังขาดข้ออื่น" แทนการเงียบ (Gift 18 ส.ค.)
                 _skipped: set = set()
                 while field and asked.get(field, 0) >= MAX_ASK_PER_FIELD:
+                    # r61 — รายได้เป็นด่านบังคับ ถามครบโควตาปกติแล้วแต่ยังมีโควตา
+                    # "ถามซ้ำแบบเปลี่ยนคำ" เหลืออยู่ ห้ามข้ามไปถามข้ออื่น
+                    # (ของเดิมข้ามไป debt ทำให้คำตอบรายได้ไปลงช่องหนี้)
+                    if (field == "income" and not _income_known(data)
+                            and int(state.get("income_reask") or 0)
+                            < INCOME_REASK_MAX):
+                        break
                     if field == "contact" and not state.get("contact_refused"):
                         state["contact_refused"] = True
                         bubbles.append(CONTACT_REFUSED_MSG)
                     _skipped.add(field)
                     field, question = self._next_missing(data, state, skip=_skipped)
                 if field:
-                    # r39 — ห้ามถามประโยคเดิมซ้ำติดกัน 2 เทิร์น (Gift 19 ส.ค. 2026)
-                    # เคสจริง คุณ Patcharin: ลูกค้าถามคำถามของตัวเอง 2 ข้อติด
-                    # บอทตอบ FAQ แล้วต่อท้ายด้วย "เป็นพนักงานประจำหรือเปล่าครับ..."
-                    # คำเดิมเป๊ะทั้งสองรอบ อ่านแล้วเหมือนบอทไม่ฟัง
-                    # ข้ามรอบนี้เฉยๆ ยังรอ field เดิมอยู่ เทิร์นหน้าถามได้ตามปกติ
-                    if question and question == state.get("last_q"):
-                        # r52 (Gift 20 ส.ค. 2026) — "ตอบอะไรลูกค้าก็ไม่รู้"
-                        # ของเดิมเจอคำถามซ้ำแล้ว "เงียบ" ทั้งเทิร์น
-                        # ผลคือลูกค้าเห็นแต่ประโยคลอยๆ ของ AI แล้วบทสนทนาตาย
-                        # (เคสจริง Nicha Phu: ตอบเรื่องเครดิตแล้วไม่ถามอะไรต่อเลย)
-                        # ใหม่: ข้ามไปถาม "ข้ออื่นที่ยังขาด" แทนการเงียบ
-                        _f2, _q2 = self._next_missing(
-                            data, state, skip=set(_skipped) | {field})
-                        if _q2 and _q2 != state.get("last_q"):
-                            asked[_f2] = asked.get(_f2, 0) + 1
-                            state["awaiting"] = _f2
-                            bubbles.append(_q2)
-                            state["last_q"] = _q2
-                            print(f"[NO REPEAT] {user_id[:8]}... คำถามซ้ำ "
-                                  f"-> เปลี่ยนไปถาม {_f2} แทน")
-                        else:
-                            state["awaiting"] = field
-                            state["last_q"] = ""
-                            print(f"[NO REPEAT] {user_id[:8]}... ข้ามคำถามซ้ำ: {question[:40]!r}")
-                    elif self._already_asked_topic(bubbles, field):
-                        # r46 — บับเบิลก่อนหน้า (ที่ AI เขียน) ถามเรื่องนี้ไปแล้ว
+                    # r61 (Gift 21 ส.ค. 2026) — เคสจริง FB-NC-20260821-014
+                    # (คุณมาย เพจ New Chapter 08:12 น.)
+                    # ลูกค้าถาม "ต้องเงินเดือนเท่าไหร่คะ" -> บอทตอบ FAQ ที่ลงท้าย
+                    # ด้วยการถามรายได้ แต่วินาทีเดียวกันตรรกะกันถามซ้ำสั่ง
+                    # "เปลี่ยนไปถาม debt แทน" -> awaiting=debt
+                    # ลูกค้าอ่านบับเบิลบนแล้วตอบ "รับอยู่ประมาณ17,000-20,000ค่ะ"
+                    # คำตอบรายได้เลยไปลงช่องบูโร ช่องรายได้ว่าง
+                    # -> HARD STOP ไม่ยิง -> ขอเบอร์ -> แจกเคสให้เซลทั้งที่ 17,000
+                    #    ไม่ถึงเกณฑ์ 25,000
+                    # กติกาใหม่: เช็ค "บับเบิลบนจอถามเรื่องนี้อยู่แล้วไหม" ก่อน
+                    # ตรรกะกันถามซ้ำเสมอ ถ้าถามอยู่แล้วให้รอคำตอบข้อนั้น
+                    # ห้ามต่อท้ายคำถามข้ออื่น
+                    if self._already_asked_topic(bubbles, field):
+                        # r46 — บับเบิลก่อนหน้า (ที่ AI / FAQ เขียน) ถามเรื่องนี้แล้ว
                         # ต่อท้ายอีกก็เป็นคำถามเดียวกันสองรอบในจอเดียว
                         state["awaiting"] = field
                         asked[field] = asked.get(field, 0) + 1
                         state["last_q"] = ""
                         print(f"[NO REPEAT] {user_id[:8]}... บับเบิลก่อนหน้าถาม "
                               f"{field} ไปแล้ว ไม่ต่อท้ายซ้ำ")
+                    # r39 — ห้ามถามประโยคเดิมซ้ำติดกัน 2 เทิร์น (Gift 19 ส.ค. 2026)
+                    # เคสจริง คุณ Patcharin: ลูกค้าถามคำถามของตัวเอง 2 ข้อติด
+                    # บอทตอบ FAQ แล้วต่อท้ายด้วย "เป็นพนักงานประจำหรือเปล่าครับ..."
+                    # คำเดิมเป๊ะทั้งสองรอบ อ่านแล้วเหมือนบอทไม่ฟัง
+                    # ข้ามรอบนี้เฉยๆ ยังรอ field เดิมอยู่ เทิร์นหน้าถามได้ตามปกติ
+                    elif question and question == state.get("last_q"):
+                        # r52 (Gift 20 ส.ค. 2026) — "ตอบอะไรลูกค้าก็ไม่รู้"
+                        # ของเดิมเจอคำถามซ้ำแล้ว "เงียบ" ทั้งเทิร์น
+                        # ผลคือลูกค้าเห็นแต่ประโยคลอยๆ ของ AI แล้วบทสนทนาตาย
+                        # (เคสจริง Nicha Phu: ตอบเรื่องเครดิตแล้วไม่ถามอะไรต่อเลย)
+                        # ใหม่: ข้ามไปถาม "ข้ออื่นที่ยังขาด" แทนการเงียบ
+                        # r61 — ยกเว้นรายได้: ยังไม่รู้รายได้ ห้ามสลับไปข้ออื่น
+                        # เพราะคำตอบรายได้จะไปลงช่องที่สลับไปแทน
+                        if field == "income" and not _income_known(data):
+                            state["awaiting"] = field
+                            state["last_q"] = ""
+                            print(f"[INCOME GATE] {user_id[:8]}... คำถามรายได้ซ้ำ "
+                                  f"— ยังไม่รู้รายได้ รอคำตอบเดิม ไม่สลับข้อ")
+                        else:
+                            _f2, _q2 = self._next_missing(
+                                data, state, skip=set(_skipped) | {field})
+                            if _q2 and _q2 != state.get("last_q"):
+                                asked[_f2] = asked.get(_f2, 0) + 1
+                                state["awaiting"] = _f2
+                                bubbles.append(_q2)
+                                state["last_q"] = _q2
+                                print(f"[NO REPEAT] {user_id[:8]}... คำถามซ้ำ "
+                                      f"-> เปลี่ยนไปถาม {_f2} แทน")
+                            else:
+                                state["awaiting"] = field
+                                state["last_q"] = ""
+                                print(f"[NO REPEAT] {user_id[:8]}... ข้ามคำถามซ้ำ: {question[:40]!r}")
                     else:
                         asked[field] = asked.get(field, 0) + 1
                         state["awaiting"] = field
                         bubbles.append(question)
                         state["last_q"] = question
 
-                if not field and not state.get("done"):
+                # r61 — ไม่มีคำถามอื่นเหลือแล้ว แต่ยังไม่รู้รายได้และยังไม่มีเบอร์
+                # ห้ามปิดด้วย DONE_MSG ("ข้อมูลครบแล้ว") เพราะยังไม่ครบจริง
+                # และห้ามขอเบอร์ -> ถามรายได้ต่อด้วยคำที่นุ่มกว่าเดิม
+                # ไม่วนไม่จบ: ตอบไม่เป็นตัวเลขครบ INCOME_REASK_MAX รอบ
+                # data["income"] จะถูกเติมด้วยโน้ตคำตอบเอง แล้วไหลต่อตามปกติ
+                if (not field and not state.get("done")
+                        and not _income_known(data)
+                        and not data.get("contact")):
+                    if not self._already_asked_topic(bubbles, "income"):
+                        _iq = INCOME_REASK_MSGS[
+                            min(int(state.get("income_reask") or 0),
+                                INCOME_REASK_MAX - 1)]
+                        bubbles.append(_iq)
+                        state["last_q"] = _iq
+                    state["awaiting"] = "income"
+                    print(f"[INCOME GATE] {user_id[:8]}... ยังไม่รู้รายได้ "
+                          f"— ไม่ปิดเคส ไม่ขอเบอร์ ถามรายได้ต่อ")
+                elif not field and not state.get("done"):
                     if state.get("contact_refused") and not data.get("contact"):
                         # ตอบครบทุกข้อยกเว้นช่องทาง -> เก็บลีดไว้ แต่ห้ามพูดว่าจะโทร
                         grade = self._finish(user_id, state, "-")
@@ -3656,6 +3713,13 @@ class BotEngine:
                 continue          # ซื้อสด = ไม่ได้กู้ ไม่ต้องคิด DSR
             if f == "contact" and state.get("contact_refused"):
                 continue          # เขาบอกแล้วว่าไม่สะดวก ห้ามถามอีก
+            # r61 — ยังไม่รู้รายได้ ห้ามขอเบอร์ (เคสจริง FB-NC-20260821-014)
+            # รายได้ 17,000 ไปตกอยู่ในช่องบูโร ช่องรายได้ว่าง บอทเลยเดินไปขอเบอร์
+            # แล้วเคสถูกแจกให้เซลทั้งที่ไม่ผ่านเกณฑ์ 25,000
+            # ไม่ตัน: ถามรายได้ครบ INCOME_REASK_MAX รอบแล้ว data["income"]
+            # จะถูกเติมด้วยโน้ตคำตอบเสมอ -> _income_known() คืน True เอง
+            if f == "contact" and not _income_known(data):
+                continue
             if not data.get(f):
                 if f == "income":
                     k = state.get("income_reask", 0)
