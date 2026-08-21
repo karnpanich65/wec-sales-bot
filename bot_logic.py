@@ -1176,6 +1176,12 @@ HARD_REPLY_CHARS = 260
 # โหลด session จากชีต: ยิง 2 ครั้ง ครั้งหลังใจเย็นขึ้น (Apps Script cold start ช้า)
 SESSION_LOAD_TIMEOUTS = (6.0, 9.0)
 
+# r62 (Gift 21 ส.ค. 2026) — เขียนแถวลีดเข้าชีต: ยิงซ้ำได้ 1 ครั้ง
+# 21 ส.ค. 00:41-00:47 น. Apps Script ตัน -> ยิงครั้งเดียว timeout=10 แล้วแพ้
+# = ลีดหายเงียบ + ชีตได้แถวครึ่งๆ ไม่มี PSID
+# ปลอดภัยที่จะยิงซ้ำ เพราะ p4UpsertLead หาแถวตาม PSID (idempotent)
+SHEETS_POST_TIMEOUTS = (10.0, 20.0)
+
 # กู้ประวัติไม่ได้ -> หยุดบอทส่งให้คนไหม
 # ค่าเริ่มต้น = ไม่หยุด (บทเรียน 19 ส.ค. 2026 บ่าย: ชีตพัง -> บอทเงียบทั้งระบบ)
 SESSION_FAIL_HANDOVER = os.environ.get("SESSION_FAIL_HANDOVER", "0") == "1"
@@ -3503,6 +3509,15 @@ class BotEngine:
                 data["income_baht"] = n or 0
                 data["low_income"] = True
                 data["income_unbankable"] = True
+        # r62 — ได้ยอดผ่อนแล้วต้องเช็คทันทีว่าภาระกินวงเงินจนต้องหาผู้กู้ร่วมไหม
+        # ต้องอยู่ "หลัง" บล็อก field == "income" ข้างบน เพราะบางข้อความ
+        # บอกทั้งรายได้และภาระในประโยคเดียว
+        if field in ("debt", "income", "coop"):
+            try:
+                self._flag_high_burden(data, state)
+            except Exception as _e:
+                print(f"[HIGH BURDEN ERROR] {_e}")
+
         if field == "co_borrower":
             low = msg.lower()
             if any(h in low for h in _NO_COB_HINTS):
@@ -3693,8 +3708,11 @@ class BotEngine:
             if f == "income" and data.get("cash"):
                 continue          # ซื้อสด = ไม่มีเหตุผลจะถามรายได้
             if (f == "co_borrower" and not data.get("low_income")
+                    and not data.get("high_burden")
                     and not _self_emp_below_bar(data, state)):
                 continue          # รายได้ถึงเกณฑ์ = ยื่นเดี่ยวได้ ไม่ต้องถาม
+                # r62 — high_burden = รายได้ผ่าน แต่ภาระกินวงเงินจนยื่นเดี่ยวไม่ถึงห้อง
+                # เคสแบบนี้ผู้กู้ร่วมพลิกได้จริง ต้องถามเหมือนเคสรายได้ไม่ถึง
                 # r47 — อาชีพอิสระที่ยังไม่ถึง 2 ปี ก็ต้องถามผู้กู้ร่วมเหมือนกัน
                 # เพราะยื่นเดี่ยวไม่ผ่านอยู่แล้ว ผู้กู้ร่วมคือทางเดียวที่เหลือ
             if f == "co_borrower" and data.get("cash"):
@@ -3818,6 +3836,58 @@ class BotEngine:
         sig = state.setdefault("signals", [])
         if tag not in sig:
             sig.append(tag)
+
+    @staticmethod
+    def _flag_high_burden(data: dict, state: dict) -> bool:
+        """r62 (Gift เคาะ 21 ส.ค. 2026) — "ถ้าภาระต่อรายได้เกินๆ ลำดับถาม
+        ผู้กู้ร่วมควรถามแบบตอนรายได้ไม่ถึง"
+
+        ปัญหาเดิม 2 ชั้น:
+          1) ธง low_income ที่เป็นตัวปลดล็อกคำถามผู้กู้ร่วม ตั้งจาก
+             "รายได้ < 25,000" หรือ "อาชีพที่แบงก์ไม่นับ" เท่านั้น
+             ภาระท่วมไม่เคยเปิดคำถามนี้เลย
+          2) FIELD_ORDER วาง co_borrower ไว้ "ก่อน" debt
+             = ถามผู้กู้ร่วมไปตั้งแต่ยังไม่รู้ภาระ พอรู้แล้วก็ไม่มีใครย้อนกลับ
+
+        เกณฑ์ที่ Gift เลือก = ใช้เครื่องคิดวงเงินตัวจริง ไม่ตั้งเลขเดา
+          · วงเงินตอนนี้ (มีภาระ) < ราคาห้อง        -> ยื่นเดี่ยวไม่พอ
+          · วงเงินถ้าปิดภาระ     >= ราคาห้อง        -> ตัวปัญหาคือ "ภาระ" ไม่ใช่รายได้
+        เข้าทั้งสองข้อ = เคสนี้ผู้กู้ร่วมพลิกได้จริง -> เปิดคำถามเหมือนเคสรายได้ไม่ถึง
+
+        ถ้าปิดภาระแล้วยังไม่พอ = ปัญหาอยู่ที่รายได้ ปล่อยให้ low_income ทำงานตามเดิม
+        คืน True เมื่อเพิ่งติดธงรอบนี้
+        """
+        if data.get("cash") or data.get("income_unknown"):
+            return False
+        if data.get("high_burden") or data.get("low_income"):
+            return False          # ติดธงแล้ว/รายได้ไม่ถึงอยู่แล้ว ไม่ต้องซ้ำ
+        inc = data.get("income_baht")
+        if inc is None:
+            inc = _parse_income(str(data.get("income") or ""))
+        if not inc or int(inc) <= 0:
+            return False          # ยังไม่รู้รายได้ ตัดสินไม่ได้
+        debt = data.get("debt_baht")
+        if debt is None:
+            debt = _parse_debt_monthly(str(data.get("debt") or ""))
+        if not debt or int(debt) <= 0:
+            return False          # ไม่มีภาระ ไม่มีอะไรให้คิด
+        inc, debt = int(inc), int(debt)
+        age = data.get("age")
+        cap_now = _capacity(inc, debt, age)
+        if cap_now >= UNIT_PRICE_BAHT:
+            return False          # ภาระไม่ได้ทำให้ตก ยื่นเดี่ยวยังพอ
+        if _capacity(inc, 0, age) < UNIT_PRICE_BAHT:
+            return False          # ปิดภาระแล้วก็ยังไม่พอ = ปัญหาที่รายได้
+        data["high_burden"] = True
+        BotEngine._add_signal(
+            state,
+            f"ภาระ {debt:,}/เดือน กินวงเงินจนยื่นเดี่ยวเหลือ "
+            f"{cap_now/1e6:.1f} ล้าน (ต่ำกว่าราคาห้อง) "
+            f"— ถามผู้กู้ร่วมเหมือนเคสรายได้ไม่ถึง (r62)")
+        print(f"[HIGH BURDEN] รายได้ {inc:,} · ภาระ {debt:,} · วงเงิน "
+              f"{cap_now/1e6:.2f}M < ห้อง {UNIT_PRICE_BAHT/1e6:.1f}M "
+              f"— เปิดคำถามผู้กู้ร่วม")
+        return True
 
     def _scan_signals(self, state: dict, msg: str):
         """ติดธงสัญญาณไว้ให้เซลเห็นก่อนโทร — ไม่ใช้ปฏิเสธใครเด็ดขาด
@@ -5156,6 +5226,10 @@ class BotEngine:
         ใช้ action แยก เพื่อไม่ให้ Apps Script ตัวเก่าเผลอสร้างนัดในปฏิทินซ้ำ
         """
         data = state["data"]
+        # r62 — เหตุผลเดียวกับ _send_to_sheets: ไม่มี PSID = ห้ามเขียน
+        if not str(state.get("psid") or "").strip():
+            print("[SHEETS BLOCK] lead_partial ไม่มี PSID — ไม่ส่งเข้าคิว")
+            return
         _enqueue({
             "action": "lead_partial",
             "facebook_psid": state.get("psid", ""),
@@ -5208,6 +5282,15 @@ class BotEngine:
         if not APPS_SCRIPT_URL:
             print("[SHEETS] APPS_SCRIPT_URL not set — skipped")
             return
+        # r62 (Gift 21 ส.ค. 2026) — ห้ามเขียนแถวลีดที่ไม่มี PSID เด็ดขาด
+        # เคสจริง 21 ส.ค. 00:41-00:47 น.: รอบ /recover/handover ยิงตอน Apps Script
+        # ตัน (SHEETS/PERSIST read timeout 15+ ครั้งใน 6 นาที) -> ได้แถวที่ช่อง PSID
+        # ว่าง 45 แถว (RS 19 · AG 10 · MA 16) แถวพวกนั้น dedup ไม่ได้อีกเลย
+        # ลูกค้าคนเดิมทักครั้งหน้า = ได้แถวใหม่ซ้ำอีก (เบอร์ 0623677027 ซ้ำ 6 แถว)
+        # ไม่มี PSID = ไม่มีกุญแจ = อย่าเขียน ดีกว่าเขียนแล้วซ้ำตลอดกาล
+        if not str(user_id or "").strip():
+            print("[SHEETS BLOCK] ไม่มี PSID — ไม่เขียนแถวลีด (กันแถวผีที่ dedup ไม่ได้)")
+            return
         referral = referral or {}
         payload = {
             "facebook_psid": user_id,
@@ -5232,11 +5315,19 @@ class BotEngine:
             "sale":          sale or "",
             **self._income_numbers(data),
         }
-        try:
-            resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=10)
-            print(f"[SHEETS] {resp.status_code} {resp.text[:120]}")
-        except Exception as e:
-            print(f"[SHEETS ERROR] {e}")
+        # r62 — ยิงซ้ำได้ เพราะ p4UpsertLead หาแถวตาม PSID (idempotent)
+        # และ PATCH ข้างบนการันตีแล้วว่ามี PSID เสมอ
+        # เดิมยิงครั้งเดียว timeout=10 -> Apps Script ตัน = ลีดหายเงียบ
+        for _try, _tmo in enumerate(SHEETS_POST_TIMEOUTS, start=1):
+            try:
+                resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=_tmo)
+                print(f"[SHEETS] {resp.status_code} {resp.text[:120]}")
+                return
+            except Exception as e:
+                _last = _try == len(SHEETS_POST_TIMEOUTS)
+                print(f"[SHEETS {'ERROR' if _last else 'RETRY'}] "
+                      f"attempt {_try}/{len(SHEETS_POST_TIMEOUTS)} "
+                      f"(timeout={_tmo}s): {e}")
 
     # ==================================================================
     def _log(self, user_id: str, user_msg: str, reply: str):
