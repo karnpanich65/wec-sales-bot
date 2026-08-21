@@ -3054,7 +3054,19 @@ class BotEngine:
                        page_id: str = "") -> tuple[dict, bool]:
         skey = skey or user_id
         if skey in _lead_states:
-            return _lead_states[skey], False
+            # r63 (Gift 21 ส.ค. 2026) — ต้นตอจริงของ "แถวลีดซ้ำ 3-6 แถวต่อคน"
+            # state ที่เข้ามาอยู่ใน RAM มีทางเข้า 2 ทางที่ "ไม่มี psid" ติดมาด้วย:
+            #   · sweep_followups เอา snapshot จาก Postgres ยัดเข้า _lead_states
+            #   · handle_page_echo โหลด state จากชีตมาใช้ต่อ
+            # คอลัมน์ psid ใน Postgres แยกจาก state (ดู pg_store.list_handover)
+            # -> state ที่โหลดมาไม่เคยมีคีย์นี้ ของเดิมทางนี้คืนก้อนเดิมดิบๆ
+            # -> _upsert_lead ส่ง facebook_psid="" -> ชีตหาแถวเดิมไม่เจอ
+            # -> appendRow ใหม่ "ทุกข้อความ" (เคสจริง FB-RS-...-116/-117/-118
+            #    เป็นคนเดียวกัน เวลาเดียวกัน 20 ส.ค. 19:32)
+            _st = _lead_states[skey]
+            if isinstance(_st, dict) and not _st.get("psid"):
+                _st["psid"] = user_id
+            return _st, False
 
         # RAM ไม่มี — เซิร์ฟเวอร์เพิ่ง restart หรือเป็นลูกค้าใหม่จริง
         # 17 ส.ค. 2026 — บั๊กจริง: ของเดิมส่ง page_id จาก referral._page_id เท่านั้น
@@ -4503,6 +4515,7 @@ class BotEngine:
         if not state:
             state = {"data": {}, "signals": [], "asked": {}}
         state.setdefault("data", {})
+        state["psid"] = customer_id   # r63 — state จากชีตไม่มี psid ติดมา
         state["platform"] = platform
         if page_id:
             state["page_id"] = page_id
@@ -4942,6 +4955,7 @@ class BotEngine:
                 _asked[_fld] = _asked.get(_fld, 0) + 1
                 st["last_q"] = text.split(MSG_SPLIT)[-1]
             st["page_id"] = page_id or st.get("page_id", "")
+            st["psid"] = psid          # r63 — snapshot จาก DB ไม่มี psid
             self._add_signal(st, f"บอททักกลับเองหลังเงียบไป ~{it.get('hours')} ชม. "
                                  f"— ขอข้อมูลที่ยังขาด ({_fld or '-'})")
             _lead_states[skey] = st
@@ -5007,6 +5021,11 @@ class BotEngine:
             state.setdefault("data", {})
             state.setdefault("signals", [])
             state.setdefault("asked", {})
+            # r63 — เดิมบรรทัดนี้ตั้งแต่ page_id อย่างเดียว ลืม psid
+            # state ที่อ่านจาก Postgres ไม่มี psid (มันเป็นคอลัมน์แยก)
+            # -> ทุก _upsert_lead ระหว่างเล่นข้อความซ้ำ ส่ง facebook_psid=""
+            # -> ได้แถวใหม่ต่อ 1 ข้อความ = ต้นตอของ 45 แถวผี 21 ส.ค. 00:41-00:47
+            state["psid"] = psid
             state["page_id"] = page_id or state.get("page_id", "")
             # หาชื่อเซลจากข้อความที่เซลพิมพ์ — ดูทุกข้อความ ไม่ใช่แค่อันแรก
             if not state.get("handover_by"):
