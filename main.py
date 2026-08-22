@@ -35,7 +35,7 @@ from collections import deque
 import requests
 from flask import Flask, request, jsonify, Response
 from dotenv import load_dotenv
-from bot_logic import BotEngine, BOT_PAUSE_PAGES
+from bot_logic import BotEngine, BOT_PAUSE_PAGES, OBSERVE_PAGES, page_observe
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -115,6 +115,29 @@ def page_gender(page_id: str) -> str:
     ไม่ตั้ง = ชาย (ครับ) เหมือนเดิม -> เพจอสังหาคุ้มค่าไม่เปลี่ยนอะไรเลย
     """
     return (PAGES.get(str(page_id), {}) or {}).get("gender", "")
+
+
+# ======================================================
+# r70 (Gift 22 ส.ค. 2026) — เพจที่เปิดไว้แต่ "ยังไม่เปิดบอทตอบ"
+# ------------------------------------------------------
+# ประกาศในตัวเพจเอง ไม่ใช่สวิตช์ลับแยกต่างหาก:
+#   "1234567890": {"brand": "อสังหาเงินล้านคอนโด ปล่อยเช่า",
+#                  "tab": "Leads_MillionCondo", "reply": false}
+# รับ "mode": "observe" ด้วย เผื่ออ่านง่ายกว่าในสายตาคนตั้งค่า
+# ไม่ประกาศ = ตอบตามปกติ ไม่มีค่า default ที่ปิดเพจให้เอง
+# ======================================================
+def page_reply_off(page_id: str) -> bool:
+    cfg = PAGES.get(str(page_id), {}) or {}
+    if cfg.get("reply") is False:
+        return True
+    return str(cfg.get("mode", "")).strip().lower() in (
+        "observe", "silent", "listen", "log")
+
+
+OBSERVE_PAGES.update(str(_p) for _p in (PAGES or {}) if page_reply_off(_p))
+if OBSERVE_PAGES:
+    print("[OBSERVE] เพจโหมดเก็บข้อมูล (ไม่ตอบ แต่เก็บลีด/รีพอร์ตครบ): "
+          + ", ".join(sorted(OBSERVE_PAGES)))
 
 
 # ======================================================
@@ -215,7 +238,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r69"
+BOT_REVISION = "r70"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -473,6 +496,11 @@ def send_reply(recipient_id: str, text: str, page_id: str = ""):
     ถ้าหน่วงพิมพ์อยู่ใน request เลย Meta จะถือว่า timeout แล้วยิง event ซ้ำ
     ลูกค้าจะได้ข้อความซ้ำสองรอบ — เคยเจอมาแล้วตอน budget 8 วิ
     """
+    # r70 — เพจโหมดเก็บข้อมูล: ด่านสุดท้ายก่อนยิงจริง
+    if page_observe(page_id):
+        print(f"[OBSERVE] เพจ {page_id} ยังไม่เปิดบอทตอบ — ไม่ส่งข้อความ "
+              f"| {text[:60]!r}")
+        return
     threading.Thread(target=_send_reply_blocking,
                      args=(recipient_id, text, page_id),
                      daemon=True).start()
@@ -618,6 +646,9 @@ def _comment_handled(cid: str) -> bool:
 
 def reply_to_comment(comment_id: str, text: str, page_id: str = "") -> bool:
     """ตอบใต้คอมเมนต์แบบสาธารณะ (ต้องมีสิทธิ์ pages_manage_engagement)"""
+    if page_observe(page_id):          # r70 — เพจยังไม่เปิดบอทตอบ
+        print(f"[OBSERVE] เพจ {page_id} ยังไม่เปิดบอทตอบ — ไม่ตอบคอมเมนต์")
+        return False
     token = page_token(page_id)
     if not token:
         return False
@@ -679,6 +710,9 @@ def private_reply(page_id: str, comment_id: str, text: str,
     ข้อจำกัดของ Meta: ยิงได้ครั้งเดียวต่อคอมเมนต์
     -> ต้องรวมทุกอย่างที่อยากพูดไว้ในข้อความเดียว ห้ามแตกบับเบิล
     """
+    if page_observe(page_id):          # r70 — เพจยังไม่เปิดบอทตอบ
+        print(f"[OBSERVE] เพจ {page_id} ยังไม่เปิดบอทตอบ — ไม่ private reply")
+        return ""
     token = page_token(page_id)
     if not token or not page_id:
         return ""
@@ -1159,6 +1193,7 @@ def health():
     if request.args.get("pause") or request.args.get("mute"):
         try:
             out["paused_pages"] = sorted(BOT_PAUSE_PAGES)
+            out["observe_pages"] = sorted(OBSERVE_PAGES)
             out["page_mute_switch"] = "removed in r68"
         except Exception as e:
             out["paused_pages"] = {"error": str(e)[:200]}

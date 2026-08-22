@@ -2250,6 +2250,35 @@ SALES_NAMES = tuple({k for m in list(SALES_BY_PAGE.values()) + [SALES_ANY_PAGE]
 _GREET_WORDS = ("สวัสดี", "หวัดดี", "ขออนุญาต")
 
 
+# ======================================================
+# r70 (Gift 22 ส.ค. 2026) — เพจที่ "ยังไม่เปิดบอทตอบ"
+# ------------------------------------------------------
+# เพจใหม่มักเปิดก่อนที่ทีมจะพร้อม อยากได้ลีดกับรีพอร์ตไว้ก่อน
+# แต่ยังไม่อยากให้บอทพิมพ์คุยกับลูกค้า
+#
+# ต่างจากสวิตช์ปิดเพจที่ถอดทิ้งไปตอน r68 ตรงที่:
+#   · ประกาศไว้ในตัวเพจเอง (WEC_PAGES: {"reply": false}) เห็นคู่กับชื่อแบรนด์
+#   · ไม่มีค่า default — เพจที่ไม่ประกาศ ไม่มีทางโดนปิดเอง
+#   · เปิดดูได้ตลอดที่ /health?pause=1
+#
+# ไม่ได้เขียนทางเงียบขึ้นมาใหม่ — บังคับเข้าทาง handover เดิมทั้งดุ้น
+# (เส้นทางที่ใช้จริงทุกวันตอนเซลรับช่วงคุยเอง) จึงได้ครบโดยอัตโนมัติ:
+#   ทำ    : อ่านทุกข้อความ · เก็บรายได้/ภาระ/เบอร์ที่ลูกค้าบอกเอง
+#           · เขียน Postgres · เขียนแถวลีดลงชีต · เข้ารีพอร์ต CEO
+#   ไม่ทำ : พิมพ์ตอบ · ตอบใต้คอมเมนต์ · ทักเข้าแชทจากคอมเมนต์
+#           · ทักกลับตอนลูกค้าเงียบ (_FOLLOWUP_SKIP ข้าม handover อยู่แล้ว)
+#           · นัดโทรอัตโนมัติ
+# ไม่แจกเซล เพราะแท็บของเพจนี้ไม่ได้อยู่ในคิวแจกฝั่ง Apps Script
+# (main.py เติมชุดนี้ให้ตอนบูตจาก WEC_PAGES — ที่นี่เป็นแค่ที่พัก)
+# ======================================================
+OBSERVE_PAGES: set = set()
+
+
+def page_observe(page_id: str) -> bool:
+    """เพจนี้อยู่ในโหมดเก็บข้อมูลอย่างเดียวไหม (main.py import ไปใช้ด้วย)"""
+    return str(page_id or "") in OBSERVE_PAGES
+
+
 def _sales_of_page(page_id: str) -> dict:
     """เซลของเพจนั้น — เพจที่ยังไม่ได้ตั้งทีม ให้ตกไปใช้ลิสต์รวม
     (ดีกว่าปล่อยให้ "หยุดบอท" ใช้ไม่ได้เลยกับเพจใหม่)"""
@@ -2406,6 +2435,18 @@ class BotEngine:
         state, is_new = self._resolve_state(user_id, platform, referral,
                                             skey, page_id)
 
+        # r70 — เพจโหมดเก็บข้อมูล: ยัดเข้า handover ทุกข้อความ
+        # เขียน handover_at ใหม่ทุกรอบ -> TTL 6 ชม. ไม่มีวันครบ
+        # ใส่ handover_by -> _handover_gone_stale คืน False เสมอ
+        # (บอทจะไม่ "ดึงแชทกลับมาคุยเอง" ตอนฝั่งเพจเงียบ)
+        if page_observe(page_id):
+            state["observe"] = True
+            state["handover"] = True
+            state["handover_at"] = _now()
+            state["handover_sale_at"] = _now()
+            if not state.get("handover_by"):
+                state["handover_by"] = "(เพจยังไม่เปิดบอทตอบ)"
+
         # r64 — แชทนี้ถูกสั่งปิดบอทถาวร (เซลพิมพ์ประโยคปิด)
         # Gift เคาะ: เงียบ + ปิดเคสเลย ไม่แจกเซล ไม่ทักกลับ แต่ยังเก็บ log
         # ปลดล็อกได้ด้วย #เปิดบอท จากกล่องข้อความเพจ
@@ -2485,9 +2526,14 @@ class BotEngine:
                     self._handover_absorb(user_id, state, user_message)
                 except Exception as _hfe:
                     print(f"[HANDOVER ABSORB ERROR] {_hfe}")
-                _left = round((HANDOVER_TTL_SEC - _hage) / 3600, 1)
-                print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
-                      f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
+                if state.get("observe"):
+                    # r70 — เพจโหมดเก็บข้อมูล ไม่ใช่ "เซลดูแลเอง" อย่าให้ log โกหก
+                    print(f"[OBSERVE] {user_id[:8]}... เพจยังไม่เปิดบอทตอบ "
+                          f"— อ่านและเก็บไว้ ไม่ตอบ | {user_message[:40]!r}")
+                else:
+                    _left = round((HANDOVER_TTL_SEC - _hage) / 3600, 1)
+                    print(f"[HANDOVER] {user_id[:8]}... เซลดูแลเอง ข้ามการตอบ "
+                          f"(เหลืออีก ~{_left} ชม.) | {user_message[:40]!r}")
                 return "", None
             if _stale:
                 state["handover_idle_released"] = True
@@ -5250,6 +5296,18 @@ class BotEngine:
             + " — บอทเงียบกับลูกค้า แต่เก็บข้อมูลและแจกเคสให้อัตโนมัติ")
         if not dispatch:
             return True          # โหมดดูอย่างเดียว — จะแจก แต่ยังไม่เขียนอะไร
+        # r70 — เพจที่ยังไม่เปิดบอทตอบ: ต้องได้แถวลีด + เข้ารีพอร์ต
+        # แต่ห้ามนัดโทรอัตโนมัติ เพราะยังไม่มีเซลประจำเพจไว้รับสาย
+        if state.get("observe"):
+            self._add_signal(
+                state,
+                "🔕 เพจโหมดเก็บข้อมูล — ยังไม่เปิดบอทตอบลูกค้า "
+                "เก็บลีดกับรีพอร์ตไว้ก่อน ยังไม่แจกเซลและไม่นัดโทรอัตโนมัติ")
+            _g = self._finish(user_id, state, data.get("contact", ""),
+                              calendar=False)
+            print(f"[OBSERVE LEAD] {user_id[:8]}... เขียนลีดเพจโหมดเก็บข้อมูล "
+                  f"— เกรด {_g} · เบอร์ {'มี' if data.get('contact') else 'ยังไม่มี'}")
+            return True
         # calendar ตามเคสปกติ: มีเบอร์ = นัดโทร · ไม่มีเบอร์ = ลงชีตอย่างเดียว
         _g = self._finish(user_id, state, data.get("contact", ""),
                           calendar=bool(data.get("contact")))
