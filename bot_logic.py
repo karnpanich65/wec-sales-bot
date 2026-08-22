@@ -284,10 +284,46 @@ def _parse_income(msg: str) -> int | None:
         for unit, mult in _UNIT_MULT.items():
             if unit != "k" and (w + unit) in m:
                 return v * mult
+    # r69 (กติกา Gift "เอาตัวสูง") — ลูกค้าบอกเป็นช่วง "15000-20000"
+    # ของเดิมหยิบตัวแรก = ตัวต่ำสุดเสมอ -> ตีเกรดต่ำกว่าความจริง ตกเคสที่ควรได้
+    # ใหม่: ช่วงตัวเลข = ใช้ตัวสูง (ยังเก็บช่วงเต็มไว้ให้เซลตรวจสลิปจริงอีกที)
+    mr = re.search(r"(\d{4,7})\s*(?:-|–|—|ถึง|~)\s*(\d{4,7})", m)
+    if mr:
+        return max(int(mr.group(1)), int(mr.group(2)))
     mt = re.search(r"\d{4,7}", m)
     if mt:
         return int(mt.group(0))
     return None
+
+
+def _income_range(msg: str) -> tuple[int, int] | None:
+    """คืน (ต่ำสุด, สูงสุด) ถ้าลูกค้าบอกรายได้เป็นช่วง — ไม่ใช่ช่วงคืน None"""
+    m = (msg or "").replace(",", "").replace(" ", "").lower()
+    mr = re.search(r"(\d{4,7})\s*(?:-|–|—|ถึง|~)\s*(\d{4,7})", m)
+    if not mr:
+        return None
+    lo, hi = int(mr.group(1)), int(mr.group(2))
+    return (min(lo, hi), max(lo, hi)) if lo != hi else None
+
+
+# r69 — "ก่อนหัก 37,000 หักหลัง 34,000" / "40000 แต่รับจริง 13000"
+# ธนาคารดูรายได้ก่อนหัก แต่ช่องว่างที่กว้างมาก = โดนหักหน้าซองหนัก
+# (สหกรณ์/ผ่อนผ่านบริษัท) ซึ่งไม่ขึ้นบูโร แต่กิน DSR เต็มๆ — เซลต้องรู้
+_NET_INCOME_WORDS = ("รับจริง", "หักหลัง", "หลังหัก", "สุทธิ", "เหลือจริง",
+                     "เงินเข้าจริง", "ได้จริง", "ตัวจริง", "เหลือรับ")
+_GROSS_INCOME_WORDS = ("ก่อนหัก", "ฐานเงินเดือน", "เงินเดือนเต็ม", "ตัวเต็ม")
+
+
+def _income_gross_net(msg: str) -> tuple[int, int] | None:
+    """คืน (ก่อนหัก, รับจริง) ถ้าข้อความบอกทั้งสองตัว — ไม่ครบคืน None"""
+    if not _has_any(msg, _NET_INCOME_WORDS):
+        return None
+    nums = _all_amounts(msg)
+    nums = [n for n in nums if 3000 <= n <= 3_000_000]
+    if len(nums) < 2:
+        return None
+    hi, lo = max(nums), min(nums)
+    return (hi, lo) if hi > lo else None
 
 # ----------------------------------------------------------------------
 # Phase 5.9 — เกรดลีดตามกำลังกู้จริง (Gift เคาะ 16 ส.ค. 2026)
@@ -823,6 +859,35 @@ NCB_Q = {
               "คือเคยติดแบล็คลิสต์ เคยจ่ายช้า หรือเคยปรับโครงสร้างหนี้ครับ "
               "แล้วตอนนี้ปิดไปหมดหรือยังครับ — ธนาคารดูตรงนี้เป็นหลักครับ"),
 }
+
+# r69 — ลูกค้าตอบคำถามบูโรด้วย "ที่มาของหนี้" แทนที่จะตอบว่าปิดหรือยัง
+# ("บัตรเครดิตค่ะ") ของเดิมถือว่าตอบไม่ตรง แล้วยิงคำถามเดิมซ้ำคำต่อคำ
+# อ่านแล้วเหมือนบอทไม่ฟัง — เคสจริง 22 ส.ค. เพจ Wealth Estate
+_NCB_SOURCE_WORDS = (
+    ("บัตรกดเงินสด", "บัตรกดเงินสด"), ("บัตรเงินสด", "บัตรกดเงินสด"),
+    ("บัตรเครดิต", "บัตรเครดิต"), ("สินเชื่อส่วนบุคคล", "สินเชื่อส่วนบุคคล"),
+    ("เช่าซื้อ", "เช่าซื้อ"), ("มอเตอร์ไซค์", "สินเชื่อรถจักรยานยนต์"),
+    ("รถมอไซค์", "สินเชื่อรถจักรยานยนต์"), ("กยศ", "กยศ."),
+    ("สหกรณ์", "สหกรณ์"), ("นอกระบบ", "หนี้นอกระบบ"),
+    ("ผ่อนรถ", "สินเชื่อรถ"), ("สินเชื่อรถ", "สินเชื่อรถ"),
+    ("ผ่อนบ้าน", "สินเชื่อบ้าน"), ("สินเชื่อบ้าน", "สินเชื่อบ้าน"),
+)
+
+
+def _ncb_source(msg: str) -> str:
+    """ลูกค้าบอกว่าประวัติเครดิตมาจากหนี้ก้อนไหน — ไม่บอกคืน "" """
+    m = (msg or "").lower()
+    for key, label in _NCB_SOURCE_WORDS:
+        if key in m:
+            return label
+    return ""
+
+
+NCB_REASK_Q = (
+    "รับทราบครับ เรื่อง{src} นี่แหละที่ธนาคารดูเป็นหลักครับ "
+    "ขออนุญาตถามต่ออีก 2 ข้อสั้นๆ ครับ ตอนนี้ปิดหมดแล้วหรือยังครับ "
+    "ถ้าปิดแล้วปิดมากี่ปีแล้วครับ"
+)
 
 NCB_SOFT_CLOSE = (
     "ขอบคุณที่ให้ข้อมูลตรงๆ นะครับ 🙏 เคสลักษณะนี้ตอนนี้ธนาคารส่วนใหญ่ยังไม่รับ"
@@ -1622,6 +1687,107 @@ def _is_question_clause(clause: str) -> bool:
     return False
 
 
+# ======================================================
+# r69 (Gift 22 ส.ค. 2026) — "ตอบ + ถาม" มาในข้อความเดียว
+# ------------------------------------------------------
+# เคสจริง 22 ส.ค. 09:08 น. เพจ Wealth Estate (คุณ Aiir Waratchaya):
+#   ลูกค้าพิมพ์ "งานประจำค่ะ รายได้~30,000 แต่น่าจะติดบูโรสามารถทำได้ไหมคะ"
+#   ของเดิม process() เช็ค `not self._is_question(msg)` ก่อนเก็บคำตอบ
+#   ข้อความนี้ลงท้าย "ไหมคะ" = คำถาม -> ทิ้งทั้งก้อน -> ช่องรายได้ว่าง
+#   -> log ขึ้น "[INCOME GATE] คำถามรายได้ซ้ำ — ยังไม่รู้รายได้"
+#   -> อีก 2 เทิร์นถัดมาบอทถามรายได้ประโยคเดิมเป๊ะ ลูกค้าเห็นว่าบอทไม่ฟัง
+#
+# กติกาใหม่: ข้อความที่มีทั้งคำตอบและคำถาม ให้ "แยกส่วน" —
+#   เก็บส่วนที่เป็นคำตอบเข้าช่องทันที แล้วยังตอบคำถามที่พ่วงมาตามปกติ
+# ======================================================
+_POLITE_TAILS = ("นะครับผม", "นะครับ", "นะคะ", "ครับผม", "คร้าบ", "คร๊าบ",
+                 "ครับ", "คับ", "ค่ะ", "คะ", "ค๊ะ", "ค่า", "ฮะ", "ฮ่ะ",
+                 "จ้า", "จ้ะ", "จ๊ะ", "จ๋า")
+_TRIM_CHARS = " .,!?…~\u200b\n\t"
+
+
+def _strip_polite(text: str) -> str:
+    """ตัดคำลงท้ายสุภาพออก เพื่อให้เห็น "คำท้ายจริง" ของประโยค
+
+    ต้องมี เพราะ "ทำได้ไหมคะ" ลงท้ายด้วย "คะ" ไม่ใช่ "ไหม"
+    ตัวเช็คคำถามเดิมจึงอ่านไม่ออกว่าเป็นคำถาม
+    """
+    t = (text or "").strip().strip(_TRIM_CHARS)
+    for _ in range(6):
+        before = t
+        for w in _POLITE_TAILS:
+            if t.endswith(w):
+                t = t[:-len(w)].strip().strip(_TRIM_CHARS)
+                break
+        if t == before:
+            break
+    return t
+
+
+def _clause_is_question(clause: str) -> bool:
+    """เหมือน _is_question_clause แต่มองข้ามคำลงท้ายสุภาพก่อน
+    (แยกฟังก์ชันไว้ ไม่ไปแตะ to_female ที่ใช้ตัวเดิมอยู่)"""
+    c = (clause or "").strip()
+    if "?" in c:
+        return True
+    return _is_question_clause(_strip_polite(c)) or _is_question_clause(c)
+
+
+# จุดตัดประโยคที่คนไทยใช้จริง: ขึ้นบรรทัดใหม่ / หลังคำลงท้ายสุภาพ / คำว่า "แต่"
+# ห้ามตัดที่ลูกน้ำ เพราะ "30,000" จะโดนหั่นเป็น "30" กับ "000"
+_CLAUSE_SPLIT_RE = re.compile(
+    r"\n+"
+    r"|(?<=ค่ะ)\s+|(?<=คะ)\s+|(?<=ครับ)\s+|(?<=คับ)\s+|(?<=จ้า)\s+"
+    r"|\s+แต่(?=\S)|\s+แล้ว(?=อยาก|จะ|ต้อง)"
+    r"|(?<=\?)\s*")
+
+
+# ตัด "หางคำถาม" ออกจากท้ายประโยค — คนไทยพิมพ์ติดกันไม่เว้นวรรค
+# "พนักงานประจำ 32000/เดือน แบบนี้ได้ไหมคะ" -> เหลือ "พนักงานประจำ 32000/เดือน"
+_TAIL_Q_CUT = re.compile(
+    r"\s*\S{0,25}?(?:ได้ไหม|ได้มั้ย|ได้ป่าว|ไหม|มั้ย|หรือเปล่า|รึเปล่า|หรือไม่"
+    r"|เท่าไหร่|เท่าไร|กี่บาท|ยังไง|อย่างไร|เมื่อไหร่|ที่ไหน|อะไรบ้าง|บ้าง)\s*$")
+
+
+def _cut_tail_question(clause: str) -> str:
+    """คืนส่วนหน้าที่ยังเป็น "คำบอกเล่า" หลังตัดหางคำถามทิ้ง ("" = ไม่เหลืออะไร)"""
+    c = _strip_polite(clause)
+    if not c:
+        return ""
+    head = _TAIL_Q_CUT.sub("", c).strip().strip(_TRIM_CHARS)
+    if not head or head == c or len(head) < 3:
+        return ""
+    return head if not _clause_is_question(head) else ""
+
+
+def _answer_part(msg: str) -> str:
+    """คืนเฉพาะ "ส่วนที่เป็นคำตอบ" ของข้อความที่มีทั้งคำตอบและคำถาม
+
+    คืน "" เมื่อ: ทั้งก้อนเป็นคำถามล้วน / ทั้งก้อนไม่มีคำถามเลย
+    (สองกรณีนั้นเส้นทางเดิมจัดการถูกอยู่แล้ว ไม่ต้องเข้ามายุ่ง)
+    """
+    t = (msg or "").strip()
+    if not t or len(t) > 400:
+        return ""
+    parts = [p.strip() for p in _CLAUSE_SPLIT_RE.split(t) if p and p.strip()]
+    keep = []
+    dropped = False
+    for p in parts:
+        if not _clause_is_question(p):
+            keep.append(p)
+            continue
+        dropped = True
+        head = _cut_tail_question(p)
+        if head:
+            keep.append(head)
+    if not keep or not dropped:
+        return ""
+    out = " ".join(keep).strip()
+    if len(out) < 2 or out == t:
+        return ""
+    return out
+
+
 # สั่ง AI ให้เขียนเสียงหญิงตั้งแต่ต้นทาง ดีกว่าไปแปลงทีหลัง
 # (ข้อความที่ AI สร้างสดทุกครั้ง กฎแปลงเดาไม่ได้ 100%)
 FEMALE_VOICE_RULE = (
@@ -2405,6 +2571,17 @@ class BotEngine:
         bubbles: list[str] = []
         grade = None
 
+        # ---- 0.0) r69 — เก็บคำตอบที่พ่วงมากับคำถาม "ก่อน" ทุกสาขา -------
+        # เคสจริง 22 ส.ค. 09:08 เพจ Wealth Estate (คุณ Aiir Waratchaya)
+        #   "งานประจำค่ะ รายได้~30,000 แต่น่าจะติดบูโรสามารถทำได้ไหมคะ"
+        #   -> สาขาบูโร (บรรทัด ~2760) ตอบคำถามบูโรแล้ว return ออกกลางคัน
+        #   -> ไม่มีใครเก็บ "รายได้ 30,000" ที่พ่วงมาในข้อความเดียวกัน
+        #   -> ช่องรายได้ว่าง -> อีก 2 เทิร์นบอทถามรายได้ประโยคเดิมเป๊ะ
+        # สาขาที่ return กลางคันมีหลายจุด (บูโร/แบล็คลิสต์/ทำเล/อายุ/ปิดเคส)
+        # จึงต้องเก็บให้เสร็จตั้งแต่บรรทัดแรก ก่อนที่ทางไหนจะพาออกไป
+        if self._harvest(user_id, state, msg, awaiting):
+            awaiting = None
+
         # ---- 0) คำตอบของคำถามขอชื่อ (ถามครั้งเดียว ไม่วนซ้ำ) ----------
         # ไม่ใช่ชื่อ -> ปล่อยไหลไปตอบตามปกติ ห้ามถามชื่อซ้ำเด็ดขาด
         if state.pop("awaiting_name", False):
@@ -2543,6 +2720,15 @@ class BotEngine:
                     print(f"[NCB REJECT] {user_id[:8]}... ยังติดบูโรอยู่ — ปิดจบ ไม่แจกเซล")
                     return [NCB_SOFT_CLOSE], grade
             else:
+                # r69 — ตอบมาว่าหนี้ก้อนไหน (ไม่ได้ตอบว่าปิดหรือยัง)
+                # เก็บไว้ให้เซล แล้วถามซ้ำ "ด้วยคำใหม่ที่รับรู้คำตอบเขา"
+                _src = _ncb_source(msg)
+                if _src and not data.get("ncb_source"):
+                    data["ncb_source"] = _src
+                    self._add_signal(
+                        state,
+                        f"ประวัติเครดิตมาจาก{_src} — ยังไม่ได้คำตอบว่าปิดแล้วกี่ปี "
+                        "ให้เซลดึงบูโรจริงเช็ค")
                 # ตอบไม่ตรง -> ถามซ้ำได้ 1 ครั้ง แล้วปล่อย ไม่ไล่บี้
                 if not state.get("ncb_reasked"):
                     state["ncb_reasked"] = True
@@ -2871,9 +3057,25 @@ class BotEngine:
             state["awaiting"] = "contact"
 
         consumed = False
-        if awaiting and not self._is_question(msg) and self._is_valid_answer(awaiting, msg):
-            self._capture(state, awaiting, msg)
-            consumed = True
+        # r69 — "ตอบ + ถาม" มาในข้อความเดียว (เคสจริง 22 ส.ค. เพจ Wealth Estate
+        # "งานประจำค่ะ รายได้~30,000 แต่น่าจะติดบูโรสามารถทำได้ไหมคะ")
+        # ของเดิมเห็นว่าเป็นคำถามเลยทิ้งทั้งก้อน -> ช่องรายได้ว่าง -> ถามซ้ำ
+        # ใหม่: แยกส่วนคำตอบมาเก็บก่อน แล้วยังปล่อยให้ไปตอบคำถามที่พ่วงมาตามปกติ
+        # (ยกเว้นช่อง contact — เส้นทางนั้นปิดการขายแล้ว return ทันที ห้ามแตะ)
+        _ans, _q_tail = msg, False
+        if awaiting and awaiting != "contact" and self._is_question(msg):
+            _p = _answer_part(msg)
+            if (_p and not self._is_question(_p)
+                    and self._is_valid_answer(awaiting, _p)):
+                _ans, _q_tail = _p, True
+                print(f"[SPLIT ANSWER] {user_id[:8]}... แยกคำตอบออกจากคำถาม "
+                      f"-> {awaiting}={_p[:50]!r}")
+        if (awaiting and not self._is_question(_ans)
+                and self._is_valid_answer(awaiting, _ans)):
+            self._capture(state, awaiting, _ans)
+            # มีคำถามพ่วงมาด้วย = ยังไม่ถือว่า "ใช้ข้อความนี้หมดแล้ว"
+            # ต้องปล่อยให้ไหลไปตอบคำถามของลูกค้าต่อ ไม่งั้นลูกค้าไม่ได้คำตอบ
+            consumed = not _q_tail
             state["awaiting"] = None
             # ตอบครบทุกข้อพอดี -> ปิดการขาย
             if awaiting == "contact":
@@ -2922,6 +3124,29 @@ class BotEngine:
                 self._close_chat(state)
                 return [NO_COBORROWER_CLOSE if data.get("co_borrower_none")
                         else WEAK_COBORROWER_CLOSE], grade
+
+        # r69 — ลูกค้าบอกตัวเลขชัดๆ ตอนที่บอทกำลังรอคำตอบข้ออื่นอยู่
+        # ของเดิมตัวเลขนั้นหล่นหาย แล้ววนกลับมาถามข้อเดิมซ้ำอีกรอบ
+        # เก็บเฉพาะที่มี "คำบอกชนิด" ชัดเจนเท่านั้น (เงินเดือน/รายได้ vs ผ่อน/หนี้)
+        # ไม่เดาจากตัวเลขลอยๆ เพราะ "บัตร 4 ใบรวม 380000" ไม่ใช่รายได้
+        if (not state.get("done") and not _looks_like_phone(msg)
+                and awaiting not in ("co_borrower", "co_income",
+                                     "co_debt", "co_self_emp")):
+            _src = _answer_part(msg) or msg
+            if (not _income_known(data) and awaiting != "income"
+                    and _has_any(_src, _INCOME_SAYS)
+                    and not _has_any(_src, _DEBT_SAYS)
+                    and _parse_income(_src)):
+                self._capture(state, "income", _src)
+                print(f"[CATCH INCOME] {user_id[:8]}... เก็บรายได้จากข้อความที่ไม่ได้ถาม "
+                      f"-> {_parse_income(_src):,}")
+            if (not data.get("debt") and awaiting != "debt"
+                    and _has_any(_src, _DEBT_SAYS)
+                    and not _has_any(_src, _INCOME_SAYS)
+                    and _parse_debt_monthly(_src)):
+                self._capture(state, "debt", _src)
+                print(f"[CATCH DEBT] {user_id[:8]}... เก็บยอดผ่อนจากข้อความที่ไม่ได้ถาม "
+                      f"-> {_parse_debt_monthly(_src):,}")
 
         if not consumed:
             faq = self._check_faq(msg)
@@ -2973,7 +3198,11 @@ class BotEngine:
                 # (ปีกู้สั้น = ต้องวิ่งไปหาผู้กู้ร่วมทันที ไม่ใช่ไล่ถามตามคิวเดิม)
                 if state.pop("ncb_pending", False):
                     state["awaiting_ncb"] = True
-                    bubbles.append(NCB_Q.get(state.get("ncb_kind"), NCB_Q["blacklist"]))
+                    # r69 — รู้แล้วว่าหนี้ก้อนไหน = ห้ามยิงประโยคเดิมซ้ำคำต่อคำ
+                    _nsrc = data.get("ncb_source")
+                    bubbles.append(
+                        NCB_REASK_Q.format(src=_nsrc) if _nsrc
+                        else NCB_Q.get(state.get("ncb_kind"), NCB_Q["blacklist"]))
                     return [b for b in bubbles if b and b.strip()], grade
                 if state.pop("age_pending", False):
                     state["awaiting_age"] = True
@@ -3473,6 +3702,54 @@ class BotEngine:
     # ==================================================================
     # เก็บคำตอบ / หาคำถามที่ยังขาด / ทวนความจำ
     # ==================================================================
+    def _harvest(self, user_id: str, state: dict, msg: str,
+                 awaiting: str | None) -> bool:
+        """r69 — เก็บคำตอบจากข้อความที่ "ตอบ + ถาม" มาในก้อนเดียว
+
+        ทำงานเฉพาะเมื่อข้อความเป็นคำถาม เพราะเส้นทางปกติจะข้ามการเก็บทิ้ง
+        (ข้อความที่เป็นคำตอบล้วนๆ เส้นทางเดิมเก็บถูกอยู่แล้ว ไม่ต้องมายุ่ง)
+
+        คืน True เมื่อเก็บลงช่องที่กำลังรออยู่ได้ -> ผู้เรียกต้องเคลียร์ awaiting
+        """
+        if state.get("done") or state.get("closed") or state.get("bot_off"):
+            return False
+        if not self._is_question(msg) or _looks_like_phone(msg):
+            return False
+        part = _answer_part(msg)
+        if not part or self._is_question(part):
+            return False
+        data = state.setdefault("data", {})
+        took = False
+        # 1) ตอบตรงช่องที่บอทกำลังรออยู่
+        if (awaiting in ("income", "debt", "co_income", "co_debt",
+                         "objective", "coop")
+                and not data.get(awaiting)
+                and self._is_valid_answer(awaiting, part)):
+            self._capture(state, awaiting, part)
+            state["awaiting"] = None
+            took = True
+            print(f"[HARVEST] {user_id[:8]}... เก็บ {awaiting} จากข้อความที่มีคำถามพ่วง "
+                  f"-> {part[:50]!r}")
+        # 2) บอกตัวเลขมาเองทั้งที่บอทถามข้ออื่นอยู่ — เก็บเฉพาะที่ระบุชนิดชัด
+        # ห้ามทำตอนกำลังถามเรื่องผู้กู้ร่วม ไม่งั้นรายได้ผู้กู้ร่วมจะไปลงช่องผู้กู้หลัก
+        if awaiting in ("co_borrower", "co_income", "co_debt", "co_self_emp"):
+            return took
+        if (not _income_known(data) and not data.get("income")
+                and _has_any(part, _INCOME_SAYS)
+                and not _has_any(part, _DEBT_SAYS)
+                and _parse_income(part)):
+            self._capture(state, "income", part)
+            print(f"[HARVEST] {user_id[:8]}... เก็บรายได้ที่ลูกค้าบอกเอง "
+                  f"-> {_parse_income(part):,}")
+        if (not data.get("debt")
+                and _has_any(part, _DEBT_SAYS)
+                and not _has_any(part, _INCOME_SAYS)
+                and _parse_debt_monthly(part)):
+            self._capture(state, "debt", part)
+            print(f"[HARVEST] {user_id[:8]}... เก็บยอดผ่อนที่ลูกค้าบอกเอง "
+                  f"-> {_parse_debt_monthly(part):,}")
+        return took
+
     def _capture(self, state: dict, field: str, msg: str):
         data = state["data"]
         # r57 (เคสมอส เพจ Millionaire Asset 20 ส.ค. 2026) — คำตอบมาช้ากว่าคำถาม
@@ -3570,6 +3847,27 @@ class BotEngine:
                 state,
                 "โดนหักสหกรณ์/หน้าซอง — ไม่ขึ้นบูโรแต่กระทบ DSR เต็มๆ "
                 "ต้องได้ยอดหักต่อเดือน + ยอดคงเหลือก่อนประเมินวงเงิน")
+        # r69 — เก็บ "ช่วงรายได้" และ "ก่อนหัก/รับจริง" ให้เซลเห็น
+        if field in ("income", "co_income"):
+            _rg = _income_range(msg)
+            if _rg and not data.get(f"{field}_range"):
+                data[f"{field}_range"] = _rg
+                _who = "ลูกค้า" if field == "income" else "ผู้กู้ร่วม"
+                self._add_signal(
+                    state,
+                    f"{_who}บอกรายได้เป็นช่วง {_rg[0]:,}–{_rg[1]:,} บาท "
+                    f"— ตีเกรดด้วยตัวสูง ({_rg[1]:,}) ต้องขอสลิปจริงยืนยันก่อนยื่น")
+            _gn = _income_gross_net(msg)
+            if _gn and not data.get(f"{field}_net"):
+                data[f"{field}_gross"], data[f"{field}_net"] = _gn
+                _gap = _gn[0] - _gn[1]
+                _who = "ลูกค้า" if field == "income" else "ผู้กู้ร่วม"
+                self._add_signal(
+                    state,
+                    f"{_who}ก่อนหัก {_gn[0]:,} แต่รับจริง {_gn[1]:,} "
+                    f"(โดนหัก {_gap:,}/เดือน) — ธนาคารดูตัวก่อนหัก "
+                    f"แต่ยอดหักนี้กิน DSR จริง ขอสลิป 3 เดือนดูรายการหัก")
+                print(f"[GROSS/NET] {field} ก่อนหัก {_gn[0]:,} รับจริง {_gn[1]:,}")
         if field == "coop":
             nums = _all_amounts(msg)
             if len(nums) >= 2:
