@@ -36,6 +36,9 @@ import requests
 from flask import Flask, request, jsonify, Response
 from dotenv import load_dotenv
 from bot_logic import BotEngine, BOT_PAUSE_PAGES, OBSERVE_PAGES, page_observe
+# r71 (Gift 23 ส.ค. 2026) — โหมดดับอารมณ์
+from bot_logic import _lead_states
+from wec_calm import detect_anger, calm_mode
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -257,7 +260,74 @@ CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "karnpanich.phutrakul@gmail.com"
 PAGE_URL = "https://m.me/108248514185091"
 
 app = Flask(__name__)
-bot = BotEngine()
+# ======================================================
+# r71 (Gift 23 ส.ค. 2026) — โหมดดับอารมณ์ (ครอบ BotEngine ไว้ชั้นนอก)
+# ------------------------------------------------------
+# ทำไมครอบตรงนี้ แทนที่จะแก้ข้างใน bot_logic.py:
+#   bot_logic.py 448KB อัปผ่านหน้าเว็บ GitHub ไม่ผ่านสักครั้ง (ลอง 4 รอบ
+#   ค้างที่ "Uploading" ทุกรอบ) — ครอบชั้นนอกได้ผลเหมือนกันทุกประการ
+#   และดีตรงที่ bot_logic.py ไม่ต้องแตะเลยแม้แต่บรรทัดเดียว
+#
+# กลไก 3 จังหวะ:
+#   1) ก่อนเข้า process — จับอารมณ์ได้ -> ยัดธง handover ลง state ก่อน
+#      ทำให้ process ตัวเดิมวิ่งเข้าทาง "เซลดูแลเอง": เก็บ log + ดูดข้อมูล
+#      + แจกเคสครบ แต่ "ไม่รันสคริปต์ขาย" (ไม่ถามรายได้ ไม่เสนอโครงการ)
+#   2) process ตัวเดิมคืน "" มา (เพราะโดนธง handover)
+#   3) เอาข้อความดับอารมณ์ไปแทน + คืนธง "!" ให้ข้างล่างปลุกคน
+#
+# เรียก _resolve_state เองก่อน 1 ครั้งเพื่อให้มี state ให้ยัดธงตั้งแต่
+# ข้อความแรกของแชทใหม่ — ปลอดภัยเพราะฟังก์ชันนี้ idempotent
+# (คีย์ซ้ำ = คืนก้อนเดิม) และ process จะเรียกซ้ำอีกทีเองอยู่แล้ว
+# ======================================================
+class CalmBotEngine(BotEngine):
+    def process(self, user_message, user_id, referral=None,
+                platform="facebook", page_id="", brand="",
+                sheet_tab="", gender=""):
+        lvl = detect_anger(user_message)
+        skey = f"{page_id}:{user_id}" if page_id else user_id
+
+        if lvl:
+            try:
+                st, _ = self._resolve_state(user_id, platform,
+                                            referral or {}, skey, page_id)
+                _t = int(time.time())
+                st["handover"] = True
+                st["handover_at"] = _t
+                st["handover_sale_at"] = _t
+                st["handover_by"] = "(เคสร้องเรียน — รอผู้จัดการ)"
+            except Exception as _e:
+                print(f"[CALM PRELOCK] {_e}")
+
+        reply, grade = super().process(
+            user_message, user_id, referral=referral, platform=platform,
+            page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+
+        if not lvl:
+            return reply, grade
+
+        st = _lead_states.get(skey)
+        if st is None:
+            print("[CALM] ไม่พบ state หลัง process — ตอบดับอารมณ์ + ปลุกคนอย่างเดียว")
+            return CALM_FALLBACK, "!"
+
+        calm, flag = calm_mode(self, user_id, st, user_message, lvl)
+
+        # Chat_Log เพิ่งบันทึกไปว่า "(เซลดูแลเอง — บอทไม่ตอบ)" ซึ่งไม่จริง
+        # เพราะรอบนี้บอทตอบจริง -> เขียนอีกแถวให้ตรงกับสิ่งที่ส่งออกไป
+        if calm:
+            try:
+                self._log(user_id, "", calm)
+                self._persist(user_id, st, "", calm, "angry")
+            except Exception as _e:
+                print(f"[CALM LOG] {_e}")
+        return calm, flag
+
+
+CALM_FALLBACK = ("รับเรื่องแล้วครับ ผมส่งต่อให้ผู้จัดการแล้วนะครับ "
+                 "รบกวนขอชื่อ-นามสกุล เบอร์ติดต่อ และเวลาที่สะดวก "
+                 "จะให้โทรกลับหาคุณโดยตรงครับ")
+
+bot = CalmBotEngine()
 
 # ======================================================
 # r51 (Gift 20 ส.ค. 2026) — ทักกลับเคสที่เงียบไปแต่ข้อมูลยังไม่ครบ
