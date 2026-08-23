@@ -238,7 +238,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r70"
+BOT_REVISION = "r71"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -490,17 +490,23 @@ def _send_reply_blocking(recipient_id: str, text: str, page_id: str = ""):
                 break
 
 
-def send_reply(recipient_id: str, text: str, page_id: str = ""):
+def send_reply(recipient_id: str, text: str, page_id: str = "",
+               force: bool = False):
     """ยิงในเธรดเบื้องหลัง — webhook จะได้ตอบ 200 ให้ Meta ภายในไม่กี่ ms
 
     ถ้าหน่วงพิมพ์อยู่ใน request เลย Meta จะถือว่า timeout แล้วยิง event ซ้ำ
     ลูกค้าจะได้ข้อความซ้ำสองรอบ — เคยเจอมาแล้วตอน budget 8 วิ
     """
     # r70 — เพจโหมดเก็บข้อมูล: ด่านสุดท้ายก่อนยิงจริง
-    if page_observe(page_id):
+    # r71 — ยกเว้นข้อความดับอารมณ์ (force=True) Gift เคาะ 23 ส.ค. 2026:
+    #       "คงโหมดเงียบไว้ แต่ให้ override ตอนโกรธ"
+    if page_observe(page_id) and not force:
         print(f"[OBSERVE] เพจ {page_id} ยังไม่เปิดบอทตอบ — ไม่ส่งข้อความ "
               f"| {text[:60]!r}")
         return
+    if force and page_observe(page_id):
+        print(f"[CALM OVERRIDE] เพจ {page_id} โหมดเก็บข้อมูล "
+              f"แต่จับอารมณ์ได้ — ตอบ 1 ข้อความ | {text[:60]!r}")
     threading.Thread(target=_send_reply_blocking,
                      args=(recipient_id, text, page_id),
                      daemon=True).start()
@@ -877,6 +883,33 @@ def alert_lead(sender_id: str, user_text: str, ad_id: str = "",
     send_message(target, alert, page_id)
 
 
+def alert_complaint(sender_id: str, user_text: str, ad_id: str = "",
+                    page_id: str = ""):
+    """r71 (Gift 23 ส.ค. 2026) — ลูกค้าไม่พอใจ ต้องมีคนรู้ "เสมอ"
+
+    ต่างจาก alert_lead อยู่จุดเดียว: ห้ามเงียบ
+    เพจที่ยังไม่ได้ตั้ง alert_psid ให้ตกมาที่ Gift แทนการข้ามไปเฉยๆ
+    (ลีดเกรด A หลุดยังตามเก็บจากชีตได้ เรื่องร้องเรียนหลุด = เสียลูกค้าถาวร)
+    """
+    target = page_alert_psid(page_id) or GIFT_FB_PSID
+    if not target:
+        print("[COMPLAINT] ไม่มีผู้รับแจ้งเตือนเลย "
+              "— ดูในชีต ช่องสัญญาณจะขึ้น 🔴 เคสร้องเรียน")
+        return
+    alert = (
+        f"🔴 เคสร้องเรียน — {page_brand(page_id)}\n"
+        f"Sender: {sender_id}\n"
+        f"ข้อความ: {user_text[:200]}\n"
+        f"Ad ID: {ad_id or '-'}\n\n"
+        "บอทหยุดขายและส่งต่อให้คนดูแลแล้ว — โทรกลับด่วนครับ"
+    )
+    ok = send_message(target, alert, page_id)
+    # เพจรองส่งหา Gift ไม่ได้ถ้า Gift ไม่เคยทักเพจนั้น -> ถอยไปยิงจากเพจหลัก
+    if not ok and page_id and str(page_id) != MAIN_PAGE_ID:
+        send_message(target, alert, MAIN_PAGE_ID)
+    print(f"[COMPLAINT] แจ้งเตือนไปที่ {_mask(target)} page={page_id or '-'}")
+
+
 def extract_referral(event: dict) -> dict:
     """
     ดึงข้อมูล referral จาก event ทุกรูปแบบที่ Facebook ส่งมา:
@@ -988,12 +1021,16 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
             gender=page_gender(page_id),
     )
     if reply_text and reply_text.strip():
-        send_reply(sender_id, reply_text, page_id)
+        send_reply(sender_id, reply_text, page_id,
+                   force=(lead_grade == "!"))    # r71 — ดับอารมณ์ทะลุเพจเงียบ
     else:
         print(f"[SILENT] ({platform}) {_mask(sender_id)} ไม่ตอบ (เซลดูแลเอง)")
 
     if lead_grade == "A":
         alert_lead(sender_id, user_text, lead_referral.get("ad_id", ""), page_id)
+    elif lead_grade == "!":      # r71 — เคสร้องเรียน ปลุกคนทันที
+        alert_complaint(sender_id, user_text,
+                        lead_referral.get("ad_id", ""), page_id)
 
     print(f"[MSG] ({platform}) {sender_id[:10]}... Grade={lead_grade or '-'} "
           f"| Q={user_text[:40]!r} | ad_id={lead_referral.get('ad_id') or '-'}")
