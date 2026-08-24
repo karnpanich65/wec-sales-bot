@@ -241,7 +241,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r73"
+BOT_REVISION = "r75"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -338,6 +338,17 @@ class CalmBotEngine(BotEngine):
         stop = detect_stop(user_message)          # r73 — ลูกค้าสั่งหยุด
         skey = f"{page_id}:{user_id}" if page_id else user_id
 
+        # r75 — ล้างธงที่ตัวกันข้อความซ้ำของ r73 ทำค้างไว้
+        # แชทที่โดนโยนเข้าโหมดรอคนตอนนั้น จะติดเงียบยาว 6 ชม. ถ้าไม่ล้าง
+        # (ทำแบบเดียวกับตัวล้าง "(ปิดบอทรายเพจ)" ของ r68)
+        _bad = _lead_states.get(skey)
+        if _bad is not None and _bad.get("handover_by") == "(บอทเริ่มพูดวน — รอผู้จัดการ)":
+            _bad["handover"] = False
+            _bad["handover_by"] = ""
+            _bad["handover_ended_at"] = int(time.time())
+            _bad.pop("dup_blocked", None)
+            print(f"[DUP UNSTICK] {_mask(user_id)} ล้างธงที่ r73 ทำค้าง — บอทกลับมาคุยได้")
+
         if lvl or stop:
             try:
                 st, _ = self._resolve_state(user_id, platform,
@@ -354,25 +365,24 @@ class CalmBotEngine(BotEngine):
             user_message, user_id, referral=referral, platform=platform,
             page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
 
-        # r73 — ตัวกันข้อความซ้ำ: ห้ามส่งข้อความที่เพิ่งส่งไปแล้วใน 6 บับเบิลหลัง
-        # เคสจริง 23 ส.ค.: STATUS_MSG ตัวเดียวกันถูกส่ง 3 ครั้ง
-        # ลูกค้าทัก "ทำไมซ้ำวนจังเลยครับ" · Meta ขึ้น moved-to-spam 5 ครั้ง
-        # ซ้ำ = ไม่ส่ง + ส่งต่อคน (พูดต่อเองมีแต่เสีย ทั้งกับลูกค้าและกับ Meta)
+        # r75 (24 ส.ค. 2569) — ⚠️ ตัวกันข้อความซ้ำของ r73 ถูกถอดออกแล้ว
+        # ------------------------------------------------------------------
+        # ของเดิม: ข้อความซ้ำกับ 6 บับเบิลหลัง = ไม่ส่ง + โยนเข้าโหมดรอคน
+        # ผลจริงบน production 24 ส.ค. 09:51-11:00 น.: จับผิด 30+ ครั้งใน 1 ชม.
+        # ไปโดนข้อความปกติล้วนๆ เช่นประโยคเปิด "เราช่วยดูว่าลงทุนคอนโด..."
+        # และคำถามคัดกรองทั่วไป -> บอทเงียบใส่ลูกค้าจริง + แชทติดโหมดรอคน 6 ชม.
+        #
+        # สาเหตุที่คิดผิด: บอทตัวนี้ "ตั้งใจ" พูดประโยคเดิมซ้ำในหลายจังหวะ
+        # (ทักกลับ · ถามซ้ำเมื่อลูกค้าตอบไม่ตรง · เปลี่ยนหัวข้อแล้ววนกลับ)
+        # ข้อความซ้ำ != บอทพัง สำหรับสคริปต์แบบนี้
+        #
+        # ตอนนี้เหลือแค่ "บันทึกไว้ดู" ไม่บล็อก ไม่โยนเข้าโหมดรอคน
+        # ถ้าจะกันจริง ต้องกันเฉพาะ STATUS_MSG/FALLBACK และนับ >= 3 ครั้งขึ้นไป
         if reply and reply.strip() and not (lvl or stop):
             _n = _norm_msg(reply)
             if _n and any(_norm_msg(p) == _n for p in _recent_bot_msgs(user_id)):
-                _st = _lead_states.get(skey) or {}
-                _st["dup_blocked"] = int(_st.get("dup_blocked") or 0) + 1
-                _st["handover"] = True
-                _st["handover_at"] = int(time.time())
-                _st["handover_by"] = "(บอทเริ่มพูดวน — รอผู้จัดการ)"
-                _sig = "🔁 บอทพูดซ้ำ ถูกกันไว้"
-                _sg = _st.setdefault("signals", [])
-                if _sig not in _sg:
-                    _sg.append(_sig)
-                print(f"[DUP BLOCK] {_mask(user_id)} กันข้อความซ้ำ "
-                      f"(ครั้งที่ {_st.get('dup_blocked')}) | {reply[:50]!r}")
-                return "", ("DUP" if _st.get("dup_blocked") == 1 else None)
+                print(f"[DUP SEEN] {_mask(user_id)} ข้อความซ้ำ (ส่งตามปกติ) "
+                      f"| {reply[:50]!r}")
 
         if not (lvl or stop):
             return reply, grade
