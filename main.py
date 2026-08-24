@@ -42,7 +42,8 @@ from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       detect_info_ask, ZONE_REASON,
                       INFO_AGAIN_MSGS, INFO_AGAIN_TAIL, INFO_AGAIN_MAX,
                       detect_zone, detect_budget, zone_ack_line,
-                      ZONE_NONE_MSG)
+                      ZONE_NONE_MSG, zone_detail, build_zone_menu,
+                      detect_size_ask, SIZE_ANSWER_GENERAL)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -245,7 +246,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r77"
+BOT_REVISION = "r78"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -335,6 +336,43 @@ try:
     print("[INFO ASK] เปิดโหมดให้ก่อนขอแล้ว")
 except Exception as _e:
     print(f"[INFO ASK] ต่อไม่ติด: {_e}")
+
+
+# ======================================================
+# r78 — เปลี่ยนตัวเลขในเมนูย่าน เป็นของจริงจากชีต SaleTeam
+# ------------------------------------------------------
+# `ZONE_MENU_MSG` เป็นตัวแปรระดับโมดูลใน bot_logic (import มาจาก faq_data)
+# ฟังก์ชันที่ใช้มันอ่านค่าตอนถูกเรียก -> ทับจากตรงนี้ได้เลย
+# ไม่ต้องแตะ bot_logic.py (448KB อัปขึ้น GitHub ไม่ได้) และไม่ต้องแตะ faq_data.py
+# ⚠️ ทับเฉพาะ "ตัวเลขราคา/ขนาดห้อง" ชุดย่านยังเป็น 4 ย่านเดิมที่ Gift อนุมัติ
+# ⚠️ ไม่มีชื่อโครงการแม้แต่คำเดียว — ดูตัวตรวจ _PROJECT_WORDS ข้างล่าง
+# ======================================================
+try:
+    _OLD_ZONE_MENU = _bl.ZONE_MENU_MSG
+    _NEW_ZONE_MENU = build_zone_menu()
+    _bl.ZONE_MENU_MSG = _NEW_ZONE_MENU
+    print(f"[ZONE PRICE] ใช้ราคาจริงจากชีตแล้ว ({len(_NEW_ZONE_MENU)} ตัวอักษร)")
+except Exception as _e:
+    print(f"[ZONE PRICE] ทับเมนูไม่ได้ ใช้ของเดิม: {_e}")
+
+
+# กันเหนียว: ชื่อโครงการห้ามหลุดออกไปหาลูกค้าเด็ดขาด (กฎข้อ 1)
+# ถ้าวันหลังมีคนเผลอเอาชื่อโครงการมาใส่ ตัวนี้จะดักไว้ตอนบูต
+_PROJECT_WORDS = (
+    "seaside", "collect", "gravit", "tripple", "livin", "residence",
+    "ressidence", "wutthakat", "ratchada 32", "chokchai 4", "i con",
+    "c one", "thonglor", "pinklao", "rungsit", "ramintra", "phetkasem",
+)
+try:
+    _low = (_bl.ZONE_MENU_MSG or "").lower()
+    _hit = [w for w in _PROJECT_WORDS if w in _low]
+    if _hit:
+        print(f"[ZONE PRICE] 🔴 เจอชื่อโครงการในเมนู {_hit} — ถอยกลับใช้ของเดิม")
+        _bl.ZONE_MENU_MSG = _OLD_ZONE_MENU
+    else:
+        print("[ZONE PRICE] ตรวจแล้ว ไม่มีชื่อโครงการในเมนู")
+except Exception as _e:
+    print(f"[ZONE PRICE] ตรวจชื่อโครงการไม่ได้: {_e}")
 
 
 def _is_info_or_zone_ask(msg: str) -> bool:
@@ -541,6 +579,10 @@ class CalmBotEngine(BotEngine):
                 head = conv(ZONE_NONE_MSG.format(none=znone))
             elif said_now:
                 head = conv(zone_ack_line(known_zone, known_budget))
+                # r78 — ต่อด้วยช่วงราคา+ขนาดห้องจริงของย่านนั้น
+                _d = zone_detail(known_zone) if known_zone else ""
+                if _d:
+                    head += "\n" + conv(_d)
             else:
                 head = ""
 
@@ -574,6 +616,36 @@ class CalmBotEngine(BotEngine):
             return out
         except Exception as _e:
             print(f"[NO REASK ZONE ERROR] {_e} — ใช้คำตอบเดิม")
+            return reply
+
+    def _answer_size_ask(self, st, reply, gender):
+        """ลูกค้าถามเรื่อง "ขนาดห้อง" ตรงๆ — ตอบได้แล้วตั้งแต่ r78
+
+        ก่อนหน้านี้บอทไม่เคยตอบเรื่องขนาดห้องเลย เพราะ KB ไม่มีข้อมูล
+        ตอนนี้มีของจริงจากชีต SaleTeam แล้ว (ทำเล + ช่วงราคา + ขนาดห้อง)
+        รู้ย่าน -> บอกขนาดของย่านนั้น · ไม่รู้ย่าน -> บอกช่วงรวมแล้วชวนบอกย่าน
+
+        ⚠️ ต่อหน้าคำตอบเดิม ไม่ทับ ไม่ทำให้เงียบ · จำกัด 2 ครั้งต่อแชท
+        """
+        try:
+            n = int(st.get("size_ans_n") or 0)
+            if n >= 2:
+                return reply
+            fem = (gender == "female")
+            conv = (lambda t: _bl.to_female(t)) if fem else (lambda t: t)
+            zone = (st.get("data") or {}).get("zone") or ""
+            ans = zone_detail(zone) if zone else ""
+            if not ans:
+                ans = SIZE_ANSWER_GENERAL
+            ans = conv(ans)
+            if not ans.strip():
+                return reply
+            st["size_ans_n"] = n + 1
+            print(f"[SIZE ASK] ตอบเรื่องขนาดห้อง ครั้งที่ {n + 1}/2 "
+                  f"| zone={zone!r}")
+            return ans + (MSG_SPLIT + reply if reply and reply.strip() else "")
+        except Exception as _e:
+            print(f"[SIZE ASK ERROR] {_e} — ใช้คำตอบเดิม")
             return reply
 
     def process(self, user_message, user_id, referral=None,
@@ -616,6 +688,10 @@ class CalmBotEngine(BotEngine):
         # r77 — เก็บโซน/งบ "ก่อน" ให้บอทคิด จะได้ไม่ถามสิ่งที่เพิ่งตอบไป
         _z = _b = _zn = ""
         try:
+            _size_ask = detect_size_ask(user_message)
+        except Exception:
+            _size_ask = False
+        try:
             _zst0, _ = self._resolve_state(user_id, platform,
                                            referral or {}, skey, page_id)
             _z, _b, _zn = self._catch_zone_budget(_zst0, user_message)
@@ -649,6 +725,11 @@ class CalmBotEngine(BotEngine):
                                                     _z, _b, _zn)
                     if _new2 and str(_new2).strip():
                         reply = _new2
+                # r78 — ลูกค้าถามขนาดห้องตรงๆ ตอบได้แล้ว
+                if _zst is not None and _size_ask and not (lvl or stop):
+                    _new3 = self._answer_size_ask(_zst, reply, gender)
+                    if _new3 and str(_new3).strip():
+                        reply = _new3
             except Exception as _e:
                 print(f"[ZONE WRAP ERROR] {_e} — ใช้คำตอบเดิม")
 
