@@ -40,7 +40,9 @@ from bot_logic import BotEngine, BOT_PAUSE_PAGES, OBSERVE_PAGES, page_observe
 from bot_logic import _lead_states, _conversations
 from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       detect_info_ask, ZONE_REASON,
-                      INFO_AGAIN_MSGS, INFO_AGAIN_TAIL, INFO_AGAIN_MAX)
+                      INFO_AGAIN_MSGS, INFO_AGAIN_TAIL, INFO_AGAIN_MAX,
+                      detect_zone, detect_budget, zone_ack_line,
+                      ZONE_NONE_MSG)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -243,7 +245,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r76b"
+BOT_REVISION = "r77"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -348,9 +350,26 @@ def _is_info_or_zone_ask(msg: str) -> bool:
         return False
 
 
+# r77 — ลายเซ็นของ FALLBACK_MSG ไว้ตรวจว่าบอทกำลังจะถามโซน/งบซ้ำ
+try:
+    from faq_data import FALLBACK_MSG as _FALLBACK_RAW
+except Exception:
+    _FALLBACK_RAW = "ลูกค้าสนใจโซนไหน และงบประมาณคร่าวๆ"
+
+
 def _norm_msg(s: str) -> str:
     """ตัดช่องว่าง/ตัวคั่นบับเบิลออก เพื่อเทียบว่าเป็นข้อความเดียวกันเป๊ะไหม"""
     return re.sub(r"\s+", "", (s or "")).replace("|", "")
+
+
+# ⚠️ ห้ามใช้ FALLBACK_MSG เต็มประโยคมาเทียบ — เพจผู้หญิงจะถูกแปลง
+# "ครับ" -> "ค่ะ" ทำให้เทียบไม่ติด (เจอจริงตอนเทสต์ r77)
+# ใช้เฉพาะท่อนกลางที่ไม่มีคำลงท้ายบอกเพศ
+_FALLBACK_KEY = _norm_msg("ลูกค้าสนใจโซนไหน และงบประมาณคร่าวๆ")
+if _FALLBACK_KEY not in _norm_msg(_FALLBACK_RAW):
+    print("[NO REASK ZONE] ⚠️ คีย์เทียบไม่ตรงกับ FALLBACK_MSG แล้ว — ตัวเลิกถามซ้ำจะไม่ทำงาน")
+else:
+    print("[NO REASK ZONE] เปิดตัวเลิกถามโซน/งบซ้ำแล้ว")
 
 
 def _recent_bot_msgs(user_id: str, n: int = 6):
@@ -466,6 +485,97 @@ class CalmBotEngine(BotEngine):
             print(f"[INFO AGAIN ERROR] {_e} — ใช้คำตอบเดิม")
             return reply
 
+    def _catch_zone_budget(self, st, user_message):
+        """เก็บคำตอบ "โซน" กับ "งบ" ที่ลูกค้าเพิ่งบอก (r77)
+
+        เก็บลง data["zone"] / data["budget"] ซึ่ง **อยู่นอก FIELD_ORDER**
+        จึงไม่ไปแย่งคิวคำถามหลักของบอท (บทเรียน 18 ส.ค. เรื่องเบอร์โทรหาย)
+        คืน (zone, budget, zone_none) ของ "รอบนี้" ไว้ให้คนเรียกใช้ต่อ
+        """
+        zone = budget = znone = ""
+        try:
+            zone, znone = detect_zone(user_message)
+            budget = detect_budget(user_message)
+            if not (zone or budget or znone):
+                return "", "", ""
+            data = st.setdefault("data", {})
+            if zone and data.get("zone") != zone:
+                data["zone"] = zone
+                print(f"[CATCH ZONE] เก็บโซนที่ลูกค้าบอก -> {zone}")
+            if budget and data.get("budget") != budget:
+                data["budget"] = budget
+                print(f"[CATCH BUDGET] เก็บงบที่ลูกค้าบอก -> {budget}")
+            if znone:
+                data["zone_none"] = znone
+                print(f"[CATCH ZONE] ย่านที่ยังไม่มีของ -> {znone}")
+        except Exception as _e:
+            print(f"[CATCH ZONE ERROR] {_e}")
+        return zone, budget, znone
+
+    def _fix_repeat_zone_q(self, st, reply, gender, zone, budget, znone):
+        """บอทกำลังจะถาม "สนใจโซนไหน และงบเท่าไหร่" ทั้งที่รู้คำตอบแล้ว (r77)
+
+        เจอบั๊กจริง: ลูกค้าพิมพ์ "อยากได้แถวรัชดา" -> บอทตอบ FALLBACK_MSG
+        ซึ่งถามเรื่องโซนซ้ำ เพราะ FIELD_ORDER ไม่มีช่องเก็บโซนเลย
+
+        เขียนคำตอบใหม่เป็น: รับทราบสิ่งที่เขาบอก + ถามข้อที่ยังไม่ได้จริงๆ
+        ⚠️ คืนค่าว่างไม่ได้เด็ดขาด พังเมื่อไหร่ = คืนคำตอบเดิม
+        """
+        try:
+            data = st.get("data") or {}
+            known_zone = zone or data.get("zone") or ""
+            known_budget = budget or data.get("budget") or ""
+            if not (known_zone or known_budget or znone):
+                return reply
+            if _FALLBACK_KEY not in _norm_msg(reply or ""):
+                return reply          # ไม่ใช่คำถามตัวที่มีปัญหา ปล่อยผ่าน
+
+            fem = (gender == "female")
+            conv = (lambda t: _bl.to_female(t)) if fem else (lambda t: t)
+
+            # พูด "รับทราบ ย่าน..." เฉพาะรอบที่ลูกค้าเพิ่งบอกมาจริงๆ
+            # รอบถัดๆ ไปที่แค่ "จำได้" ให้เงียบเรื่องนี้ แล้วตัดคำถามซ้ำทิ้งพอ
+            # (ไม่งั้นทวนย่านเดิมทุกเทิร์น น่ารำคาญพอกับถามซ้ำ)
+            said_now = bool(zone or budget or znone)
+            if znone:
+                head = conv(ZONE_NONE_MSG.format(none=znone))
+            elif said_now:
+                head = conv(zone_ack_line(known_zone, known_budget))
+            else:
+                head = ""
+
+            q = ""
+            try:
+                _fld, q = self._next_missing(data, st)
+            except Exception:
+                q = ""
+            if not q:
+                # ไม่มีข้อไหนขาดแล้ว -> ถามสิ่งที่ยังไม่รู้ระหว่างโซน/งบ
+                if known_zone and not known_budget:
+                    q = "งบคร่าวๆ ที่วางไว้ประมาณเท่าไหร่ครับ ตัวเลขกลมๆ ก็พอครับ"
+                elif known_budget and not known_zone:
+                    q = "แล้วสนใจย่านไหนเป็นพิเศษไหมครับ"
+            # บับเบิลอื่นของคำตอบเดิม (ตัดเฉพาะตัวที่ถามโซน/งบซ้ำออก)
+            _rest = [x.strip() for x in (reply or "").split(MSG_SPLIT)
+                     if x.strip() and _FALLBACK_KEY not in _norm_msg(x)]
+            parts = [p for p in ([head] if head.strip() else []) if p]
+            if q:
+                parts.append(conv(q))
+            elif _rest:
+                parts.append(_rest[0])
+            elif not parts:
+                return reply          # ไม่เหลืออะไรเลย -> ใช้ของเดิม ห้ามเงียบ
+            out = MSG_SPLIT.join(parts)
+            if not out.strip():
+                return reply
+            print(f"[NO REASK ZONE] รู้โซน/งบแล้ว เลิกถามซ้ำ "
+                  f"| zone={known_zone!r} budget={known_budget!r} "
+                  f"none={znone!r} ทวน={said_now}")
+            return out
+        except Exception as _e:
+            print(f"[NO REASK ZONE ERROR] {_e} — ใช้คำตอบเดิม")
+            return reply
+
     def process(self, user_message, user_id, referral=None,
                 platform="facebook", page_id="", brand="",
                 sheet_tab="", gender=""):
@@ -503,6 +613,15 @@ class CalmBotEngine(BotEngine):
             print(f"[INFO ASK] เช็คไม่ได้ ข้ามไป: {_e}")
             _info_ask_now = False
 
+        # r77 — เก็บโซน/งบ "ก่อน" ให้บอทคิด จะได้ไม่ถามสิ่งที่เพิ่งตอบไป
+        _z = _b = _zn = ""
+        try:
+            _zst0, _ = self._resolve_state(user_id, platform,
+                                           referral or {}, skey, page_id)
+            _z, _b, _zn = self._catch_zone_budget(_zst0, user_message)
+        except Exception as _e:
+            print(f"[CATCH ZONE] ข้ามรอบนี้: {_e}")
+
         reply, grade = super().process(
             user_message, user_id, referral=referral, platform=platform,
             page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
@@ -522,6 +641,14 @@ class CalmBotEngine(BotEngine):
                     # กันชั้นสุดท้าย: ของใหม่ต้องไม่ว่าง ไม่งั้นใช้ของเดิม
                     if _new and str(_new).strip():
                         reply = _new
+                # r77 — เลิกถามโซน/งบ ที่ลูกค้าตอบไปแล้ว
+                if _zst is not None and (_z or _b or _zn
+                                         or (_zst.get("data") or {}).get("zone")
+                                         or (_zst.get("data") or {}).get("budget")):
+                    _new2 = self._fix_repeat_zone_q(_zst, reply, gender,
+                                                    _z, _b, _zn)
+                    if _new2 and str(_new2).strip():
+                        reply = _new2
             except Exception as _e:
                 print(f"[ZONE WRAP ERROR] {_e} — ใช้คำตอบเดิม")
 
