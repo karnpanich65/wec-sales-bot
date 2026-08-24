@@ -37,8 +37,8 @@ from flask import Flask, request, jsonify, Response
 from dotenv import load_dotenv
 from bot_logic import BotEngine, BOT_PAUSE_PAGES, OBSERVE_PAGES, page_observe
 # r71 (Gift 23 ส.ค. 2026) — โหมดดับอารมณ์
-from bot_logic import _lead_states
-from wec_calm import detect_anger, calm_mode
+from bot_logic import _lead_states, _conversations
+from wec_calm import detect_anger, calm_mode, detect_stop, stop_mode
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -241,7 +241,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r71"
+BOT_REVISION = "r73"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -260,6 +260,57 @@ CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "karnpanich.phutrakul@gmail.com"
 PAGE_URL = "https://m.me/108248514185091"
 
 app = Flask(__name__)
+# ======================================================
+# r73 (Gift 23 ส.ค. 2026) — เก็บกวาดสรรพนามชายที่หลุดในเพจผู้หญิง
+# ------------------------------------------------------
+# เคสจริง: "ตรงนี้ผมต้องขอทราบรายได้ต่อเดือน...ค่ะ"  ← ผม + ค่ะ ประโยคเดียวกัน
+# ต้นเหตุ: _FEMALE_PRONOUN ใน bot_logic เป็นลิสต์ตายตัวแค่ 7 แพทเทิร์น
+#   (ผมรบกวน · เดี๋ยวผม · ผมช่วย · ผมส่ง · ผมขอ · ผมจะ · ผมคัด)
+#   "ผมต้อง" ไม่อยู่ในลิสต์ -> หลุดออกไปหาลูกค้า
+# ข้อความที่ Claude แต่งเองใช้สรรพนามอิสระ ลิสต์ตายตัวตามไม่ทันแน่นอน
+#
+# แก้: ครอบ to_female อีกชั้น แล้วกวาด "ผม" ที่ตามด้วยอักษรไทยทิ้งให้หมด
+# ปลอดภัยเพราะ to_female ทำงานกับ "ข้อความบอท" เท่านั้น ไม่แตะข้อความลูกค้า
+# และคำที่มี "ผม" แปลว่าเส้นผม (ทรงผม/เส้นผม/ผมร่วง) ไม่มีทางโผล่ในบอทคอนโด
+# ======================================================
+_MALE_PRON_RE = re.compile(r"ผม(?=[ก-๛])")
+try:
+    import bot_logic as _bl
+    _ORIG_TO_FEMALE = _bl.to_female
+
+    def _to_female_strict(text):
+        t = _ORIG_TO_FEMALE(text)
+        t2 = _MALE_PRON_RE.sub("", t or "")
+        if t2 != t:
+            print(f"[FEMALE FIX] เก็บ 'ผม' ที่หลุด | {t[:60]!r}")
+        return t2
+
+    _bl.to_female = _to_female_strict
+    print("[FEMALE FIX] เปิดตัวกวาดสรรพนามชายแล้ว")
+except Exception as _e:
+    print(f"[FEMALE FIX] ต่อไม่ติด: {_e}")
+
+
+def _norm_msg(s: str) -> str:
+    """ตัดช่องว่าง/ตัวคั่นบับเบิลออก เพื่อเทียบว่าเป็นข้อความเดียวกันเป๊ะไหม"""
+    return re.sub(r"\s+", "", (s or "")).replace("|", "")
+
+
+def _recent_bot_msgs(user_id: str, n: int = 6):
+    """ข้อความล่าสุดที่บอทส่งไปในแชทนี้ (ไล่จากใหม่ไปเก่า)"""
+    try:
+        h = _conversations.get(user_id) or []
+    except Exception:
+        return []
+    out = []
+    for turn in reversed(h):
+        if turn.get("role") == "assistant":
+            out.append(turn.get("content") or "")
+            if len(out) >= n:
+                break
+    return out
+
+
 # ======================================================
 # r71 (Gift 23 ส.ค. 2026) — โหมดดับอารมณ์ (ครอบ BotEngine ไว้ชั้นนอก)
 # ------------------------------------------------------
@@ -284,9 +335,10 @@ class CalmBotEngine(BotEngine):
                 platform="facebook", page_id="", brand="",
                 sheet_tab="", gender=""):
         lvl = detect_anger(user_message)
+        stop = detect_stop(user_message)          # r73 — ลูกค้าสั่งหยุด
         skey = f"{page_id}:{user_id}" if page_id else user_id
 
-        if lvl:
+        if lvl or stop:
             try:
                 st, _ = self._resolve_state(user_id, platform,
                                             referral or {}, skey, page_id)
@@ -302,7 +354,27 @@ class CalmBotEngine(BotEngine):
             user_message, user_id, referral=referral, platform=platform,
             page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
 
-        if not lvl:
+        # r73 — ตัวกันข้อความซ้ำ: ห้ามส่งข้อความที่เพิ่งส่งไปแล้วใน 6 บับเบิลหลัง
+        # เคสจริง 23 ส.ค.: STATUS_MSG ตัวเดียวกันถูกส่ง 3 ครั้ง
+        # ลูกค้าทัก "ทำไมซ้ำวนจังเลยครับ" · Meta ขึ้น moved-to-spam 5 ครั้ง
+        # ซ้ำ = ไม่ส่ง + ส่งต่อคน (พูดต่อเองมีแต่เสีย ทั้งกับลูกค้าและกับ Meta)
+        if reply and reply.strip() and not (lvl or stop):
+            _n = _norm_msg(reply)
+            if _n and any(_norm_msg(p) == _n for p in _recent_bot_msgs(user_id)):
+                _st = _lead_states.get(skey) or {}
+                _st["dup_blocked"] = int(_st.get("dup_blocked") or 0) + 1
+                _st["handover"] = True
+                _st["handover_at"] = int(time.time())
+                _st["handover_by"] = "(บอทเริ่มพูดวน — รอผู้จัดการ)"
+                _sig = "🔁 บอทพูดซ้ำ ถูกกันไว้"
+                _sg = _st.setdefault("signals", [])
+                if _sig not in _sg:
+                    _sg.append(_sig)
+                print(f"[DUP BLOCK] {_mask(user_id)} กันข้อความซ้ำ "
+                      f"(ครั้งที่ {_st.get('dup_blocked')}) | {reply[:50]!r}")
+                return "", ("DUP" if _st.get("dup_blocked") == 1 else None)
+
+        if not (lvl or stop):
             return reply, grade
 
         st = _lead_states.get(skey)
@@ -310,7 +382,10 @@ class CalmBotEngine(BotEngine):
             print("[CALM] ไม่พบ state หลัง process — ตอบดับอารมณ์ + ปลุกคนอย่างเดียว")
             return CALM_FALLBACK, "!"
 
-        calm, flag = calm_mode(self, user_id, st, user_message, lvl)
+        if stop:
+            calm, flag = stop_mode(self, user_id, st, user_message, stop)
+        else:
+            calm, flag = calm_mode(self, user_id, st, user_message, lvl)
 
         # Chat_Log เพิ่งบันทึกไปว่า "(เซลดูแลเอง — บอทไม่ตอบ)" ซึ่งไม่จริง
         # เพราะรอบนี้บอทตอบจริง -> เขียนอีกแถวให้ตรงกับสิ่งที่ส่งออกไป
@@ -954,7 +1029,8 @@ def alert_lead(sender_id: str, user_text: str, ad_id: str = "",
 
 
 def alert_complaint(sender_id: str, user_text: str, ad_id: str = "",
-                    page_id: str = ""):
+                    page_id: str = "", kind: str = "เคสร้องเรียน",
+                    tail: str = "บอทหยุดขายและส่งต่อให้คนดูแลแล้ว — โทรกลับด่วนครับ"):
     """r71 (Gift 23 ส.ค. 2026) — ลูกค้าไม่พอใจ ต้องมีคนรู้ "เสมอ"
 
     ต่างจาก alert_lead อยู่จุดเดียว: ห้ามเงียบ
@@ -967,17 +1043,17 @@ def alert_complaint(sender_id: str, user_text: str, ad_id: str = "",
               "— ดูในชีต ช่องสัญญาณจะขึ้น 🔴 เคสร้องเรียน")
         return
     alert = (
-        f"🔴 เคสร้องเรียน — {page_brand(page_id)}\n"
+        f"🔴 {kind} — {page_brand(page_id)}\n"
         f"Sender: {sender_id}\n"
         f"ข้อความ: {user_text[:200]}\n"
         f"Ad ID: {ad_id or '-'}\n\n"
-        "บอทหยุดขายและส่งต่อให้คนดูแลแล้ว — โทรกลับด่วนครับ"
+        + tail
     )
     ok = send_message(target, alert, page_id)
     # เพจรองส่งหา Gift ไม่ได้ถ้า Gift ไม่เคยทักเพจนั้น -> ถอยไปยิงจากเพจหลัก
     if not ok and page_id and str(page_id) != MAIN_PAGE_ID:
         send_message(target, alert, MAIN_PAGE_ID)
-    print(f"[COMPLAINT] แจ้งเตือนไปที่ {_mask(target)} page={page_id or '-'}")
+    print(f"[COMPLAINT] {kind} -> แจ้งเตือนที่ {_mask(target)} page={page_id or '-'}")
 
 
 def extract_referral(event: dict) -> dict:
@@ -1092,7 +1168,7 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
     )
     if reply_text and reply_text.strip():
         send_reply(sender_id, reply_text, page_id,
-                   force=(lead_grade == "!"))    # r71 — ดับอารมณ์ทะลุเพจเงียบ
+                   force=(lead_grade in ("!", "STOP", "STOPSOFT")))  # r71/r73
     else:
         print(f"[SILENT] ({platform}) {_mask(sender_id)} ไม่ตอบ (เซลดูแลเอง)")
 
@@ -1101,6 +1177,24 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
     elif lead_grade == "!":      # r71 — เคสร้องเรียน ปลุกคนทันที
         alert_complaint(sender_id, user_text,
                         lead_referral.get("ad_id", ""), page_id)
+    elif lead_grade == "STOP":   # r73 — ลูกค้าสั่งหยุด: ปิดบอทถาวรแล้ว
+        alert_complaint(sender_id, user_text,
+                        lead_referral.get("ad_id", ""), page_id,
+                        kind="ลูกค้าขอเลิกคุย",
+                        tail=("ปิดบอทถาวรสำหรับแชทนี้แล้ว (ปลดด้วย #เปิดบอท)\n"
+                              "ถ้าจะกู้เคส ต้องเป็นคนทักเองเท่านั้นครับ"))
+    elif lead_grade == "STOPSOFT":   # r73 — ลูกค้าทักว่าบอทตอบไม่เข้าท่า
+        alert_complaint(sender_id, user_text,
+                        lead_referral.get("ad_id", ""), page_id,
+                        kind="บอทตอบไม่ตรง ลูกค้าทักแล้ว",
+                        tail=("บอทเงียบและส่งต่อให้คนแล้ว (ยังไม่ปิดถาวร)\n"
+                              "รีบเข้าไปคุยต่อ ยังกู้เคสทันครับ"))
+    elif lead_grade == "DUP":    # r73 — บอทเริ่มพูดวน กันไว้แล้ว
+        alert_complaint(sender_id, user_text,
+                        lead_referral.get("ad_id", ""), page_id,
+                        kind="บอทพูดซ้ำ ถูกกันไว้",
+                        tail=("บอทกำลังจะส่งข้อความเดิมซ้ำ ระบบกันไว้และเงียบแทน\n"
+                              "แปลว่าสคริปต์ตันแล้ว — คนเข้าไปคุยต่อได้เลยครับ"))
 
     print(f"[MSG] ({platform}) {sender_id[:10]}... Grade={lead_grade or '-'} "
           f"| Q={user_text[:40]!r} | ad_id={lead_referral.get('ad_id') or '-'}")
