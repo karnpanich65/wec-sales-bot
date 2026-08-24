@@ -38,7 +38,9 @@ from dotenv import load_dotenv
 from bot_logic import BotEngine, BOT_PAUSE_PAGES, OBSERVE_PAGES, page_observe
 # r71 (Gift 23 ส.ค. 2026) — โหมดดับอารมณ์
 from bot_logic import _lead_states, _conversations
-from wec_calm import detect_anger, calm_mode, detect_stop, stop_mode
+from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
+                      detect_info_ask, ZONE_REASON,
+                      INFO_AGAIN_MSGS, INFO_AGAIN_TAIL, INFO_AGAIN_MAX)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -241,7 +243,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r75"
+BOT_REVISION = "r76b"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -279,8 +281,16 @@ try:
     _ORIG_TO_FEMALE = _bl.to_female
 
     def _to_female_strict(text):
-        t = _ORIG_TO_FEMALE(text)
-        t2 = _MALE_PRON_RE.sub("", t or "")
+        try:
+            t = _ORIG_TO_FEMALE(text)
+        except Exception as _e:
+            print(f"[FEMALE FIX] ของเดิมพัง ใช้ข้อความดิบ: {_e}")
+            t = text
+        try:
+            t2 = _MALE_PRON_RE.sub("", t or "")
+        except Exception as _e:
+            print(f"[FEMALE FIX] กวาดไม่ได้ ส่งของเดิม: {_e}")
+            return t
         if t2 != t:
             print(f"[FEMALE FIX] เก็บ 'ผม' ที่หลุด | {t[:60]!r}")
         return t2
@@ -289,6 +299,53 @@ try:
     print("[FEMALE FIX] เปิดตัวกวาดสรรพนามชายแล้ว")
 except Exception as _e:
     print(f"[FEMALE FIX] ต่อไม่ติด: {_e}")
+
+
+# ======================================================
+# r76 (Gift เคาะ 24 ส.ค. 2569) — "ให้ก่อนขอ": ขยายปากทางของ _is_zone_ask
+# ------------------------------------------------------
+# ใช้ ZONE_MENU_MSG/ZONE_MENU_Q ชุดเดิมที่ผ่าน compliance แล้ว
+# ไม่แต่งตัวเลขใหม่แม้แต่ตัวเดียว — แค่ให้ "ขอรายละเอียด / อยากดูคร่าวๆ /
+# ส่งข้อมูลมาหน่อย" เข้าทางเดียวกับคำว่า "ทำเล"
+# ======================================================
+try:
+    _ORIG_ZONE_ASK = _bl._is_zone_ask
+
+    def _zone_or_info_ask(msg):
+        # ⚠️ ตัวนี้ถูกเรียกจากใน bot_logic โดยตรง — โยน exception เมื่อไหร่
+        # บอทเงียบใส่ลูกค้าทันที เลยต้องกันทุกชั้น (บทเรียน r73)
+        try:
+            if _ORIG_ZONE_ASK(msg):
+                return True
+        except Exception as _e:
+            print(f"[INFO ASK] ของเดิมพัง: {_e}")
+            return False
+        try:
+            if detect_info_ask(msg):
+                print(f"[INFO ASK] ลูกค้าขอข้อมูลกว้างๆ "
+                      f"— ตอบย่าน+ช่วงราคาก่อน | {(msg or '')[:50]!r}")
+                return True
+        except Exception as _e:
+            print(f"[INFO ASK] ตัวจับพัง ใช้ของเดิมแทน: {_e}")
+        return False
+
+    _bl._is_zone_ask = _zone_or_info_ask
+    print("[INFO ASK] เปิดโหมดให้ก่อนขอแล้ว")
+except Exception as _e:
+    print(f"[INFO ASK] ต่อไม่ติด: {_e}")
+
+
+def _is_info_or_zone_ask(msg: str) -> bool:
+    """ลูกค้ากำลังถามเรื่อง ข้อมูล/ทำเล/ราคา อยู่ไหม (ไม่โยน exception เด็ดขาด)"""
+    try:
+        if detect_info_ask(msg):
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(_bl._is_zone_ask(msg))
+    except Exception:
+        return False
 
 
 def _norm_msg(s: str) -> str:
@@ -331,6 +388,84 @@ def _recent_bot_msgs(user_id: str, n: int = 6):
 # (คีย์ซ้ำ = คืนก้อนเดิม) และ process จะเรียกซ้ำอีกทีเองอยู่แล้ว
 # ======================================================
 class CalmBotEngine(BotEngine):
+    def _zone_reply_in_context(self, st, reply, gender):
+        """ประกอบคำตอบชุดทำเลใหม่ ให้ต่อจากที่ลูกค้าเคยบอกไว้ (Gift 24 ส.ค.)
+
+        Gift: "ต่อเนื่องจากแชทเก่าๆ ที่เค้าคุยมา ไม่ใช่ไปถามโพล่งๆ"
+        โครงคำตอบ 2 บับเบิล:
+          1) ทวนสิ่งที่ลูกค้าเคยบอก (ถ้ามี) + ชุดย่าน+ช่วงราคาเดิม
+          2) เหตุผลว่าทำไมเป็นช่วง + คำถามข้อที่ "ยังไม่ได้คำตอบ" เท่านั้น
+        ใช้ _next_missing ตัวเดียวกับที่บอทใช้อยู่ จึงไม่มีทางถามข้อที่ตอบไปแล้ว
+
+        พังเมื่อไหร่ = คืนคำตอบเดิมไปเลย ห้ามทำให้บอทเงียบเด็ดขาด
+        (บทเรียน r73: ของที่ผมใส่เองทำบอทเงียบใส่ลูกค้าจริงมาแล้ว)
+        """
+        try:
+            fem = (gender == "female")
+            conv = (lambda t: _bl.to_female(t)) if fem else (lambda t: t)
+            parts = [p.strip() for p in (reply or "").split(MSG_SPLIT) if p.strip()]
+            if not parts:
+                return reply
+            menu = parts[0]
+            data = st.get("data") or {}
+
+            head = ""
+            try:
+                recap = (self._recap_short(data) or "").strip()
+            except Exception:
+                recap = ""
+            if recap:
+                head = conv(f"จากที่คุยไว้ก่อนหน้า — {recap} นะครับ") + "\n"
+
+            q = ""
+            try:
+                _fld, q = self._next_missing(data, st)
+            except Exception:
+                q = ""
+            ask = conv(q) if q else (parts[1] if len(parts) > 1 else "")
+
+            tail = conv(ZONE_REASON) + ("\n" + ask if ask else "")
+            print(f"[ZONE CONTEXT] ต่อจากของเดิม recap={bool(recap)} ถามต่อ={bool(q)}")
+            return head + menu + MSG_SPLIT + tail
+        except Exception as _e:
+            print(f"[ZONE CONTEXT ERROR] {_e} — ใช้คำตอบเดิม")
+            return reply
+
+    def _info_again_reply(self, st, reply, gender):
+        """ลูกค้าถามเรื่องข้อมูล/ราคา ซ้ำอีกรอบ หลังส่งชุดย่านไปแล้ว (r76b)
+
+        Gift 24 ส.ค.: "ไม่ใช่ไปถามโพล่งๆ"
+        ของเดิมสวนคำถามคัดกรองเดิมเป๊ะกลับไปทุกครั้ง ลูกค้าอ่านว่าไม่ฟัง
+        ตัวนี้เขียนใหม่เป็น: รับรู้ว่าเพิ่งส่งไปแล้ว + เหตุผล + ขอต่อ 1 ข้อ
+
+        ⚠️ ห้ามคืนค่าว่างเด็ดขาด พังเมื่อไหร่ = คืนคำตอบเดิม (บทเรียน r73)
+        """
+        try:
+            n = int(st.get("info_again_n") or 0)
+            if n >= INFO_AGAIN_MAX:
+                return reply
+            fem = (gender == "female")
+            conv = (lambda t: _bl.to_female(t)) if fem else (lambda t: t)
+
+            q = ""
+            try:
+                _fld, q = self._next_missing(st.get("data") or {}, st)
+            except Exception:
+                q = ""
+            tail = conv(q) if q else conv(INFO_AGAIN_TAIL)
+            body = INFO_AGAIN_MSGS[n % len(INFO_AGAIN_MSGS)]
+            new = conv(body) + MSG_SPLIT + tail
+            if not new.strip():
+                return reply
+
+            st["info_again_n"] = n + 1
+            print(f"[INFO AGAIN] ถามซ้ำเรื่องข้อมูล/ราคา ครั้งที่ {n + 1}"
+                  f"/{INFO_AGAIN_MAX} — ตอบแบบรับรู้แทนถามซ้ำ")
+            return new
+        except Exception as _e:
+            print(f"[INFO AGAIN ERROR] {_e} — ใช้คำตอบเดิม")
+            return reply
+
     def process(self, user_message, user_id, referral=None,
                 platform="facebook", page_id="", brand="",
                 sheet_tab="", gender=""):
@@ -361,9 +496,34 @@ class CalmBotEngine(BotEngine):
             except Exception as _e:
                 print(f"[CALM PRELOCK] {_e}")
 
+        _zone_before = bool((_lead_states.get(skey) or {}).get("zone_told"))
+        try:
+            _info_ask_now = _is_info_or_zone_ask(user_message)
+        except Exception as _e:
+            print(f"[INFO ASK] เช็คไม่ได้ ข้ามไป: {_e}")
+            _info_ask_now = False
+
         reply, grade = super().process(
             user_message, user_id, referral=referral, platform=platform,
             page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+
+        # r76 — ชุดทำเลเพิ่งยิงรอบนี้ -> ประกอบใหม่ให้ต่อจากที่คุยค้างไว้
+        if reply:
+            try:
+                _zst = _lead_states.get(skey)
+                if _zst is not None and _zst.get("zone_told"):
+                    if not _zone_before:
+                        _new = self._zone_reply_in_context(_zst, reply, gender)
+                    elif _info_ask_now and not (lvl or stop):
+                        # r76b — ส่งชุดย่านไปแล้ว แต่ลูกค้ายังถามเรื่องข้อมูล/ราคาอีก
+                        _new = self._info_again_reply(_zst, reply, gender)
+                    else:
+                        _new = reply
+                    # กันชั้นสุดท้าย: ของใหม่ต้องไม่ว่าง ไม่งั้นใช้ของเดิม
+                    if _new and str(_new).strip():
+                        reply = _new
+            except Exception as _e:
+                print(f"[ZONE WRAP ERROR] {_e} — ใช้คำตอบเดิม")
 
         # r75 (24 ส.ค. 2569) — ⚠️ ตัวกันข้อความซ้ำของ r73 ถูกถอดออกแล้ว
         # ------------------------------------------------------------------
