@@ -43,7 +43,8 @@ from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       INFO_AGAIN_MSGS, INFO_AGAIN_TAIL, INFO_AGAIN_MAX,
                       detect_zone, detect_budget, zone_ack_line,
                       ZONE_NONE_MSG, zone_detail, build_zone_menu,
-                      detect_size_ask, SIZE_ANSWER_GENERAL)
+                      detect_size_ask, SIZE_ANSWER_GENERAL,
+                      is_canned_ad_reply, ZONE_MENU_Q_PHONE)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -246,7 +247,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r78"
+BOT_REVISION = "r79"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -323,6 +324,16 @@ try:
         except Exception as _e:
             print(f"[INFO ASK] ของเดิมพัง: {_e}")
             return False
+        # r79 — ข้อความสำเร็จรูปจากปุ่มตอบโฆษณาของ Meta ไม่ใช่คำถามราคา
+        # (Gift 24 ส.ค.: ลูกค้ากดปุ่ม แล้วบอทเทราคาทั้งชุดใส่ เขาไม่อ่าน)
+        try:
+            if is_canned_ad_reply(msg):
+                print(f"[CANNED AD] ข้อความสำเร็จรูปของ Meta "
+                      f"— ไม่ใช่คำถามราคา ตอบสั้นแล้วขอเบอร์ "
+                      f"| {(msg or '')[:40]!r}")
+                return False
+        except Exception:
+            pass
         try:
             if detect_info_ask(msg):
                 print(f"[INFO ASK] ลูกค้าขอข้อมูลกว้างๆ "
@@ -351,7 +362,23 @@ try:
     _OLD_ZONE_MENU = _bl.ZONE_MENU_MSG
     _NEW_ZONE_MENU = build_zone_menu()
     _bl.ZONE_MENU_MSG = _NEW_ZONE_MENU
+    _bl.ZONE_MENU_Q = ZONE_MENU_Q_PHONE      # r79 — ขอเบอร์แทนถามงบ/โซน
     print(f"[ZONE PRICE] ใช้ราคาจริงจากชีตแล้ว ({len(_NEW_ZONE_MENU)} ตัวอักษร)")
+    print("[LEAD FIRST] ต่อท้ายชุดย่านด้วยการขอเบอร์แล้ว")
+    # r79 — FAQ ข้อ "ราคาเท่าไหร่" ยังใช้ช่วงเก่า 2-8 ล้าน ไม่ตรงกับชีต
+    _OLD_RANGE = "เริ่มต้นประมาณ 2 ล้านบาท ไปถึงประมาณ 8 ล้านบาท"
+    _NEW_RANGE = "เริ่มราว 2.1 ล้าน ถึง 11 ล้าน"
+    try:
+        import faq_data as _fq
+        _fixed = 0
+        for _item in getattr(_fq, "FAQ_DATABASE", []) or []:
+            _a = _item.get("answer") if isinstance(_item, dict) else None
+            if _a and _OLD_RANGE in _a:
+                _item["answer"] = _a.replace(_OLD_RANGE, _NEW_RANGE)
+                _fixed += 1
+        print(f"[ZONE PRICE] แก้ช่วงราคาเก่าใน FAQ {_fixed} ข้อ")
+    except Exception as _e:
+        print(f"[ZONE PRICE] แก้ FAQ ไม่ได้: {_e}")
 except Exception as _e:
     print(f"[ZONE PRICE] ทับเมนูไม่ได้ ใช้ของเดิม: {_e}")
 
@@ -474,15 +501,21 @@ class CalmBotEngine(BotEngine):
             if recap:
                 head = conv(f"จากที่คุยไว้ก่อนหน้า — {recap} นะครับ") + "\n"
 
-            q = ""
-            try:
-                _fld, q = self._next_missing(data, st)
-            except Exception:
-                q = ""
-            ask = conv(q) if q else (parts[1] if len(parts) > 1 else "")
+            # r79 — ให้ราคาแล้วรีบขอเบอร์ ไม่สวนคำถามคัดกรองยาวๆ ต่อ
+            # (Gift: "เน้นขอเบอร์ lead เป็นหลัก · เค้าขี้เกียจอ่าน")
+            if data.get("contact"):
+                ask = ""            # ได้เบอร์แล้ว ไม่ต้องขอซ้ำ
+                try:
+                    _fld, ask = self._next_missing(data, st)
+                except Exception:
+                    ask = ""
+                ask = conv(ask) if ask else ""
+            else:
+                ask = conv(ZONE_MENU_Q_PHONE)
 
             tail = conv(ZONE_REASON) + ("\n" + ask if ask else "")
-            print(f"[ZONE CONTEXT] ต่อจากของเดิม recap={bool(recap)} ถามต่อ={bool(q)}")
+            print(f"[ZONE CONTEXT] ต่อจากของเดิม recap={bool(recap)} "
+                  f"ขอเบอร์={not bool(data.get('contact'))}")
             return head + menu + MSG_SPLIT + tail
         except Exception as _e:
             print(f"[ZONE CONTEXT ERROR] {_e} — ใช้คำตอบเดิม")
@@ -648,6 +681,27 @@ class CalmBotEngine(BotEngine):
             print(f"[SIZE ASK ERROR] {_e} — ใช้คำตอบเดิม")
             return reply
 
+    def _canned_ad_reply(self, st, reply, gender):
+        """ลูกค้ากดปุ่มตอบโฆษณาของ Meta — ตอบสั้น ไม่สวนคำถามห้วนๆ (r79)
+
+        Gift 24 ส.ค.: "การตอบแบบนี้เค้าขี้เกียจอ่าน · เน้นขอเบอร์เป็นหลัก"
+        ของเดิมตกมาที่ FALLBACK_MSG = "สนใจโซนไหน และงบประมาณเท่าไหร่"
+        ซึ่งเป็นคำถามห้วนๆ ตั้งแต่ข้อความแรกที่ลูกค้ายังไม่ได้พูดอะไรเลย
+
+        ตัดบับเบิลนั้นทิ้ง เหลือคำถามธรรมชาติของบอทเอง
+        ⚠️ ห้ามคืนค่าว่าง พังเมื่อไหร่ = คืนคำตอบเดิม
+        """
+        try:
+            parts = [x.strip() for x in (reply or "").split(MSG_SPLIT) if x.strip()]
+            keep = [x for x in parts if _FALLBACK_KEY not in _norm_msg(x)]
+            if not keep or keep == parts:
+                return reply
+            print(f"[CANNED AD] ตัดคำถามห้วนๆ ออก {len(parts)} -> {len(keep)} บับเบิล")
+            return MSG_SPLIT.join(keep)
+        except Exception as _e:
+            print(f"[CANNED AD ERROR] {_e} — ใช้คำตอบเดิม")
+            return reply
+
     def process(self, user_message, user_id, referral=None,
                 platform="facebook", page_id="", brand="",
                 sheet_tab="", gender=""):
@@ -692,6 +746,10 @@ class CalmBotEngine(BotEngine):
         except Exception:
             _size_ask = False
         try:
+            _canned = is_canned_ad_reply(user_message)
+        except Exception:
+            _canned = False
+        try:
             _zst0, _ = self._resolve_state(user_id, platform,
                                            referral or {}, skey, page_id)
             _z, _b, _zn = self._catch_zone_budget(_zst0, user_message)
@@ -730,6 +788,11 @@ class CalmBotEngine(BotEngine):
                     _new3 = self._answer_size_ask(_zst, reply, gender)
                     if _new3 and str(_new3).strip():
                         reply = _new3
+                # r79 — ข้อความสำเร็จรูปของ Meta ตอบสั้นๆ พอ
+                if _canned and not (lvl or stop):
+                    _new4 = self._canned_ad_reply(_zst, reply, gender)
+                    if _new4 and str(_new4).strip():
+                        reply = _new4
             except Exception as _e:
                 print(f"[ZONE WRAP ERROR] {_e} — ใช้คำตอบเดิม")
 
