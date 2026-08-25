@@ -44,7 +44,8 @@ from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       detect_zone, detect_budget, zone_ack_line,
                       ZONE_NONE_MSG, zone_detail, build_zone_menu,
                       detect_size_ask, SIZE_ANSWER_GENERAL,
-                      is_canned_ad_reply, ZONE_MENU_Q_PHONE)
+                      is_canned_ad_reply, ZONE_MENU_Q_PHONE,
+                      build_kb_zone_block)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -247,7 +248,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r79"
+BOT_REVISION = "r80"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -379,6 +380,7 @@ try:
         print(f"[ZONE PRICE] แก้ช่วงราคาเก่าใน FAQ {_fixed} ข้อ")
     except Exception as _e:
         print(f"[ZONE PRICE] แก้ FAQ ไม่ได้: {_e}")
+
 except Exception as _e:
     print(f"[ZONE PRICE] ทับเมนูไม่ได้ ใช้ของเดิม: {_e}")
 
@@ -400,6 +402,34 @@ try:
         print("[ZONE PRICE] ตรวจแล้ว ไม่มีชื่อโครงการในเมนู")
 except Exception as _e:
     print(f"[ZONE PRICE] ตรวจชื่อโครงการไม่ได้: {_e}")
+# r80 — บล็อกทำเลใน system prompt (ที่ AI เห็น) ยังเป็นราคาเก่าทั้งชุด
+# r78 แก้แค่ข้อความตายตัว -> ในแชทเดียวกันได้ราคาคนละชุด ขัดกันเอง
+# ตรงนี้ทับให้ตรงกับ ZONE_PRICES ชุดเดียวกับเมนู
+# (Gift เคาะ 25 ส.ค.: ทองหล่อ "พูดช่วงราคาได้" — ของเดิมเขียนห้ามเดาตัวเลข)
+_KB_START = "[กลุ่มเสนอก่อน — เอ่ยถึงกลุ่มนี้เป็นหลักเสมอ]"
+_KB_END = 'ชลบุรี ห้องใหญ่ 50 ตร.ม. ประมาณ 4.3-6.9 ล้าน (มีของจริง แต่ "ไม่ใช่พัทยา/จอมเทียน")'
+try:
+    _sp = _bl.WEC_SYSTEM_PROMPT
+    _i = _sp.find(_KB_START)
+    _j = _sp.find(_KB_END)
+    if _i < 0 or _j < 0:
+        print("[KB SYNC] ⚠️ หาบล็อกทำเลใน system prompt ไม่เจอ — ปล่อยของเดิมไว้")
+    else:
+        _new_block = build_kb_zone_block()
+        _low = _new_block.lower()
+        _bad = [w for w in _PROJECT_WORDS if w in _low]
+        if _bad:
+            print(f"[KB SYNC] 🔴 เจอชื่อโครงการในบล็อกใหม่ {_bad} — ไม่ทับ")
+        else:
+            _sp2 = _sp[:_i] + _new_block + _sp[_j + len(_KB_END):]
+            _bl.WEC_SYSTEM_PROMPT = _sp2
+            print(f"[KB SYNC] ซิงก์ราคาใน system prompt แล้ว "
+                  f"({len(_sp)} -> {len(_sp2)} ตัวอักษร)")
+            if "ราคายังไม่ยืนยัน" in _sp2:
+                print("[KB SYNC] ⚠️ ยังเหลือคำว่า 'ราคายังไม่ยืนยัน' อยู่ในพรอมต์")
+except Exception as _e:
+    print(f"[KB SYNC] ทับไม่ได้ ใช้ของเดิม: {_e}")
+
 
 
 def _is_info_or_zone_ask(msg: str) -> bool:
