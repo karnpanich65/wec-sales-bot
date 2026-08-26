@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r86"
+BOT_REVISION = "r87"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -2498,6 +2498,29 @@ def reset_user():
     log_event("RESET_USER", f"cleared state for {_mask(psid)}",
               {"page": page_id or "-", "ram_keys": len(killed)})
     return jsonify(out)
+
+
+# ======================================================
+# r87 — ล้างกระดานบันทึกก่อนอัดวิดีโอ App Review
+# ------------------------------------------------------
+# Gift 26 ส.ค. 2569: "ล้าง log ชื่อผมออกหน่อย"
+# ตอนอัดคลิปให้ผู้ตรวจดู กระดานควรมีเฉพาะ session ที่กำลังสาธิต
+# ไม่ใช่ของลูกค้าจริงคนอื่นที่ค้างอยู่ 80 บรรทัด
+# _EVENT_LOG เป็น deque ในหน่วยความจำ (maxlen=80) อยู่แล้ว
+# -> ล้างได้ทันทีโดยไม่ต้อง restart และไม่กระทบบอทที่กำลังคุยกับลูกค้า
+# ใช้คีย์ตัวเดียวกับ /review-log
+# ======================================================
+@app.route("/review-log/clear", methods=["GET", "POST"])
+def review_log_clear():
+    if request.args.get("key", "") != REVIEW_LOG_KEY:
+        return jsonify({"error": "invalid key"}), 401
+    n = len(_EVENT_LOG)
+    _EVENT_LOG.clear()
+    print(f"[REVIEW LOG] ล้างกระดาน {n} บรรทัด")
+    log_event("SYSTEM",
+              "operator log buffer reset — this console holds only the most "
+              "recent events in memory")
+    return jsonify({"ok": True, "cleared": n})
 
 
 @app.route("/webhook", methods=["GET"])
