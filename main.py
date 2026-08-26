@@ -250,7 +250,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r84"
+BOT_REVISION = "r85"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -619,6 +619,33 @@ try:
     print("[REVIEW LOG] เปิดบันทึกจังหวะดึงชื่อแล้ว (PROFILE_REQUEST/RESPONSE)")
 except Exception as _e:
     print(f"[REVIEW LOG] ต่อตัวบันทึกชื่อไม่ติด: {_e}")
+
+
+# ======================================================
+# r85 — ไม่เก็บ state ของ "คีย์ชั่วคราวคอมเมนต์" ลง Postgres
+# ------------------------------------------------------
+# ของเดิม: บอทประมวลผลคอมเมนต์ด้วยคีย์ `c:{comment_id}` แล้ว save_turn
+# เก็บลง Postgres ด้วย psid = "c:..." -> แถวขยะที่ส่งข้อความหาไม่ได้
+# พอ rekey ไปคีย์จริง แถวเก่ายังค้าง -> ตัวกวาดทักกลับหยิบมายิง -> 400
+# ตรงนี้ตัดตั้งแต่ต้นทาง ไม่ให้เกิดแถวขยะเพิ่ม
+# (แถวเก่าที่ค้างอยู่แล้ว ชั้นกันที่ send_reply รับไว้)
+# ======================================================
+try:
+    if _bl.pg_store is not None:
+        _ORIG_SAVE_TURN = _bl.pg_store.save_turn
+
+        def _save_turn_guarded(page_id, psid, state, *a, **k):
+            try:
+                if str(psid or "").startswith("c:"):
+                    return None          # คีย์ชั่วคราว ไม่ต้องจำถาวร
+            except Exception:
+                pass
+            return _ORIG_SAVE_TURN(page_id, psid, state, *a, **k)
+
+        _bl.pg_store.save_turn = _save_turn_guarded
+        print("[PG GUARD] ไม่เก็บคีย์ชั่วคราวของคอมเมนต์ลง Postgres แล้ว")
+except Exception as _e:
+    print(f"[PG GUARD] ต่อไม่ติด: {_e}")
 
 
 def _norm_msg(s: str) -> str:
@@ -1275,6 +1302,19 @@ def _send_reply_blocking(recipient_id: str, text: str, page_id: str = ""):
                 break
 
 
+_VALID_PSID = re.compile(r"^\d{5,}$")
+
+
+def _is_sendable(recipient_id: str) -> bool:
+    """ส่งข้อความหา id นี้ได้จริงไหม
+
+    Meta รับเฉพาะ PSID/IGSID ที่เป็นตัวเลขล้วน
+    คีย์ชั่วคราวของคอมเมนต์ (`c:{comment_id}`) ส่งไม่ได้ -> ยิงไปก็ได้
+    `(#100) Param recipient[id] must be a valid ID string` กลับมาเปล่าๆ
+    """
+    return bool(_VALID_PSID.match(str(recipient_id or "").strip()))
+
+
 def send_reply(recipient_id: str, text: str, page_id: str = "",
                force: bool = False):
     """ยิงในเธรดเบื้องหลัง — webhook จะได้ตอบ 200 ให้ Meta ภายในไม่กี่ ms
@@ -1285,6 +1325,16 @@ def send_reply(recipient_id: str, text: str, page_id: str = "",
     # r70 — เพจโหมดเก็บข้อมูล: ด่านสุดท้ายก่อนยิงจริง
     # r71 — ยกเว้นข้อความดับอารมณ์ (force=True) Gift เคาะ 23 ส.ค. 2026:
     #       "คงโหมดเงียบไว้ แต่ให้ override ตอนโกรธ"
+    # r85 — กัน SEND_ERROR (#100) ที่โผล่ใน /review-log
+    # ต้นเหตุ: state ของคอมเมนต์ถูกเก็บลง Postgres ด้วย psid = "c:{comment_id}"
+    # (`rekey`/`drop` ล้างแต่ใน RAM ไม่ได้ล้าง Postgres)
+    # แล้วตัวกวาดทักกลับอ่านแถวนั้นมา -> ยิงหา "c:..." -> Meta ตอบ 400
+    # ไม่ใช่ error ที่เกิดกับลูกค้าจริง แต่ทำให้ log ดูเหมือนระบบพัง
+    # (สำคัญเป็นพิเศษตอนนี้ เพราะผู้ตรวจ Meta จะดู /review-log ในวิดีโอ)
+    if not _is_sendable(recipient_id):
+        print(f"[SEND SKIP] ข้ามการส่ง — id ไม่ใช่ PSID จริง "
+              f"(คีย์ชั่วคราวของคอมเมนต์) | {str(recipient_id)[:40]!r}")
+        return
     if page_observe(page_id) and not force:
         print(f"[OBSERVE] เพจ {page_id} ยังไม่เปิดบอทตอบ — ไม่ส่งข้อความ "
               f"| {text[:60]!r}")
