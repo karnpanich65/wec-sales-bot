@@ -47,7 +47,8 @@ from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       is_canned_ad_reply, ZONE_MENU_Q_PHONE,
                       build_kb_zone_block, LABEL_QUALIFIED, LABEL_ERR_TERMS,
                       detect_comment_interest, PUBLIC_COMMENT_THANKS,
-                      PUBLIC_COMMENT_THANKS_F)
+                      PUBLIC_COMMENT_THANKS_F,
+                      calm_stack_guard, MAX_BUBBLES)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -250,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r85"
+BOT_REVISION = "r86"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -927,6 +928,26 @@ class CalmBotEngine(BotEngine):
         except Exception as _e:
             print(f"[CANNED AD ERROR] {_e} — ใช้คำตอบเดิม")
             return reply
+
+    # r86 — ด่านสุดท้ายของ _decide: กันบับเบิลซ้อนในเทิร์นเดียว
+    # bot_logic._decide เรียก self._dedupe_exact(bubbles) เป็นตัวสุดท้าย
+    # ก่อน return จึงเป็นจุดเดียวที่เห็นบับเบิลครบทั้งชุด
+    # พังเมื่อไหร่ = คืนของเดิมทั้งชุด ห้ามทำให้บอทเงียบ (บทเรียน r73/r75)
+    @staticmethod
+    def _dedupe_exact(bubbles):
+        try:
+            out = BotEngine._dedupe_exact(bubbles)
+        except Exception as _e:
+            print(f"[STACK GUARD] _dedupe_exact เดิมพลาด: {_e} — ใช้ของดิบ")
+            out = bubbles
+        try:
+            new = calm_stack_guard(out)
+            if new:
+                return new
+            print("[STACK GUARD] ผลลัพธ์ว่าง — คืนของเดิมแทน")
+        except Exception as _e:
+            print(f"[STACK GUARD ERROR] {_e} — ใช้บับเบิลเดิม")
+        return out
 
     def process(self, user_message, user_id, referral=None,
                 platform="facebook", page_id="", brand="",
@@ -2326,6 +2347,128 @@ def review_log_data():
     if request.args.get("key", "") != REVIEW_LOG_KEY:
         return jsonify({"error": "invalid key"}), 401
     return jsonify({"events": list(_EVENT_LOG)})
+
+
+# ======================================================
+# r86 — ล้างสถานะลูกค้าทีละคน (ไว้ใช้กับบัญชีทดสอบ)
+# ------------------------------------------------------
+# Gift 26 ส.ค. 2569: "ล้าง log คนนี้หน่อย เป็นผมเองเอาไว้เทส bot ทำ review"
+# ก่อนหน้านี้ไม่มีทางล้างเลย ต้องรอ state หมดอายุไปเอง
+# ทำ 3 อย่าง:
+#   1) ลบแถว sessions + messages ของคู่ (page_id, psid) ใน Postgres
+#   2) เขียน state เปล่ากลับเข้า sessions ทันที
+#      เหตุผล: _resolve_state ไล่หา Postgres -> ชีต -> ว่าง
+#      ถ้าลบเฉยๆ มันจะไปกู้ข้อมูลเก่าจาก "ชีต" กลับมาแทน
+#      ใส่ก้อนเปล่าไว้ = ตัดจบตั้งแต่ชั้นแรก และไม่ต้องแตะชีตลีดเลย
+#      (กติกา Gift: ห้ามยุ่งกับคอลัมน์แจกเคส/เจ้าของ/คิว)
+#   3) ล้าง RAM: _lead_states ทุกรูปคีย์ · _conversations · _WELCOMED
+# ใช้คีย์ตัวเดียวกับ /review-log
+# ======================================================
+@app.route("/reset-user", methods=["GET", "POST"])
+def reset_user():
+    if request.args.get("key", "") != REVIEW_LOG_KEY:
+        return jsonify({"error": "invalid key"}), 401
+
+    page_id = str(request.args.get("page", "") or "").strip()
+    psid    = str(request.args.get("psid", "") or "").strip()
+    prefix  = str(request.args.get("prefix", "") or "").strip()
+
+    # --- หา psid จากเศษตัวเลขที่ log มาสก์ไว้ -------------------------
+    if not psid and prefix:
+        cands = set()
+        for k in list(_lead_states.keys()) + list(_conversations.keys()):
+            k = str(k)
+            tail = k.split(":")[-1]
+            if tail.startswith(prefix) and tail.isdigit():
+                cands.add(tail)
+        if len(cands) != 1:
+            return jsonify({"error": "prefix ไม่ชี้ชัด",
+                            "prefix": prefix,
+                            "matches": sorted(cands)[:20]}), 400
+        psid = cands.pop()
+
+    if not psid:
+        return jsonify({"error": "ต้องส่ง psid หรือ prefix มาด้วย"}), 400
+
+    out = {"psid_masked": _mask(psid), "page": page_id or "(ทุกเพจ)"}
+
+    # --- 1+2) Postgres ------------------------------------------------
+    pg_note = "ข้าม (ไม่ได้เปิด Postgres)"
+    try:
+        from bot_logic import pg_store
+        if pg_store is not None and getattr(pg_store, "DATABASE_URL", ""):
+            import psycopg2 as _pg
+            import json as _json
+            blank = {"data": {}, "awaiting": None, "qualifying": False,
+                     "done": False, "referral": {}, "platform": "facebook",
+                     "last_seen": time.time(), "lead_sent": False,
+                     "asked": {}, "contact_refused": False,
+                     "signals": [], "turns": 0, "price_asks": 0,
+                     "psid": str(psid)}
+            conn = _pg.connect(pg_store.DATABASE_URL, connect_timeout=8)
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    if page_id:
+                        cur.execute("DELETE FROM messages WHERE page_id=%s AND psid=%s",
+                                    (page_id, psid))
+                        n_msg = cur.rowcount
+                        cur.execute("DELETE FROM sessions WHERE page_id=%s AND psid=%s",
+                                    (page_id, psid))
+                        n_ses = cur.rowcount
+                        cur.execute(
+                            "INSERT INTO sessions (page_id, psid, state, updated_at) "
+                            "VALUES (%s, %s, %s, now()) "
+                            "ON CONFLICT (page_id, psid) DO UPDATE "
+                            "SET state = EXCLUDED.state, updated_at = now()",
+                            (page_id, psid,
+                             _json.dumps(blank, ensure_ascii=False)))
+                    else:
+                        cur.execute("DELETE FROM messages WHERE psid=%s", (psid,))
+                        n_msg = cur.rowcount
+                        cur.execute("SELECT page_id FROM sessions WHERE psid=%s",
+                                    (psid,))
+                        pages = [r[0] for r in cur.fetchall()]
+                        cur.execute("DELETE FROM sessions WHERE psid=%s", (psid,))
+                        n_ses = cur.rowcount
+                        for _p in pages:
+                            cur.execute(
+                                "INSERT INTO sessions (page_id, psid, state, updated_at) "
+                                "VALUES (%s, %s, %s, now()) "
+                                "ON CONFLICT (page_id, psid) DO UPDATE "
+                                "SET state = EXCLUDED.state, updated_at = now()",
+                                (_p, psid,
+                                 _json.dumps(blank, ensure_ascii=False)))
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            pg_note = f"ลบ messages {n_msg} แถว · sessions {n_ses} แถว · ใส่ก้อนเปล่าคืนแล้ว"
+    except Exception as e:
+        pg_note = f"พลาด: {type(e).__name__}: {e}"[:200]
+    out["postgres"] = pg_note
+
+    # --- 3) RAM -------------------------------------------------------
+    killed = []
+    for k in [k for k in list(_lead_states.keys())
+              if str(k) == psid or str(k).endswith(":" + psid)]:
+        _lead_states.pop(k, None)
+        killed.append(str(k))
+    for k in [k for k in list(_conversations.keys())
+              if str(k) == psid or str(k).endswith(":" + psid)]:
+        _conversations.pop(k, None)
+        killed.append("conv:" + str(k))
+    try:
+        _bl._WELCOMED.pop(psid, None)
+    except Exception:
+        pass
+    out["ram"] = f"ล้าง {len(killed)} คีย์"
+    out["ok"] = True
+    print(f"[RESET USER] {_mask(psid)} page={page_id or '-'} | {pg_note} | RAM {len(killed)} คีย์")
+    log_event("RESET_USER", f"cleared state for {_mask(psid)}",
+              {"page": page_id or "-", "ram_keys": len(killed)})
+    return jsonify(out)
 
 
 @app.route("/webhook", methods=["GET"])
