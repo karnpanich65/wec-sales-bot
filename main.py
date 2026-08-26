@@ -250,7 +250,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r83"
+BOT_REVISION = "r84"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -1642,6 +1642,23 @@ def process_comment(page_id: str, platform: str, value: dict):
         # ย้าย state ไปคีย์จริง -> พอลูกค้าตอบในแชท บอทคุยต่อได้เลย ไม่ทักซ้ำ
         new_skey = f"{fb_page_id}:{psid}" if fb_page_id else psid
         bot.rekey(tmp_skey, new_skey, psid)
+        # r84 🔴 บั๊กจริง (Gift ให้เช็ค 26 ส.ค. "เข้า lead ก็ต้องคุย lead")
+        # `rekey` ย้าย _lead_states ด้วยคีย์ "{page}:{id}" ถูกต้องแล้ว
+        # แต่ **บทสนทนา** ถูกเก็บคนละคีย์: `_log()` เขียนที่ `_conversations[user_id]`
+        # (คีย์เปล่าๆ ไม่มี page นำหน้า) และ AI ก็อ่านจากคีย์นั้น
+        # -> ของเดิมย้ายแต่คีย์ที่มี page นำหน้า ซึ่งแทบไม่มีข้อมูล
+        # -> พอลูกค้าตอบในแชทต่อ บอทจำไม่ได้ว่าเพิ่งพูดอะไรไปในไพรเวทรีพลาย
+        #    = ทักทายใหม่ / ถามซ้ำ ทั้งที่เพิ่งคุยกันไป
+        try:
+            _old_conv = _conversations.pop(tmp_key, None)
+            if _old_conv:
+                _conversations[psid] = _old_conv
+                print(f"[COMMENT] ย้ายบทสนทนา {len(_old_conv)} ท่อน "
+                      f"ไปคีย์จริงแล้ว — คุยต่อได้ ไม่ทักซ้ำ")
+            else:
+                print("[COMMENT] ไม่มีบทสนทนาให้ย้าย (ปกติถ้าตอบด้วยข้อความตายตัว)")
+        except Exception as _e:
+            print(f"[COMMENT] ย้ายบทสนทนาไม่สำเร็จ: {_e}")
     else:
         bot.drop(tmp_skey)              # ส่งไม่ได้ = อย่าทิ้ง state ค้างไว้
         print("[COMMENT] ทักแชทไม่สำเร็จ — ข้ามการตอบใต้โพสต์ด้วย")
