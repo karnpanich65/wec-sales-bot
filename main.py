@@ -45,7 +45,9 @@ from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       ZONE_NONE_MSG, zone_detail, build_zone_menu,
                       detect_size_ask, SIZE_ANSWER_GENERAL,
                       is_canned_ad_reply, ZONE_MENU_Q_PHONE,
-                      build_kb_zone_block, LABEL_QUALIFIED, LABEL_ERR_TERMS)
+                      build_kb_zone_block, LABEL_QUALIFIED, LABEL_ERR_TERMS,
+                      detect_comment_interest, PUBLIC_COMMENT_THANKS,
+                      PUBLIC_COMMENT_THANKS_F)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -248,7 +250,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r82"
+BOT_REVISION = "r83"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -1599,6 +1601,27 @@ def process_comment(page_id: str, platform: str, value: dict):
     log_event("INBOUND", f"comment ({platform}) from {from_name or '-'}",
               {"platform": platform, "comment_id": comment_id[:20],
                "text": text})
+
+    # r83 — Gift 26 ส.ค.: "เอาแค่ขอบคุณที่แสดงความคิดเห็น
+    #        แต่ถ้าสนใจ ก็ตอบว่าส่งรายละเอียดให้ทางข้อความนะ
+    #        ไม่ต้องไปตอบอะไรเหมือนใน messaging"
+    # คนมาชมเฉยๆ ("เยี่ยมคะ" "สวยมาก") ไม่ควรโดนทักขาย = สแปม
+    try:
+        _interested = detect_comment_interest(text)
+    except Exception as _e:
+        print(f"[COMMENT] เช็คความสนใจไม่ได้ ถือว่าสนใจไว้ก่อน: {_e}")
+        _interested = True
+    if not _interested:
+        print(f"[COMMENT SKIP] ไม่ใช่คนสนใจซื้อ — ขอบคุณอย่างเดียว "
+              f"ไม่ทักแชท | {(text or '')[:40]!r}")
+        if COMMENT_PUBLIC_REPLY:
+            reply_to_comment(
+                comment_id,
+                PUBLIC_COMMENT_THANKS_F if gender == "female"
+                else PUBLIC_COMMENT_THANKS,
+                fb_page_id,
+            )
+        return
 
     # --- เดินบทสนทนาด้วยคีย์ชั่วคราว (ยังไม่รู้ PSID) ---
     tmp_key = f"c:{comment_id}"
