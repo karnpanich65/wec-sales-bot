@@ -45,7 +45,7 @@ from wec_calm import (detect_anger, calm_mode, detect_stop, stop_mode,
                       ZONE_NONE_MSG, zone_detail, build_zone_menu,
                       detect_size_ask, SIZE_ANSWER_GENERAL,
                       is_canned_ad_reply, ZONE_MENU_Q_PHONE,
-                      build_kb_zone_block)
+                      build_kb_zone_block, LABEL_QUALIFIED, LABEL_ERR_TERMS)
 from faq_data import MSG_SPLIT
 
 load_dotenv()
@@ -248,7 +248,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r80"
+BOT_REVISION = "r81"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -450,6 +450,115 @@ try:
     from faq_data import FALLBACK_MSG as _FALLBACK_RAW
 except Exception:
     _FALLBACK_RAW = "ลูกค้าสนใจโซนไหน และงบประมาณคร่าวๆ"
+
+
+# ======================================================
+# r81 — ติดป้าย "ผ่านเกณฑ์รายได้" ให้แชท (Custom Labels API)
+# ------------------------------------------------------
+# ป้ายโผล่ในกล่องข้อความเพจ เซลกรองดูได้เลยว่าใครควรโทรก่อน
+# ⚠️ กติกาเหล็ก: พังยังไงก็ห้ามกระทบการตอบลูกค้า — ยิงในเธรดแยก + กลืน error
+# ======================================================
+# ใช้เวอร์ชันเดียวกับที่ subscribe เพจ (v22.0) — main.py ไม่มี FB_GRAPH_URL
+_LABEL_GRAPH = "https://graph.facebook.com/v22.0"
+
+_LABEL_ID_CACHE: dict[str, str] = {}     # page_id -> label_id
+_LABEL_BLOCKED: set[str] = set()         # เพจที่ยังไม่ได้กดยอมรับข้อกำหนด
+_LABEL_DONE: set[str] = set()            # "page:psid" ที่ติดป้ายไปแล้ว
+
+
+def _label_id_for_page(page_id: str, token: str) -> str:
+    """หา label_id ของป้ายบนเพจนั้น ไม่มีก็สร้าง (คืน "" ถ้าทำไม่ได้)"""
+    cached = _LABEL_ID_CACHE.get(page_id)
+    if cached:
+        return cached
+    try:
+        r = requests.get(f"{_LABEL_GRAPH}/me/custom_labels",
+                         params={"fields": "name,page_label_name",
+                                 "access_token": token}, timeout=6)
+        j = r.json()
+        if "error" in j:
+            code = (j["error"] or {}).get("code")
+            if code == LABEL_ERR_TERMS:
+                _LABEL_BLOCKED.add(page_id)
+                print(f"[LABEL] ⚠️ เพจ {page_id} ยังไม่ได้กดยอมรับ "
+                      f"\"ข้อกำหนดการติดต่อของเพจ\" — ติดป้ายไม่ได้ "
+                      f"(Gift ต้องกดเองใน Business Suite)")
+            else:
+                print(f"[LABEL] อ่านป้ายไม่ได้ page={page_id} "
+                      f"{code}: {str((j['error'] or {}).get('message'))[:90]}")
+            return ""
+        for it in (j.get("data") or []):
+            nm = it.get("page_label_name") or it.get("name") or ""
+            if nm == LABEL_QUALIFIED and it.get("id"):
+                _LABEL_ID_CACHE[page_id] = it["id"]
+                print(f"[LABEL] เจอป้ายเดิมบนเพจ {page_id} แล้ว")
+                return it["id"]
+        # ไม่มี -> สร้างใหม่
+        r2 = requests.post(f"{_LABEL_GRAPH}/me/custom_labels",
+                           data={"page_label_name": LABEL_QUALIFIED,
+                                 "access_token": token}, timeout=6)
+        j2 = r2.json()
+        if "error" in j2:
+            code = (j2["error"] or {}).get("code")
+            if code == LABEL_ERR_TERMS:
+                _LABEL_BLOCKED.add(page_id)
+            print(f"[LABEL] สร้างป้ายไม่ได้ page={page_id} "
+                  f"{code}: {str((j2['error'] or {}).get('message'))[:90]}")
+            return ""
+        lid = j2.get("id") or ""
+        if lid:
+            _LABEL_ID_CACHE[page_id] = lid
+            print(f"[LABEL] สร้างป้าย \"{LABEL_QUALIFIED}\" บนเพจ {page_id} แล้ว")
+        return lid
+    except Exception as e:
+        print(f"[LABEL] หา/สร้างป้ายพลาด page={page_id}: {str(e)[:90]}")
+        return ""
+
+
+def _label_worker(psid: str, page_id: str):
+    try:
+        token = page_token(page_id)
+        if not token:
+            print(f"[LABEL] ไม่มี token ของเพจ {page_id} — ข้าม")
+            return
+        lid = _label_id_for_page(page_id, token)
+        if not lid:
+            return
+        r = requests.post(f"{_LABEL_GRAPH}/{lid}/label",
+                          data={"user": psid, "access_token": token}, timeout=6)
+        j = r.json()
+        if "error" in j:
+            code = (j["error"] or {}).get("code")
+            if code == LABEL_ERR_TERMS:
+                _LABEL_BLOCKED.add(page_id)
+            print(f"[LABEL] ติดป้ายไม่สำเร็จ {_mask(psid)} page={page_id} "
+                  f"{code}: {str((j['error'] or {}).get('message'))[:90]}")
+            return
+        _LABEL_DONE.add(f"{page_id}:{psid}")
+        print(f"[LABEL OK] ติดป้าย \"{LABEL_QUALIFIED}\" ให้ {_mask(psid)} "
+              f"page={page_id} แล้ว")
+    except Exception as e:
+        print(f"[LABEL] เธรดติดป้ายพลาด: {str(e)[:90]}")
+
+
+def label_if_qualified(psid: str, page_id: str, state: dict):
+    """ผ่านเกณฑ์รายได้ -> ติดป้ายให้แชท (ยิงเบื้องหลัง ไม่หน่วงการตอบ)
+
+    Gift เคาะ 26 ส.ค.: ติดเฉพาะ "ผ่านเกณฑ์รายได้" ไม่ผูกกับเกรด
+    """
+    try:
+        if not psid or not page_id or page_id in _LABEL_BLOCKED:
+            return
+        if f"{page_id}:{psid}" in _LABEL_DONE:
+            return                      # ติดไปแล้ว ไม่ยิงซ้ำ
+        data = (state or {}).get("data") or {}
+        info = BotEngine._income_numbers(data)
+        if info.get("qualified25k") != "1":
+            return
+        threading.Thread(target=_label_worker, args=(psid, page_id),
+                         daemon=True).start()
+    except Exception as e:
+        print(f"[LABEL] เช็คเกณฑ์พลาด ข้ามไป: {str(e)[:90]}")
 
 
 def _norm_msg(s: str) -> str:
@@ -1642,6 +1751,14 @@ def process_event(event: dict, platform: str = "facebook", page_id: str = ""):
                    force=(lead_grade in ("!", "STOP", "STOPSOFT")))  # r71/r73
     else:
         print(f"[SILENT] ({platform}) {_mask(sender_id)} ไม่ตอบ (เซลดูแลเอง)")
+
+    # r81 — ผ่านเกณฑ์รายได้ -> ติดป้ายให้แชท (เช็คทุกเทิร์น ไม่ผูกกับเกรด)
+    try:
+        _lst = _lead_states.get(f"{page_id}:{sender_id}") or _lead_states.get(sender_id)
+        if _lst is not None:
+            label_if_qualified(sender_id, page_id, _lst)
+    except Exception as _e:
+        print(f"[LABEL] hook พลาด ข้ามไป: {str(_e)[:80]}")
 
     if lead_grade == "A":
         alert_lead(sender_id, user_text, lead_referral.get("ad_id", ""), page_id)
