@@ -2374,6 +2374,8 @@ def reset_user():
     prefix  = str(request.args.get("prefix", "") or "").strip()
 
     # --- หา psid จากเศษตัวเลขที่ log มาสก์ไว้ -------------------------
+    # หาใน RAM ก่อน แล้วค่อยไปหาใน Postgres
+    # (หลัง deploy ใหม่ RAM ว่างเสมอ ถ้าไม่ไล่ต่อจะหาไม่เจอทุกครั้ง)
     if not psid and prefix:
         cands = set()
         for k in list(_lead_states.keys()) + list(_conversations.keys()):
@@ -2381,6 +2383,33 @@ def reset_user():
             tail = k.split(":")[-1]
             if tail.startswith(prefix) and tail.isdigit():
                 cands.add(tail)
+        if len(cands) != 1:
+            try:
+                from bot_logic import pg_store as _ps
+                if _ps is not None and getattr(_ps, "DATABASE_URL", ""):
+                    import psycopg2 as _pg2
+                    _c = _pg2.connect(_ps.DATABASE_URL, connect_timeout=8)
+                    try:
+                        with _c.cursor() as _cur:
+                            if page_id:
+                                _cur.execute(
+                                    "SELECT DISTINCT psid FROM sessions "
+                                    "WHERE page_id=%s AND psid LIKE %s",
+                                    (page_id, prefix + "%"))
+                            else:
+                                _cur.execute(
+                                    "SELECT DISTINCT psid FROM sessions "
+                                    "WHERE psid LIKE %s", (prefix + "%",))
+                            for _r in _cur.fetchall():
+                                if _r[0]:
+                                    cands.add(str(_r[0]))
+                    finally:
+                        try:
+                            _c.close()
+                        except Exception:
+                            pass
+            except Exception as _e:
+                print(f"[RESET USER] หา prefix ใน Postgres ไม่ได้: {_e}")
         if len(cands) != 1:
             return jsonify({"error": "prefix ไม่ชี้ชัด",
                             "prefix": prefix,
