@@ -248,7 +248,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r81"
+BOT_REVISION = "r82"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -559,6 +559,64 @@ def label_if_qualified(psid: str, page_id: str, state: dict):
                          daemon=True).start()
     except Exception as e:
         print(f"[LABEL] เช็คเกณฑ์พลาด ข้ามไป: {str(e)[:90]}")
+
+
+# ======================================================
+# r82 — โชว์ "ตอนดึงชื่อ" ใน /review-log ให้ผู้ตรวจ Meta เห็น
+# ------------------------------------------------------
+# แอพเราเป็น server-to-server ไม่มีหน้าจอของตัวเอง
+# วิธีที่เคยผ่าน App Review มาแล้ว (14 ส.ค.) คือถ่ายคู่กัน:
+#   จอขวา = แอพ Messenger/IG จริง · จอซ้าย = /review-log ของเราเอง
+#   แล้วจับคู่ timestamp + message_id ให้ผู้ตรวจเห็นว่าเป็นแอพเรายิงจริง
+#
+# แต่ /review-log ปัจจุบันบันทึกแค่ INBOUND / SEND_REQUEST / SEND_RESPONSE
+# **ไม่มี event ตอนดึงชื่อเลย** ซึ่งเป็นหัวใจของ Business Asset User Profile Access
+# -> ถ่ายวิดีโอไปก็ไม่มีอะไรให้ผู้ตรวจดูว่าเราใช้สิทธิ์นี้ยังไง
+#
+# ตรงนี้ครอบ _get_fb_name ให้ยิง event 2 ตัว: PROFILE_REQUEST / PROFILE_RESPONSE
+# (ชื่อจริงถูก _scrub ใน log_event อยู่แล้ว — ไม่ใช่ฐานข้อมูลลูกค้า)
+# ======================================================
+try:
+    _ORIG_GET_NAME = _bl.BotEngine._get_fb_name
+
+    def _get_fb_name_logged(self, user_id, platform="facebook", page_id=""):
+        _fields = "name,username" if platform == "instagram" else "first_name,last_name"
+        try:
+            log_event("PROFILE_REQUEST",
+                      f"GET https://graph.facebook.com/{_mask(user_id)}"
+                      f"?fields={_fields}",
+                      {"endpoint": "https://graph.facebook.com/<PSID>",
+                       "fields": _fields,
+                       "platform": platform,
+                       "page_id": page_id or "-",
+                       "why": "Business Asset User Profile Access — read the "
+                              "person's name so a human consultant can greet "
+                              "them correctly on the call-back they asked for"})
+        except Exception:
+            pass
+        nm = ""
+        try:
+            nm = _ORIG_GET_NAME(self, user_id, platform, page_id)
+        finally:
+            try:
+                if nm:
+                    log_event("PROFILE_RESPONSE",
+                              f"HTTP 200 name = {nm}",
+                              {"name": nm, "platform": platform,
+                               "page_id": page_id or "-"})
+                else:
+                    log_event("PROFILE_ERROR",
+                              "name not returned — permission is still "
+                              "Standard Access (advanced access requested)",
+                              {"platform": platform, "page_id": page_id or "-"})
+            except Exception:
+                pass
+        return nm
+
+    _bl.BotEngine._get_fb_name = _get_fb_name_logged
+    print("[REVIEW LOG] เปิดบันทึกจังหวะดึงชื่อแล้ว (PROFILE_REQUEST/RESPONSE)")
+except Exception as _e:
+    print(f"[REVIEW LOG] ต่อตัวบันทึกชื่อไม่ติด: {_e}")
 
 
 def _norm_msg(s: str) -> str:
