@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r87"
+BOT_REVISION = "r89"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -2609,6 +2609,501 @@ def receive_webhook():
                   "(Messenger > Settings > App Roles) หรือปิด Automation ใน Meta Business Suite")
 
     return jsonify({"status": "ok"})
+
+
+# ======================================================
+# r88 — Postgres อ่านได้ = ข้ามการรอชีต 15 วิ ตอน restart
+# ------------------------------------------------------
+# เคสจริง 27 ส.ค.: reads 87 · read_hits 13 -> 74 ครั้งที่ RAM+PG ไม่มี
+# แล้วไปรอ _load_session (ชีต) ซึ่ง Apps Script ตันบ่อย = ลูกค้ารอ
+# ถ้า Postgres อ่านได้ปกติ แปลว่า state ที่ไม่มีใน PG = ลูกค้าใหม่จริง
+# ไม่ต้องไปถามชีตให้เสียเวลา · ต้องคืน None (ไม่ใช่ False!) เพราะ False
+# = recovery_failed -> ยิงสัญญาณเตือนเซลทุกลูกค้าใหม่
+# ======================================================
+try:
+    _ORIG_LOAD_SESSION = _bl.BotEngine._load_session
+
+    def _load_session_pg_first(self, user_id, page_id=""):
+        try:
+            _ps = getattr(_bl, "pg_store", None)
+            if _ps is not None and _ps._can_read():
+                print(f"[SESSION SKIP] {str(user_id)[:8]}... Postgres อ่านได้ปกติ "
+                      "— ข้ามชีต ไม่ต้องรอ 15 วิ")
+                return None
+        except Exception as _e:
+            print(f"[SESSION SKIP] เช็ค Postgres ไม่ได้ ({_e}) — ใช้ทางเดิม")
+        return _ORIG_LOAD_SESSION(self, user_id, page_id)
+
+    _bl.BotEngine._load_session = _load_session_pg_first
+    print("[R88] Postgres-first session load เปิดแล้ว")
+except Exception as _e:
+    print(f"[R88 ERROR] ต่อไม่ติด: {_e}")
+
+
+# ======================================================================
+# r89 — เกณฑ์เกรดใหม่ทั้งชุด (Gift เคาะ 28 ส.ค. 2026)
+# ----------------------------------------------------------------------
+# ตารางเกณฑ์ (ลำดับเดียวกับที่เคาะในแชท):
+#   3   ไม่บอกรายได้ / ไม่มีผู้กู้ร่วม            -> X ไม่รับเคส (ไม่แจก ไม่นัดโทร)
+#   4+5 ไม่รู้รายได้ (ตัดทางลัด A จากคะแนนทิ้ง)   -> N1 โทรถามรายได้
+#   6ก  ปรับโครงสร้าง ปิดแล้ว >1 ปี และ DSR <15%  -> N4 ผ่านเกณฑ์เครดิต (แจกได้)
+#   6ข  ยังติดปรับโครงสร้างอยู่                    -> X (DSR ต่ำแค่ไหนก็ไม่รับ)
+#   6ค  ปิดแล้ว <=1 ปี หรือ DSR >=15%             -> X
+#   6ง  บูโรค้าง / ล่าช้าเกิน 30 วัน               -> X
+#   7   อาชีพอิสระ <2 ปี ไม่มีภาษี/ทะเบียน         -> X
+#   8   วงเงินตอนนี้ >= 2.5M และยืนยันยอดผ่อนแล้ว  -> A
+#   9   วงเงิน(สมมติไม่มีหนี้) >= 2.5M แต่ยังไม่ยืนยันยอดผ่อน -> N2 โทรถามยอดผ่อน
+#   10  ปิดภาระแล้ววงเงิน >= 2.5M                  -> B (+เช็ค "บริดจ์แท้")
+#   11  ผ่อน <= รายได้                             -> C
+#   12  ผ่อน > รายได้ (เดิม D — ยุบทิ้ง)           -> C
+# บริดจ์แท้ (นิยาม Gift): ส่วนต่างวงเงินหลังปิดหนี้ ต้องพอคืนยอดหนี้รวมที่ปิดให้
+#   = (วงเงินปลอดภาระ - ราคาห้อง 2.5M) >= ยอดหนี้คงเหลือรวม -> แจกโม/เล็กได้
+# เกรดที่ใช้จริง: A B C N O R + X (ไม่รับเคส) · เหตุผล N/X เขียนในสัญญาณเสมอ
+# ทุกจุดมี fallback -> ห้ามทำให้บอทเงียบเด็ดขาด (บทเรียน r73/r75)
+# ======================================================================
+import bot_logic as _bl9
+
+R89_UNIT_PRICE = 2_500_000      # ราคาห้องอ้างอิงใหม่ (เดิม 2.3M)
+R89_RESTRUCT_MIN_YEARS = 1      # ปรับโครงสร้างต้องปิดมาแล้ว "เกิน" กี่ปี
+R89_RESTRUCT_DSR_MAX = 0.15     # DSR ต้องต่ำกว่าเท่านี้ถึงรับ (N4)
+
+# ---------- (1) เกรดใหม่ — ทับ BotEngine._grade ทั้งตัว ----------
+_R89_ORIG_GRADE = _bl9.BotEngine._grade
+
+
+def _r89_reason(self, data, state, code, txt):
+    data["grade_reason"] = f"{code} {txt}"
+    if state is not None:
+        try:
+            self._add_signal(state, f"[{code}] {txt}")
+        except Exception:
+            pass
+
+
+def _grade_r89(self, data, state=None):
+    st = state if state is not None else {}
+
+    def reason(code, txt):
+        _r89_reason(self, data, state, code, txt)
+
+    def reject_x(why, ncb=False):
+        if state is not None:
+            st["soft_close"] = True
+            if ncb:
+                st["soft_close_msg"] = _bl9.NCB_SOFT_CLOSE
+        reason("X", "ไม่รับเคส — " + why)
+        return "X"
+
+    # ---- รายได้ (คำนวณไว้ก่อน — ตัดสินทีหลังบล็อกเครดิต) ----
+    income = (data.get("income_total") or data.get("income_baht")
+              or _bl9._parse_income(str(data.get("income", ""))))
+    income = int(income) if income else 0
+
+    # ---- ข้อ 6 : ประวัติเครดิต — ต้องมาก่อนเช็ครายได้
+    #      (คนที่ยังติดบูโร/ติดปรับโครงสร้าง ต้องเป็น X แม้ยังไม่รู้รายได้) ----
+    _k = st.get("ncb_kind") if state is not None else None
+    if _k and state is not None:
+        yrs = data.get("ncb_years")
+        still = data.get("ncb_still")
+        if _k == "blacklist":
+            if still is True:
+                return reject_x("ยังติดบูโร/ค้างชำระอยู่ ณ ตอนนี้", ncb=True)
+            if yrs is not None and yrs < 1:
+                return reject_x("เพิ่งปิดบัญชีที่ค้าง ยังไม่พ้น 1 ปี", ncb=True)
+            if yrs is not None and yrs >= _bl9.NCB_CLEAR_YEARS:
+                self._add_signal(
+                    st,
+                    f"เคยติดบูโร แต่ปิดมาแล้ว {yrs} ปี"
+                    + (f" ({data.get('ncb_bank')})" if data.get("ncb_bank") else "")
+                    + f" — พ้น {_bl9.NCB_CLEAR_YEARS} ปีแล้ว ยื่นได้ตามปกติ")
+                # ผ่าน -> ไหลไปคิดวงเงินต่อ
+            else:
+                reason("N3", "เครดิตยังไม่ยืนยัน — เคยติดบูโร ปิดแล้วแต่ยังไม่พ้น 3 ปี"
+                             "/ไม่รู้จำนวนปี · เซลดึงบูโรจริงก่อนเสนอแผน (KTB ดูย้อน 1 ปี)")
+                return "N"
+        elif _k == "late":
+            if data.get("ncb_over30") is True:
+                return reject_x(f"ชำระล่าช้าเกิน {_bl9.NCB_LATE_DAYS} วัน", ncb=True)
+            if data.get("ncb_over30") is False:
+                self._add_signal(st, f"เคยชำระล่าช้าแต่ไม่เกิน {_bl9.NCB_LATE_DAYS} วัน "
+                                     "— ไม่ใช่เคสแดง ตั้งธงให้เช็คบูโรจริง")
+            else:
+                reason("N3", "เครดิตยังไม่ยืนยัน — เคยชำระล่าช้า ยังไม่รู้ว่าเกิน 30 วันไหม โทรถามก่อน")
+                return "N"
+        elif _k == "restruct":
+            if still is True:
+                return reject_x("ยังติดปรับโครงสร้างหนี้อยู่ — DSR ต่ำแค่ไหนก็ไม่รับ (เกณฑ์ 28 ส.ค.)",
+                                ncb=True)
+            if yrs is None:
+                reason("N3", "เครดิตยังไม่ยืนยัน — ปรับโครงสร้างหนี้ ยังไม่รู้ว่าปิดหรือยัง/ปิดมากี่ปี "
+                             "โทรยืนยันก่อน (เกณฑ์รับ: ปิดเกิน 1 ปี + DSR <15%)")
+                return "N"
+            if yrs <= R89_RESTRUCT_MIN_YEARS:
+                return reject_x(f"ปรับโครงสร้างปิดมา {yrs} ปี ยังไม่เกิน "
+                                f"{R89_RESTRUCT_MIN_YEARS} ปี", ncb=True)
+            _d6 = data.get("debt_baht")
+            if _d6 is None:
+                _d6 = _bl9._parse_debt_monthly(str(data.get("debt", "")))
+            if _d6 is None or not income:
+                reason("N3", f"ปรับโครงสร้างปิดมา {yrs} ปี (เกิน 1 ปีแล้ว) แต่ยังไม่รู้ยอดผ่อน/เดือน "
+                             "— เกณฑ์รับต้อง DSR <15% · เซลโทรยืนยันยอดผ่อนก่อน")
+                return "N"
+            _dsr = (_d6 / income) if income else 1.0
+            if _dsr < R89_RESTRUCT_DSR_MAX:
+                reason("N4", f"ผ่านเกณฑ์เครดิต — ปรับโครงสร้างปิดมา {yrs} ปี (เกิน 1 ปี) "
+                             f"และ DSR {round(_dsr*100)}% (<15%) · แจกได้ ยื่นตามปกติ")
+                return "N"
+            return reject_x(f"ปรับโครงสร้างปิดเกิน 1 ปีแล้ว แต่ DSR {round(_dsr*100)}% "
+                            f"เกินเพดาน {round(R89_RESTRUCT_DSR_MAX*100)}%", ncb=True)
+
+    # ---- ข้อ 3/4/5 : รายได้ ----
+    if data.get("income_unknown") or data.get("income_refused"):
+        return reject_x("ลูกค้าไม่บอกรายได้ (เกณฑ์ 28 ส.ค.)")
+    if not income:
+        reason("N1", "ยังไม่รู้รายได้ — โทรถามรายได้ + ผู้กู้ร่วม แล้วระบบตีเกรดจริงตอนเซลกรอกกลับ")
+        return "N"
+
+    # ---- ข้อ 7 : อาชีพอิสระ/เจ้าของกิจการ ----
+    if state is not None and st.get("self_employed"):
+        _y7 = data.get("self_emp_years")
+        _t7 = data.get("self_emp_tax")
+        _r7 = data.get("biz_registered")
+        if not _r7 and (_t7 is False or (_y7 is not None and _y7 < _bl9.FREELANCE_MIN_YEARS)):
+            st["soft_close"] = True     # คำปิดใช้ SELF_EMP_SOFT_CLOSE ตามทางเดิม
+            self._add_signal(
+                st,
+                f"อาชีพอิสระยังไม่เข้าเกณฑ์ธนาคาร (ทำมา {_y7 if _y7 is not None else '?'} ปี · "
+                f"ภาษี/จดทะเบียน: {'ไม่มี' if _t7 is False else 'ยังไม่ยืนยัน'}) "
+                "— เกณฑ์กลางคือ 2 ปี+ และมีภาษีย้อนหลัง")
+            reason("X", "ไม่รับเคส — อาชีพอิสระไม่เข้าเกณฑ์ (ต่ำกว่า 2 ปี/ไม่มีภาษี-ทะเบียน)")
+            return "X"
+        if _r7:
+            self._add_signal(
+                st,
+                "เจ้าของกิจการจดทะเบียน — รับเคสได้ · รายได้จริงต้องคิดจาก "
+                "ยอดขาย×margin×%หุ้น (§0.5) + เกรดบริษัทจาก DBD ให้ทีมวิเคราะห์คำนวณ")
+        income = int(income * _bl9.FREELANCE_INCOME_PCT)
+        data["income_counted"] = income
+        self._add_signal(
+            st,
+            f"อาชีพอิสระ/เจ้าของกิจการ — คิดรายได้ที่แบงก์นับ 50% "
+            f"(เกณฑ์ TTB/UOB) = {income:,} · KBank นับ 100% · KTB 30% · ธอส ไม่รับ")
+
+    # ---- ภาระผ่อน ----
+    debt = data.get("debt_baht")
+    if debt is None:
+        debt = _bl9._parse_debt_monthly(str(data.get("debt", "")))
+    debt_unverified = debt is None and not _bl9._says_no_debt(str(data.get("debt", "")))
+    debt = 0 if debt is None else max(0, int(debt))
+    if data.get("co_debt_baht"):
+        debt += int(data["co_debt_baht"])
+
+    # ---- อายุคุมปีกู้ (ยกจากเกณฑ์เดิมทั้งดุ้น) ----
+    _own_age = data.get("age")
+    _co_age = data.get("co_age")
+    _has_cob = bool(data.get("co_borrower_income"))
+    if _co_age is not None:
+        _age_calc = min(_own_age, _co_age) if _own_age else _co_age
+    elif _has_cob:
+        _age_calc = None
+    else:
+        _age_calc = _own_age
+    cap_now = _bl9._capacity(income, debt, _age_calc)
+    cap_clear = _bl9._capacity(income, 0, _age_calc)
+    if (state is not None and cap_now >= _bl9.BIG_CASE_BAHT
+            and str(st.get("page_id", "")) in _bl9.BIG_CASE_PAGES):
+        st["route_to"] = "Gift"
+        self._add_signal(
+            st,
+            f"🔷 วงเงินประเมิน {cap_now/1e6:.1f} ล้าน (เกิน 5 ล้าน) "
+            f"— เพจ Wealth Estate ส่ง Gift คนเดียว ไม่เข้าคิวแจกปกติ")
+    if state is not None and _own_age is not None:
+        _solo = _bl9._capacity(income, debt, _own_age)
+        if _has_cob and _co_age is None:
+            self._add_signal(
+                st,
+                f"⚠️ วงเงิน {cap_now/1e6:.1f}M คิดโดย 'สมมติผู้กู้ร่วมอายุ ~35' "
+                f"เพราะยังไม่รู้อายุจริง · ถ้ายื่นด้วยอายุผู้กู้หลัก {_own_age} "
+                f"จะเหลือ {_solo/1e6:.1f}M — โทรถามอายุผู้กู้ร่วมก่อนเสนอห้อง")
+        elif not _has_cob:
+            _young = _bl9._capacity(income, debt, _bl9.DEFAULT_AGE)
+            if _young > cap_now * 1.2:
+                self._add_signal(
+                    st,
+                    f"อายุ {_own_age} ยื่นเดี่ยวได้ {cap_now/1e6:.1f}M "
+                    f"— ถ้ามีผู้กู้ร่วมอายุ ~35 ขึ้นเป็น ~{_young/1e6:.1f}M")
+    data["capacity_now"] = cap_now
+    data["capacity_clear"] = cap_clear
+
+    # ---- ข้อ 8-12 : ตัดเกรดด้วยวงเงิน 2.5 ล้าน ----
+    if debt_unverified:
+        if cap_clear >= R89_UNIT_PRICE:
+            # ข้อ 9 — วงเงิน "สมมติไม่มีหนี้" ถึงเกณฑ์ แต่ยอดผ่อนยังไม่ยืนยัน
+            reason("N2", f"รู้รายได้แล้ว ({income:,}) แต่ยังไม่ยืนยันยอดผ่อน/เดือน — "
+                         f"วงเงินแบบไม่มีภาระ {cap_clear/1e6:.1f}M ถึงเกณฑ์ "
+                         "· โทรยืนยันยอดผ่อนแล้วตีเกรดจริง")
+            return "N"
+        # ต่อให้ไม่มีหนี้เลย วงเงินก็ไม่ถึง -> จบที่ C ได้เลย ไม่ต้องรอยอดผ่อน
+        if state is not None:
+            self._add_signal(st, f"วงเงินแบบไม่มีภาระ {cap_clear/1e6:.1f}M "
+                                 f"ยังไม่ถึงราคาห้อง {R89_UNIT_PRICE/1e6:.1f}M")
+        return "C"
+    if cap_now >= R89_UNIT_PRICE:
+        return "A"
+    if cap_clear >= R89_UNIT_PRICE:
+        # ข้อ 10 — เคสบริดจ์ · เช็ค "บริดจ์แท้" สำหรับคิวโม/เล็ก
+        _tot = data.get("debt_total_baht")
+        _gap = cap_clear - R89_UNIT_PRICE
+        if _tot:
+            if _gap >= _tot:
+                data["bridge_ok"] = 1
+                self._add_signal(
+                    st, f"[บริดจ์แท้] ส่วนต่างวงเงิน {_gap/1e6:.2f}M ≥ "
+                        f"ยอดหนี้รวม {_tot/1e6:.2f}M — เข้าเกณฑ์แจกโม/เล็ก")
+            else:
+                self._add_signal(
+                    st, f"ส่วนต่างวงเงิน {_gap/1e6:.2f}M ไม่พอปิดยอดหนี้รวม "
+                        f"{_tot/1e6:.2f}M — ไม่ใช่บริดจ์แท้ (ไม่เข้าคิวโม/เล็ก)")
+        elif state is not None:
+            self._add_signal(st, "ยังไม่รู้ยอดหนี้รวมคงเหลือ — เช็คบริดจ์แท้ไม่ได้ "
+                                 "(ไม่เข้าคิวโม/เล็ก จนกว่าเซลยืนยันยอด)")
+        return "B"
+    # ข้อ 11 + 12 — ยุบ D เข้า C ทั้งหมด (เกณฑ์ 28 ส.ค.)
+    if debt > income and state is not None:
+        self._add_signal(st, "ภาระผ่อนเกินรายได้ (เกณฑ์เดิมคือ D) — เคสบริดจ์หนัก "
+                             "ดูแผนปิดหนี้ก่อน · เกณฑ์ใหม่ยุบเป็น C")
+    return "C"
+
+
+try:
+    _bl9.BotEngine._grade = _grade_r89
+    print("[R89] เกณฑ์เกรดใหม่ (A/B/C/N1-4/X · 2.5M · ตัด D) เปิดแล้ว")
+except Exception as _e:
+    print(f"[R89 GRADE ERROR] ต่อไม่ติด — ใช้เกณฑ์เดิม: {_e}")
+
+
+# ---------- (2) กันสัญญาณเก่า "ยังไม่ได้ตัวเลขรายได้" ทับเหตุผลใหม่ ----------
+try:
+    _R89_ORIG_ADD_SIGNAL = _bl9.BotEngine._add_signal
+
+    def _add_signal_r89(state, tag):
+        try:
+            if (isinstance(tag, str) and tag.startswith("⚠️ ยังไม่ได้ตัวเลขรายได้")
+                    and (state.get("data", {}).get("grade_reason") or "")):
+                return    # เหตุผล N1-N4/X เขียนไว้แล้ว ไม่ต้องซ้ำด้วยข้อความเก่า
+        except Exception:
+            pass
+        return _R89_ORIG_ADD_SIGNAL(state, tag)
+
+    _bl9.BotEngine._add_signal = staticmethod(_add_signal_r89)
+except Exception as _e:
+    print(f"[R89 SIGNAL ERROR] {_e}")
+
+
+# ---------- (3) แปลเกรดตอนเขียนชีต: ข้อ 3 -> X · X ไม่สร้างนัดโทร ----------
+try:
+    _R89_ORIG_SEND = _bl9.BotEngine._send_to_sheets
+
+    def _send_to_sheets_r89(self, user_id, data, grade, fb_name="", referral=None,
+                            platform="facebook", page_id="", sheet_tab="",
+                            signals=None, contact_refused=False, calendar=True,
+                            sale=""):
+        try:
+            if grade == "C" and (data.get("income_unknown") or data.get("income_refused")
+                                 or data.get("co_borrower_none")):
+                why = ("ลูกค้าไม่บอกรายได้"
+                       if (data.get("income_unknown") or data.get("income_refused"))
+                       else "ไม่มีผู้กู้ร่วม ยื่นเดี่ยวไม่ผ่าน")
+                grade = "X"
+                data["grade"] = "X"
+                data["grade_reason"] = "X ไม่รับเคส — " + why
+                signals = ([f"[X] ไม่รับเคส — {why} (เกณฑ์ 28 ส.ค.)"]
+                           + list(signals or []))
+            if grade == "X":
+                calendar = False        # ไม่รับเคส = ไม่สร้างนัดโทรในปฏิทิน
+        except Exception as _e:
+            print(f"[R89 SHEET ERROR] {_e} — เขียนแบบเดิม")
+        return _R89_ORIG_SEND(self, user_id, data, grade, fb_name, referral,
+                              platform, page_id, sheet_tab, signals,
+                              contact_refused, calendar, sale)
+
+    _bl9.BotEngine._send_to_sheets = _send_to_sheets_r89
+except Exception as _e:
+    print(f"[R89 SEND ERROR] {_e}")
+
+
+# ---------- (4) คำถามปรับโครงสร้างใหม่ + อ่านคำตอบ "ปิดแล้ว/ยังติด" ----------
+try:
+    _bl9.NCB_Q["restruct"] = (
+        "ขออนุญาตถามครับ ตอนนี้ปิดยอดปรับโครงสร้างหมดแล้ว "
+        "หรือยังผ่อนตามแผนอยู่ครับ ถ้าปิดแล้ว ปิดมากี่ปีแล้วครับ")
+
+    _R89_RESTRUCT_STILL = ("ยังผ่อน", "ผ่อนตามแผน", "ผ่อนอยู่", "ยังจ่าย",
+                           "ยังไม่หมด", "เหลืออีก", "ยังเหลือ")
+    _R89_ORIG_CAPTURE = _bl9.BotEngine._capture
+
+    def _capture_r89(self, state, field, msg):
+        out = _R89_ORIG_CAPTURE(self, state, field, msg)
+        try:
+            if field == "ncb" and state.get("ncb_kind") == "restruct":
+                data = state["data"]
+                _st = _bl9._ncb_still_stuck(msg)
+                if _st is None:
+                    _m = (msg or "").replace(" ", "")
+                    if any(w in _m for w in _R89_RESTRUCT_STILL):
+                        _st = True
+                if _st is not None:
+                    data["ncb_still"] = _st
+                elif data.get("ncb_years") is not None and "ncb_still" not in data:
+                    data["ncb_still"] = False   # บอกจำนวนปี = ปิดไปแล้ว
+        except Exception as _e:
+            print(f"[R89 CAPTURE ERROR] {_e}")
+        return out
+
+    # คำตอบ "ยังผ่อนตามแผนอยู่" ต้องนับเป็นคำตอบที่ถูกต้องของคำถาม ncb ด้วย
+    # (ตัวเดิมรับเฉพาะ จำนวนปี / ปิดแล้ว-ยังติด / เกิน 30 วัน)
+    _R89_ORIG_VALID = _bl9.BotEngine._is_valid_answer   # staticmethod เดิม
+
+    def _is_valid_answer_r89(field, m):
+        try:
+            if field == "ncb":
+                _mm = (m or "").replace(" ", "")
+                if any(w in _mm for w in _R89_RESTRUCT_STILL):
+                    return True
+        except Exception:
+            pass
+        return _R89_ORIG_VALID(field, m)
+
+    _bl9.BotEngine._is_valid_answer = staticmethod(_is_valid_answer_r89)
+
+    _bl9.BotEngine._capture = _capture_r89
+    print("[R89] คำถามปรับโครงสร้าง (ปิดแล้ว/ยังติด + กี่ปี) เปิดแล้ว")
+except Exception as _e:
+    print(f"[R89 NCBQ ERROR] {_e}")
+
+
+# ---------- (5) สาย O: "อยากมีคอนโดปล่อยเช่า" = คนอยากซื้อ ไม่ใช่เจ้าของห้อง ----------
+# เคสจริง 27 ส.ค. เพจ Realty Smart: ลูกค้าจากแอดพิมพ์ "อยากมีคอนโดปล่อยเช่าค่ะ"
+# คำว่า "มีคอนโด" ใน _OWN_HAVE_WORDS แมตช์เป็น "ครอบครองแล้ว" -> ตัดเข้าสาย
+# เจ้าของฝากเช่า -> บอทขอเบอร์ทันทีแล้วจบ ข้ามการคัดกรองทั้ง funnel
+# สถิติ 17-27 ส.ค.: สาย O 28 เคส ได้เบอร์ 0 เคส = ท่อตัน
+# แก้: ตัดคำ "อยาก/สนใจ/คิดจะ + มีxxx" (ความอยากในอนาคต) ออกก่อนตีความ
+try:
+    _R89_ORIG_OWNER_FLAGS = _bl9._owner_flags
+    _R89_DESIRE_PRE = ("สนใจอยากจะ", "สนใจอยาก", "กำลังอยาก", "ฝันอยาก",
+                       "อยากจะ", "คิดจะ", "อยาก", "สนใจ", "ถ้า", "หาก")
+    _R89_HAVE_WORDS = ("มีคอนโด", "มีห้อง", "มีทาวน์", "มีบ้าน",
+                       "มีอยู่แล้ว", "มีห้องอยู่")
+
+    def _owner_flags_r89(msg):
+        try:
+            m = (msg or "").replace(" ", "")
+            cleaned = m
+            for _pre in _R89_DESIRE_PRE:
+                for _hv in _R89_HAVE_WORDS:
+                    cleaned = cleaned.replace(_pre + _hv, "")
+            if cleaned != m:
+                f = _R89_ORIG_OWNER_FLAGS(cleaned)
+                print(f"[R89 OWNER] ตัดคำอยากมีออกก่อนตีความ: {m[:40]!r} -> flags={f}")
+                return f
+        except Exception as _e:
+            print(f"[R89 OWNER ERROR] {_e} — ใช้ทางเดิม")
+        return _R89_ORIG_OWNER_FLAGS(msg)
+
+    _bl9._owner_flags = _owner_flags_r89
+    print("[R89] แพตช์สาย O (อยากมีคอนโด = นักลงทุน) เปิดแล้ว")
+except Exception as _e:
+    print(f"[R89 OWNER PATCH ERROR] {_e}")
+
+
+# ---------- (6) คำถามใหม่: ยอดหนี้คงเหลือรวม (ไว้เช็คบริดจ์แท้) ----------
+# ถามแทรก 1 คำถามหลังลูกค้าบอกยอดผ่อน/เดือน (เฉพาะคนมีหนี้ >0)
+# แล้วส่งคำถามเดิมที่ค้างไว้ต่อทันที — funnel เดิมไม่เปลี่ยนลำดับ
+R89_DEBT_TOTAL_Q = ("ขอบคุณครับ ขอถามเพิ่มอีกนิดเดียวครับ "
+                    "ยอดหนี้คงเหลือรวมทุกก้อนตอนนี้ประมาณเท่าไหร่ครับ "
+                    "(บอกคร่าวๆ ได้เลยครับ เช่น 3 แสน หรือ 1 ล้าน)")
+
+_R89_TOTAL_UNITS = {"ล้าน": 1_000_000, "แสน": 100_000, "หมื่น": 10_000,
+                    "พัน": 1_000, "k": 1_000, "m": 1_000_000}
+
+
+def _r89_parse_total(msg):
+    s = str(msg or "").replace(",", "").replace("-", "").lower()
+    # เบอร์โทรหน้าตาเหมือนตัวเลขเงินก้อนใหญ่ — ตัดทิ้งก่อนเสมอ
+    s = re.sub(r"0[0-9]{8,9}", " ", s)
+    if not s.strip():
+        return None
+    best = None
+    for _m in re.finditer(r"([0-9]+(?:\.[0-9]+)?)\s*(ล้าน|แสน|หมื่น|พัน|k|m)", s):
+        v = round(float(_m.group(1)) * _R89_TOTAL_UNITS[_m.group(2)])
+        if 10_000 <= v <= 100_000_000 and (best is None or v > best):
+            best = v
+    if best is not None:
+        return best
+    for _n in re.findall(r"[0-9]{5,9}", s):
+        v = int(_n)
+        if 10_000 <= v <= 100_000_000 and (best is None or v > best):
+            best = v
+    return best
+
+
+def _r89_consume_total(self, msg, user_id, state, bucket, is_new):
+    state.pop("_r89_wait_debt_total", None)
+    resume = state.pop("_r89_resume", None) or []
+    data = state["data"]
+    # ลูกค้าส่ง "เบอร์โทร" แทนคำตอบ -> นี่คือช่องทางติดต่อ ห้ามกลืนทิ้ง
+    # ส่งเทิร์นคืนเอนจินเดิมให้จับเบอร์ตามปกติ (มันทวนคำถามที่ค้างเอง)
+    if re.search(r"0[0-9]{8,9}", str(msg or "").replace("-", "").replace(" ", "")):
+        return _R89_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+    amt = _r89_parse_total(msg)
+    if amt is None and self._is_question(msg):
+        # ลูกค้าถามกลับ — ปล่อยเทิร์นให้เอนจินเดิมตอบ (มันทวนคำถามค้างเอง)
+        return _R89_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+    if amt is not None:
+        data["debt_total_baht"] = int(amt)
+        self._add_signal(state, f"ยอดหนี้คงเหลือรวม {int(amt):,} บาท (ลูกค้าบอกเอง)")
+    else:
+        data["debt_total_baht"] = None    # ถามแล้ว ไม่ได้ตัวเลข — ห้ามถามซ้ำ
+        self._add_signal(state, f"ถามยอดหนี้รวมแล้ว ลูกค้าตอบ: {str(msg)[:60]} "
+                                "— เซลยืนยันตอนโทร")
+    if resume and str(resume[0]).startswith(("ขอบคุณ", "รับทราบ")):
+        return resume, None
+    return (["รับทราบครับ"] + resume) if resume else ["รับทราบครับ"], None
+
+
+try:
+    _R89_BASE_DECIDE = _bl9.BotEngine._decide
+
+    def _decide_r89(self, msg, user_id, state, bucket, is_new):
+        data = state.get("data") or {}
+        if state.get("_r89_wait_debt_total"):
+            try:
+                return _r89_consume_total(self, msg, user_id, state, bucket, is_new)
+            except Exception as _e:
+                print(f"[R89 TOTAL ERROR] {_e} — ไปทางเดิม")
+                state.pop("_r89_wait_debt_total", None)
+                state.pop("_r89_resume", None)
+        _prev_wait = state.get("awaiting")
+        bubbles, grade = _R89_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            if (_prev_wait == "debt" and grade is None and not state.get("done")
+                    and not data.get("cash") and not state.get("owner")
+                    and not state.get("renter")
+                    and data.get("debt_baht") and "debt_total_baht" not in data
+                    and bubbles and state.get("awaiting")):
+                state["_r89_resume"] = list(bubbles)
+                state["_r89_wait_debt_total"] = True
+                return [R89_DEBT_TOTAL_Q], None
+        except Exception as _e:
+            print(f"[R89 HOLD ERROR] {_e}")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r89
+    print("[R89] คำถามยอดหนี้รวม (เช็คบริดจ์แท้) เปิดแล้ว")
+except Exception as _e:
+    print(f"[R89 DECIDE ERROR] {_e}")
+
+print("[R89] ครบชุด — เกณฑ์ 28 ส.ค. 2026 ทำงานแล้ว")
 
 
 # ======================================================
