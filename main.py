@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r94"
+BOT_REVISION = "r95"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -3908,6 +3908,332 @@ except Exception as _e:
     print(f"[R94 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 print("[R94] กฎเหล็ก: ถามซ้ำเฉพาะตอนที่คำตอบตัดสินเคส (ครั้งเดียว)")
+
+
+# ======================================================================
+# r95 — เก็บ 4 ข้อค้างให้จบเป็นชุดเดียว (Gift สั่ง 28 ส.ค. 2026)
+#        "จัดให้สอดคล้องกันแล้วทำเลย"
+# ----------------------------------------------------------------------
+# ทั้ง 4 ข้อมาจากกฎเหล็กเดียวกัน "ใช้เวลากับเคสที่ใช่" แตกเป็น 2 กติกา:
+#
+#   กติกา A — หนึ่งเรื่อง หนึ่งค่า
+#       เลขเดียวกันมีสองค่า = ระบบตัดสินใจสองแบบโดยไม่มีใครรู้ตัว
+#       เซลเสียเวลากับเคสผิดโดยอุบัติเหตุ  (-> ข้อ ง, ข้อ ฉ)
+#
+#   กติกา B — อย่าทิ้งเคสด้วย "ความไม่รู้"
+#       ทิ้งเคสได้เมื่อมีหลักฐานว่าไม่ผ่านเท่านั้น
+#       ไม่ใช่เพราะยังไม่ได้คำตอบ หรือเพราะคำใดคำหนึ่งไปตรงลิสต์
+#       (-> ข้อ ค, ข้อ จ · เป็นกติกาเดียวกับ r93 เงินสด และ r94 ผู้กู้ร่วม)
+#
+#   ข้อ ง — ราคาห้องเหลือค่าเดียว 2.5M ทั้งระบบ
+#   ข้อ ค — เนื้อความชนะช่องที่ค้าง ห้ามยัดคำตอบผิดช่อง
+#   ข้อ จ — "ไม่บอกรายได้" ไม่ใช่ X อีกต่อไป ถ้ามีเบอร์ให้เซลตามได้
+#   ข้อ ฉ — DSR: บอทเก็บตัวเลข ทีมวิเคราะห์ชี้ขาด (เจ้าของเดียว)
+#   ข้อ ช — default โมเดล Claude ต้องไม่ชี้รุ่นที่ปลดระวาง
+# ======================================================================
+
+# ---------- ข้อ ง — ราคาห้องเหลือค่าเดียว 2.5M ----------
+# เดิม bot_logic.UNIT_PRICE_BAHT = 2.3M  (ใช้ตัดสินว่าจะถามผู้กู้ร่วมไหม)
+#      main.R89_UNIT_PRICE      = 2.5M  (ใช้ตีเกรด)
+# ช่องโหว่: รายได้ 22,700-24,500 -> วงเงินตกระหว่าง 2.3M กับ 2.5M
+#   -> bot_logic บอก "พอแล้ว ไม่ต้องถามผู้กู้ร่วม"
+#   -> ตอนตีเกรดบอก "ไม่ถึงราคาห้อง" = C
+#   = ไม่ได้ถามผู้กู้ร่วมทั้งที่ผู้กู้ร่วมพลิกเคสได้ ทิ้งโอกาสฟรีๆ
+# ยกเป็น 2.5M เท่ากัน = ถามผู้กู้ร่วมครอบคลุมขึ้น
+# และตั้งแต่ r91/r94 การ "ถามผู้กู้ร่วม" ไม่ฆ่าเคสบริดจ์อีกแล้ว จึงยกได้อย่างปลอดภัย
+try:
+    _R95_OLD_UNIT = _bl9.UNIT_PRICE_BAHT
+    _bl9.UNIT_PRICE_BAHT = R89_UNIT_PRICE
+    print(f"[R95] ราคาห้องอ้างอิงเหลือค่าเดียว {R89_UNIT_PRICE:,} "
+          f"(เดิม bot_logic ใช้ {_R95_OLD_UNIT:,} · ปิดช่องโหว่รายได้ 22,700-24,500)")
+except Exception as _e:
+    print(f"[R95 UNIT ERROR] ต่อไม่ติด — ใช้ค่าเดิม: {_e}")
+
+
+# ---------- ข้อ ค — เนื้อความชนะช่องที่ค้าง ----------
+# ต่อยอดจาก r57 (SLOT FIX) ที่แก้ไว้แค่คู่ debt<->income
+# ที่เจอตอนทดสอบ r94 ว่ายังยัดผิดช่องอยู่:
+#   awaiting=co_borrower  "ผ่อนรถ 5000 ครับ"
+#       -> co_borrower_yes=True · co_borrower_income=5000
+#          = เสกผู้กู้ร่วมรายได้ 5,000 ขึ้นมาจากประโยคที่พูดเรื่องหนี้ตัวเอง
+#   awaiting=co_debt      "มีครับ แฟน เงินเดือน 40000"
+#       -> co_debt_baht=40000
+#          = เอารายได้ผู้กู้ร่วมไปนับเป็นหนี้ผู้กู้ร่วม วงเงินหายทั้งก้อน
+#   awaiting=debt         "รัชดา งบ 2 ล้านครับ"
+#       -> debt = "รัชดา งบ 2 ล้านครับ" (ซ้ำสองรอบด้วย)
+#
+# ตัวเลขผิดในชีตแพงกว่าถามเพิ่มอีกเทิร์น — เซลโทรไปคุยบนเรื่องที่ไม่มีจริง
+# วิธี: ถ้าอ่านออกว่าข้อความนี้ "ไม่ใช่คำตอบของช่องที่ค้าง"
+#       -> พาไปลงช่องที่ถูก ถ้าช่องนั้นว่าง / ถ้าไม่มีที่ลงก็ทิ้ง ไม่เขียนมั่ว
+#       -> ปล่อยช่องที่ค้างว่างไว้ _next_missing จะถามซ้ำเอง (= ทาง ก)
+# เพดาน: สลับช่องได้ 4 ครั้งต่อแชท เกินนั้นกลับทางเดิม ไม่วนไม่รู้จบ
+R95_REROUTE_MAX = 4
+
+# คำที่บอกว่าประโยคนี้พูดถึง "คนอื่น" (ผู้กู้ร่วม) ไม่ใช่ตัวลูกค้าเอง
+_R95_OTHER_WORDS = ("แฟน", "สามี", "ภรรยา", "ภรรยาผม", "คู่สมรส", "คู่ชีวิต",
+                    "พ่อ", "แม่", "บิดา", "มารดา", "พี่", "น้อง", "ลูก",
+                    "ญาติ", "พี่สาว", "พี่ชาย", "น้องสาว", "น้องชาย",
+                    "กู้ร่วม", "ผู้กู้", "คนกู้", "เขา", "ท่าน")
+
+# คำที่บอกว่าประโยคนี้พูดเรื่องทำเล/งบ ไม่ใช่ภาระผ่อน
+_R95_ZONE_WORDS = ("โซน", "ย่าน", "แถว", "ทำเล", "ทําเล", "งบ", "งบประมาณ",
+                   "ราคา", "ห้อง", "ตร.ม", "ตารางเมตร", "ชั้น", "วิว")
+
+
+def _r95_kind(msg):
+    """ข้อความนี้อ่านออกว่าเป็นเรื่องอะไร — คืน 'income' / 'debt' / None"""
+    try:
+        s = str(msg or "")
+        _inc = _bl9._has_any(s, _bl9._INCOME_SAYS)
+        _dbt = _bl9._has_any(s, _bl9._DEBT_SAYS)
+        if _inc and not _dbt and _bl9._parse_income(s):
+            return "income"
+        if _dbt and not _inc and _bl9._parse_debt_monthly(s):
+            return "debt"
+    except Exception as _e:
+        print(f"[R95 KIND ERROR] {_e}")
+    return None
+
+
+def _r95_reroute(field, msg, data, state):
+    """คืน (ช่องใหม่, เหตุผล) · ช่องใหม่ = None แปลว่า 'ทิ้ง ไม่เขียนช่องไหนเลย'
+    คืน False แปลว่า 'ไม่ต้องสลับ ใช้ทางเดิม'
+    """
+    try:
+        s = str(msg or "")
+        d = data or {}
+        if (state or {}).get("_r95_reroutes", 0) >= R95_REROUTE_MAX:
+            return False
+        _other = _bl9._has_any(s, _R95_OTHER_WORDS)
+        _kind = _r95_kind(s)
+
+        # (0) เบอร์โทรไม่ใช่คำตอบเรื่องเงินไม่ว่าช่องไหน
+        #     เจอตอนทดสอบ: awaiting=co_borrower  "0812345678 ครับ"
+        #     -> _parse_income อ่านได้ 812,345 -> co_borrower_income = 812,345
+        #     = เสกรายได้ผู้กู้ร่วมแปดแสนจากเบอร์โทร วงเงินพุ่ง เกรด A ปลอม
+        if (field in ("income", "debt", "co_borrower", "co_income", "co_debt",
+                      "cash_budget", "coop")
+                and _bl9._looks_like_phone(s)):
+            # ตัดเลขเบอร์ออกก่อน ถ้ายังเหลือตัวเลขเงินอยู่ = ประโยคนี้บอกทั้งสองอย่าง
+            # ("0812345678 เงินเดือน 40000") -> ปล่อยให้ทางเดิมจัดการ อย่าตัดข้อมูลทิ้ง
+            _rest = _re94.sub(r"0\d[\d\-\s\.]{7,}", " ", s)
+            if not _bl9._parse_income(_rest) and not _bl9._parse_debt_monthly(_rest):
+                if not (data or {}).get("contact"):
+                    return ("contact", "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน")
+                return (None, "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน — มีเบอร์แล้ว ทิ้ง")
+
+        # (1) รอยอดผ่อนของผู้กู้ร่วม แต่ได้รายได้ของผู้กู้ร่วมมาแทน
+        if field == "co_debt" and _kind == "income":
+            if not d.get("co_income"):
+                return ("co_income", "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน")
+            return (None, "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน — มีค่าแล้ว ทิ้ง")
+
+        # (2) รอคำตอบเรื่องผู้กู้ร่วม แต่ลูกค้าพูดเรื่องเงินของตัวเอง
+        if field in ("co_borrower", "co_income") and _kind and not _other:
+            if _kind == "income" and not _bl9._income_known(d):
+                return ("income", "เป็นรายได้ของลูกค้าเอง ไม่ใช่คำตอบเรื่องผู้กู้ร่วม")
+            if _kind == "debt" and not d.get("debt"):
+                return ("debt", "เป็นภาระของลูกค้าเอง ไม่ใช่คำตอบเรื่องผู้กู้ร่วม")
+            return (None, "พูดเรื่องเงินของตัวเอง ไม่ใช่คำตอบเรื่องผู้กู้ร่วม — ทิ้ง")
+
+        # (3) รอยอดผ่อน แต่ได้ทำเล/งบมาแทน
+        if field == "debt" and not _bl9._has_any(s, _bl9._DEBT_SAYS):
+            if (_bl9._parse_debt_monthly(s) is None
+                    and _bl9._has_any(s, _R95_ZONE_WORDS)):
+                return (None, "เป็นทำเล/งบ ไม่ใช่ยอดผ่อน — ทิ้ง ไม่เขียนช่องหนี้")
+
+        # (4) รอคำตอบเรื่องผู้กู้ร่วม แต่ได้ทำเล/งบมาแทน
+        #     เจอตอนทดสอบ: awaiting=co_borrower  "รัชดา งบ 2.5 ล้านครับ"
+        #     -> co_borrower_yes=True · co_borrower_income = 2,500,000
+        #     -> รายได้รวม 2,540,000 -> วงเงินหลายร้อยล้าน -> เกรด A ปลอม
+        #     เคสแบบนี้อันตรายที่สุด เพราะบอทไม่ได้เงียบ แต่ส่งเคสผิดให้เซลโทรด่วน
+        if (field in ("co_borrower", "co_income", "co_debt")
+                and _bl9._has_any(s, _R95_ZONE_WORDS)
+                and not _other
+                and not _bl9._has_any(s, _bl9._INCOME_SAYS)
+                and not _bl9._has_any(s, _bl9._DEBT_SAYS)):
+            return (None, "เป็นทำเล/งบ ไม่ใช่คำตอบเรื่องผู้กู้ร่วม — ทิ้ง")
+    except Exception as _e:
+        print(f"[R95 REROUTE ERROR] {_e} — ใช้ทางเดิม")
+    return False
+
+
+try:
+    _R95_ORIG_CAPTURE = _bl9.BotEngine._capture
+
+    def _capture_r95(self, state, field, msg):
+        try:
+            _r = _r95_reroute(field, msg, (state or {}).get("data") or {}, state)
+            if _r is not False:
+                _new, _why = _r
+                state["_r95_reroutes"] = (state.get("_r95_reroutes") or 0) + 1
+                state["awaiting"] = None
+                print(f"[R95 SLOT] ช่อง {field!r} <- {msg[:34]!r} : {_why} "
+                      f"-> {_new or 'ทิ้ง'}")
+                if _new is None:
+                    return None          # ไม่เขียนช่องไหนเลย ปล่อยให้ถามซ้ำ
+                field = _new
+        except Exception as _e:
+            print(f"[R95 CAPTURE ERROR] {_e} — ใช้ทางเดิม")
+        return _R95_ORIG_CAPTURE(self, state, field, msg)
+
+    _bl9.BotEngine._capture = _capture_r95
+    print("[R95] เนื้อความชนะช่องที่ค้าง — ไม่ยัดคำตอบผิดช่องแล้ว")
+except Exception as _e:
+    print(f"[R95 SLOT ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+# ---------- ข้อ ค (ต่อ) — ด่านสุดท้าย: ตัวเลข/เดือน ต้องสมเหตุสมผล ----------
+# ต่อให้ตัวแยกช่องพลาด ก็ต้องไม่มีทางที่ "รายได้/เดือน" หลักล้านจะหลุดเข้าเกรด
+# 1,000,000/เดือน = เพดานที่กว้างมากอยู่แล้ว เกินนี้คือเลขงบ/ราคาห้องหลุดเข้ามาแน่
+R95_MONTHLY_MAX = 1_000_000
+_R95_MONEY_FIELDS = ("co_borrower_income", "co_debt_baht", "income_baht",
+                     "income_total", "debt_baht")
+try:
+    _R95_G2 = _bl9.BotEngine._grade
+
+    def _grade_r95b(self, data, state=None):
+        try:
+            d = data or {}
+            for _f in _R95_MONEY_FIELDS:
+                _v = d.get(_f)
+                if _v and int(_v) > R95_MONTHLY_MAX:
+                    print(f"[R95 SANITY] {_f} = {int(_v):,} เกิน/เดือนที่เป็นไปได้ — ทิ้งค่านี้")
+                    d.pop(_f, None)
+                    if state is not None:
+                        self._add_signal(
+                            state,
+                            f"⚠️ ระบบอ่านตัวเลขได้ {int(_v):,} ในช่อง {_f} "
+                            "ซึ่งเป็นไปไม่ได้สำหรับยอดต่อเดือน (น่าจะเป็นงบ/ราคาห้อง) "
+                            "— ตัดทิ้งแล้ว เซลถามตัวเลขจริงตอนโทร")
+        except Exception as _e:
+            print(f"[R95 SANITY ERROR] {_e}")
+        return _R95_G2(self, data, state)
+
+    _bl9.BotEngine._grade = _grade_r95b
+    print(f"[R95] ด่านตัวเลข: ยอดต่อเดือนเกิน {R95_MONTHLY_MAX:,} = ตัดทิ้ง ไม่เอาไปตีเกรด")
+except Exception as _e:
+    print(f"[R95 SLOT ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+# ---------- ข้อ จ + ฉ — แทรกที่ชั้น _grade ----------
+# ข้อ จ: เดิมธง income_refused / income_unknown = X ไม่รับเคส ทันที
+#   ปัญหา: เป็นการทิ้งเคสเพราะ "คำไปตรงลิสต์" ไม่ใช่เพราะรู้ว่าเขาไม่ผ่าน
+#   เพิ่งโดนมาเองรอบ r93 — "ทำธุรกิจส่วนตัว" ไปตรงคำว่า "ส่วนตัว" -> X ทั้งเคส
+#   ใหม่ (กติกา B เดียวกับเงินสด r93 และผู้กู้ร่วม r94):
+#     · รู้รายได้แล้ว (บอกทีหลัง)      -> ล้างธง ตีเกรดตามจริง
+#     · ไม่บอกรายได้ แต่ให้เบอร์มา     -> N1 เซลโทรถามเอง + ติดธงให้เห็นชัด
+#     · ไม่บอกรายได้ และไม่มีเบอร์ด้วย -> X เหมือนเดิม (ไม่มีอะไรให้เซลทำต่อ)
+#
+# ข้อ ฉ: DSR มี 3 ค่าในระบบ (KPI <=80% · ปรับโครงสร้าง <15% · ตอนตีเกรดไม่ใช้เลย)
+#   เจ้าของเดียว: **บอทเก็บตัวเลข ทีมวิเคราะห์ชี้ขาด**
+#   - ไม่เอา DSR มาตีเกรดเพิ่ม (คงเดิม — ยกเว้นเกณฑ์เครดิตปรับโครงสร้าง <15%
+#     ซึ่งเป็นกฎเครดิตแข็ง ไม่ใช่ KPI)  = เกรดไม่เปลี่ยนแม้แต่เคสเดียว
+#   - แต่ต้องเห็นตัวเลขเดียวกันทั้งทีม -> ติดธง DSR ไว้ให้เซล/ทีมวิเคราะห์อ่าน
+#   หลักเดียวกับ §0.5 (ยอดขาย x margin x %หุ้น) ที่ engine README ระบุว่า
+#   ทีมวิเคราะห์คิดมือ บอทมีหน้าที่เก็บ input ให้ครบ
+R95_DSR_KPI = 0.80
+
+try:
+    _R95_BASE_GRADE = _bl9.BotEngine._grade
+
+    def _grade_r95(self, data, state=None):
+        d = data or {}
+        st = state if state is not None else {}
+        _popped = []
+        try:
+            if d.get("income_refused") or d.get("income_unknown"):
+                _inc = (d.get("income_total") or d.get("income_baht")
+                        or _bl9._parse_income(str(d.get("income", ""))))
+                _has_phone = bool(d.get("contact") or d.get("phone")
+                                  or st.get("contact"))
+                if _inc:
+                    _why = ("ลูกค้าเคยบอกว่าไม่สะดวกบอกรายได้ แต่ภายหลังบอกตัวเลขมาแล้ว "
+                            "— ตีเกรดตามตัวเลขจริง ไม่ตัดเคส")
+                elif _has_phone:
+                    _why = ("ลูกค้าไม่บอกรายได้ในแชท แต่ให้เบอร์มาแล้ว "
+                            "— ไม่ตัดเคส เซลโทรถามรายได้เองก่อนตีเกรดจริง (เกณฑ์ 28 ส.ค. r95)")
+                else:
+                    _why = None
+                if _why:
+                    for _k in ("income_refused", "income_unknown"):
+                        if d.get(_k):
+                            _popped.append(_k)
+                            d.pop(_k, None)
+                    if state is not None:
+                        self._add_signal(st, _why)
+        except Exception as _e:
+            print(f"[R95 REFUSE ERROR] {_e} — ใช้ทางเดิม")
+
+        try:
+            g = _R95_BASE_GRADE(self, data, state)
+        finally:
+            for _k in _popped:
+                try:
+                    d[_k] = True
+                except Exception:
+                    pass
+
+        # ---- ข้อ ฉ — ติดธง DSR ให้ทีมวิเคราะห์ชี้ขาด (ไม่แตะเกรด) ----
+        try:
+            if state is not None:
+                _i = (d.get("income_counted") or d.get("income_total")
+                      or d.get("income_baht")
+                      or _bl9._parse_income(str(d.get("income", ""))))
+                _db = d.get("debt_baht")
+                if _db is None:
+                    _db = _bl9._parse_debt_monthly(str(d.get("debt", "")))
+                if d.get("co_debt_baht"):
+                    _db = (_db or 0) + int(d["co_debt_baht"])
+                if _i and _db is not None and int(_i) > 0:
+                    _dsr = int(_db) / int(_i)
+                    d["dsr_now"] = round(_dsr, 3)
+                    _mark = "เกินเพดาน" if _dsr > R95_DSR_KPI else "อยู่ในเพดาน"
+                    self._add_signal(
+                        st,
+                        f"DSR ตอนนี้ {round(_dsr*100)}% "
+                        f"(ผ่อน {int(_db):,} / รายได้ที่นับได้ {int(_i):,}) "
+                        f"— {_mark} KPI {round(R95_DSR_KPI*100)}% · "
+                        "ตัวเลขนี้ไม่ได้ใช้ตีเกรด ทีมวิเคราะห์เป็นคนชี้ขาด")
+        except Exception as _e:
+            print(f"[R95 DSR ERROR] {_e}")
+        return g
+
+    _bl9.BotEngine._grade = _grade_r95
+    print("[R95] 'ไม่บอกรายได้' ไม่ใช่ X แล้ว ถ้ามีเบอร์ให้เซลตามได้ (N1 + ติดธง)")
+    print("[R95] ติดธง DSR ให้ทีมวิเคราะห์ — ไม่แตะเกรด (เจ้าของเดียว)")
+except Exception as _e:
+    print(f"[R95 GRADE ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+# ---------- ข้อ ช — default โมเดล Claude ห้ามชี้รุ่นที่ปลดระวาง ----------
+# ของเดิมในโค้ด:
+#   CLAUDE_MODEL       default = claude-3-5-haiku-20241022
+#   CLAUDE_MODEL_SMART default = claude-sonnet-4-20250514   <-- 404 รัวๆ เมื่อวาน
+# ถ้า env หายเมื่อไหร่ AI ตายทั้งสองทางเงียบๆ
+# ไม่เดาชื่อรุ่นเอง — ใช้ค่าที่ "พิสูจน์แล้วว่าวิ่งได้จริงบนโปรดักชัน" เป็น default
+# แล้วพิมพ์รุ่นที่จะใช้จริงลง log ตอนบูต จะได้เห็นทันทีถ้า env หาย
+R95_MODEL_FALLBACK = "claude-sonnet-5"
+try:
+    _env_smart = (os.environ.get("CLAUDE_MODEL_SMART") or "").strip()
+    _env_cheap = (os.environ.get("CLAUDE_MODEL") or "").strip()
+    _smart = _env_smart or R95_MODEL_FALLBACK
+    # รุ่นประหยัด: ถ้า env ไม่ได้ตั้ง อย่าเดารหัสรุ่น ใช้ตัวที่รู้ว่าวิ่งได้
+    _cheap = _env_cheap or _smart
+    _bl9.CLAUDE_MODEL_SMART = _smart
+    _bl9.CLAUDE_MODEL = _cheap
+    print(f"[R95] โมเดล AI ที่จะใช้จริง — ปกติ: {_cheap} · เทิร์นที่ต้องอ่านคน: {_smart}"
+          + ("" if (_env_smart and _env_cheap)
+             else "  ⚠️ (บางตัวมาจาก fallback ไม่ใช่ env — เช็ค Railway variables)"))
+except Exception as _e:
+    print(f"[R95 MODEL ERROR] ต่อไม่ติด — ใช้ค่าเดิมในโค้ด: {_e}")
+
+# หมายเหตุเกรด D: ตรวจแล้วโค้ดเกรด D ที่เหลืออยู่ใน bot_logic._grade เป็นโค้ดตาย
+# (r89 ทับ BotEngine._grade ทั้งตัว และในตัวใหม่ยุบ D เข้า C หมดแล้ว)
+# ไม่มีทางเรียกถึง จึงไม่แตะ — แตะ bot_logic โดยไม่จำเป็นมีแต่ความเสี่ยง
+
+print("[R95] ครบชุด — ราคาห้องค่าเดียว · ไม่ยัดผิดช่อง · ไม่ทิ้งเคสเพราะไม่รู้ · DSR มีเจ้าของ")
+
 
 
 
