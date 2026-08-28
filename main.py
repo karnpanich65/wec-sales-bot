@@ -3194,6 +3194,46 @@ try:
 except Exception as _e:
     print(f"[R90 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
+
+
+# ---------- r90b — ปิดรูรั่ว "ประตูที่สอง": เขียนชีตซ้ำหลังปิดเคส ----------
+# _send_name_update (bot_logic 5832) เรียก _send_to_sheets อีกรอบด้วยเกรดที่เก็บไว้
+# ตอนลูกค้าตอบชื่อทีหลัง  จังหวะนั้นธง co_borrower_none ถูกคืนค่าแล้ว (โดยตั้งใจ)
+# -> ตัวแปลงของ r89 เห็น C + ธง = แปลงเป็น X + ปิดนัดโทร ทั้งที่ตอนปิดเคสเป็น C ถูกต้อง
+#
+# เคสจริงที่โดน: อายุเยอะทำให้ปีกู้สั้น วงเงินไม่ถึง 2.5M -> C ถูกต้องแล้ว
+# แต่ไม่ใช่เคสที่ "จำเป็นต้องมีผู้กู้ร่วม" (low_income/high_burden ไม่ติด)
+# ผลคือลีดที่โทรได้กลายเป็น X ไม่มีใครโทร เพียงเพราะลูกค้าพิมพ์ชื่อตามมาทีหลัง
+# ไล่ทั้งช่วงรายได้ 25,000-120,000 x ผ่อน 0-60,000 x อายุ 25-60 เจอ 378 ชุดที่เข้าข่าย
+#
+# เงื่อนไขปลด: ใช้ธง _r90_solo_ok ที่ _finish ปั๊มไว้เท่านั้น
+# (ไม่คิดใหม่ตรงนี้ เพราะ _finish คือประตูตัดสินทางเดียว ถ้ามันไม่ได้ปลดให้ = ไม่ปลด)
+try:
+    _R90_ORIG_SEND = _bl9.BotEngine._send_to_sheets
+
+    def _send_to_sheets_r90(self, user_id, data, grade, *a, **k):
+        _restore = False
+        try:
+            if data.get("_r90_solo_ok") and data.get("co_borrower_none"):
+                data.pop("co_borrower_none", None)
+                _restore = True
+        except Exception as _e:
+            print(f"[R90B ERROR] {_e} — ใช้ทางเดิม")
+            _restore = False
+        try:
+            return _R90_ORIG_SEND(self, user_id, data, grade, *a, **k)
+        finally:
+            if _restore:
+                try:
+                    data["co_borrower_none"] = True
+                except Exception as _e:
+                    print(f"[R90B RESTORE ERROR] {_e}")
+
+    _bl9.BotEngine._send_to_sheets = _send_to_sheets_r90
+    print("[R90] กันเกรดพลิกเป็น X ตอนเขียนชีตซ้ำ เปิดแล้ว")
+except Exception as _e:
+    print(f"[R90B ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
 print("[R90] ครบชุด — ข้อ 3 ตัดเฉพาะเคสที่จำเป็นต้องมีผู้กู้ร่วมจริง")
 
 
