@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r92"
+BOT_REVISION = "r93"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -3503,6 +3503,281 @@ except Exception as _e:
     print(f"[R92B ERROR] ต่อไม่ติด: {_e}")
 
 print("[R92] ครบชุด — อายุ: พูดแบบไหนก็ได้ผลเหมือนกัน")
+
+# ======================================================================
+# r93 — สายซื้อสด + เคสธุรกิจ (Gift เคาะ 28 ส.ค. 2026)
+# ======================================================================
+# ส่วน A: สายซื้อสด
+# --------------------------------------------------
+# ข้อมูลจาก Gift: ทำบริษัทมา 10 ปี คนที่บอกว่า "ซื้อสด" ปิดจริงแค่ 0.1%
+#   = 1,000 เคส ได้ซื้อสดจริง 1 เคส
+# แปลว่าคำว่า "ซื้อสด" ไม่ใช่สัญญาณลูกค้าคุณภาพ และ 999/1,000 สุดท้าย
+# คือลูกค้าสินเชื่อธรรมดา  แต่ของเดิมพอได้ยินคำนี้ บอทหยุดคัดกรองทั้งหมดทันที
+# (ข้ามคำถาม รายได้ · ภาระ · ผู้กู้ร่วม · อาชีพอิสระ · สหกรณ์)
+# ผลจริงในชีต: ลีดสายนี้ 8 ราย ได้เบอร์ 0 ราย · ครึ่งหนึ่งไม่มีเกรด = ไม่ถูกแจก
+#
+# แก้ 4 อย่าง (Gift อนุมัติ):
+#   1. เบอร์โทรที่มาตอนบอทถามงบ = เก็บเป็นเบอร์ ไม่ใช่งบ
+#   2. สายเงินสดต้องปิดเคสได้จริง (ไหลไป _finish เหมือนสายกู้)
+#   3. อย่าหยุดคัดกรอง — ยังถามรายได้/ภาระ/ผู้กู้ร่วมต่อตามปกติ
+#   4. ตีเกรดจากข้อมูลจริงเหมือนลูกค้าทั่วไป + ติดธง "แจ้งว่าซื้อสด" ให้เซลเห็น
+#      ไม่ให้คิวพิเศษ (ถ้าให้ A = เอาคนไม่ซื้อ 999 คนไปเบียดคิวโทร 2 ชม.)
+#
+# ส่วน B: เคสธุรกิจ — ถามยอดขาย + ภ.พ.30
+# --------------------------------------------------
+# เคสจริง FB-WE-20260827-232: "ทำธุรกิจส่วนตัว" -> เกรด N ไม่มีตัวเลขอะไรเลย
+# ของเดิมถามแค่ "ทำมากี่ปี + มีภาษี/จดบริษัทไหม" ซึ่งไม่พอคิดรายได้
+# กฎที่มีอยู่แล้ว §0.5: รายได้เจ้าของธุรกิจ = ยอดขาย × margin × %หุ้น
+#   (README_engine ระบุเองว่า "ยังไม่มีใน engine" -> ทีมวิเคราะห์คิดมือ)
+# บอทเป็นด่านคัดหยาบ หน้าที่คือ "เก็บอินพุตให้ครบ" ไม่ใช่คิดแทน
+# Gift เคาะ: ยอดขายก่อนหัก >= 500,000 ต่อเดือน · ต่ำกว่านั้นเก็บเคส แจกปกติ ติดธงไว้
+#            ไม่ยื่น ภ.พ.30 = ไม่ตัดทิ้ง ให้ถามหาหลักฐานอื่นแทน
+# ======================================================================
+R93_BIZ_SALES_BAR = 500_000      # ยอดขายก่อนหักต่อเดือน ที่ถือว่าเข้าเกณฑ์
+
+R93_BIZ_Q = ("ขอถามเรื่องกิจการอีกนิดเดียวครับ ยอดขายต่อเดือน "
+             "ก่อนหักค่าใช้จ่ายประมาณเท่าไหร่ครับ แล้วได้ยื่น ภ.พ.30 ไหมครับ "
+             "(บอกคร่าวๆ ได้เลยครับ)")
+
+R93_NO_VAT_NOTE = ("ถ้ายังไม่ได้ยื่น ภ.พ.30 ไม่เป็นไรครับ ธนาคารดูหลักฐานอื่นแทนได้ "
+                   "เช่น ทะเบียนพาณิชย์ หรือ statement บัญชีร้านย้อนหลัง "
+                   "เดี๋ยวที่ปรึกษาช่วยดูให้ครับ")
+
+_R93_VAT_YES = ("ยื่น", "ยื่นแล้ว", "มี", "จดแล้ว", "จดvat", "จด vat", "ภพ30",
+                "ภ.พ.30", "ภ.พ. 30", "เสียvat", "มีvat")
+_R93_VAT_NO = ("ไม่ยื่น", "ไม่ได้ยื่น", "ยังไม่ยื่น", "ไม่มี", "ไม่ได้จด",
+               "ยังไม่จด", "ไม่ได้ทำ", "ไม่เคยยื่น")
+
+
+def _r93_has_phone(msg):
+    try:
+        return bool(re.search(r"0[0-9]{8,9}",
+                              str(msg or "").replace("-", "").replace(" ", "")))
+    except Exception:
+        return False
+
+
+def _r93_parse_sales(msg):
+    """อ่านยอดขายต่อเดือน — ตัดเบอร์โทรทิ้งก่อนเสมอ อ่านไม่ออกคืน None"""
+    try:
+        s = str(msg or "").replace(",", "").lower()
+        s = re.sub(r"0[0-9]{8,9}", " ", s)
+        best = None
+        for _m in re.finditer(r"([0-9]+(?:\.[0-9]+)?)\s*(ล้าน|แสน|หมื่น|พัน|k|m)", s):
+            v = round(float(_m.group(1)) * _R89_TOTAL_UNITS[_m.group(2)])
+            if 10_000 <= v <= 1_000_000_000 and (best is None or v > best):
+                best = v
+        if best is not None:
+            return best
+        for _n in re.findall(r"[0-9]{5,10}", s):
+            v = int(_n)
+            if 10_000 <= v <= 1_000_000_000 and (best is None or v > best):
+                best = v
+        return best
+    except Exception as _e:
+        print(f"[R93 SALES PARSE ERROR] {_e}")
+        return None
+
+
+def _r93_parse_vat(msg):
+    """ยื่น ภ.พ.30 หรือไม่ — ไม่ชัดคืน None (ห้ามเดา)"""
+    try:
+        m = str(msg or "").replace(" ", "").lower()
+        if any(w.replace(" ", "") in m for w in _R93_VAT_NO):
+            return False
+        if any(w.replace(" ", "") in m for w in _R93_VAT_YES):
+            return True
+    except Exception:
+        pass
+    return None
+
+
+# ---------- A3 — ไม่หยุดคัดกรองเพราะคำว่า "ซื้อสด" ----------
+try:
+    _R93_ORIG_NEXT = _bl9.BotEngine._next_missing
+
+    def _next_missing_r93(self, data, state=None, skip=None):
+        _restore = False
+        try:
+            if data.get("cash") and data.get("_r93_keep_qualifying"):
+                data.pop("cash", None)
+                _restore = True
+        except Exception as _e:
+            print(f"[R93 NEXT ERROR] {_e} — ใช้ทางเดิม")
+            _restore = False
+        try:
+            return _R93_ORIG_NEXT(self, data, state, skip)
+        finally:
+            if _restore:
+                try:
+                    data["cash"] = True
+                except Exception:
+                    pass
+
+    _bl9.BotEngine._next_missing = _next_missing_r93
+    print("[R93] สายซื้อสด — ยังคัดกรองรายได้/ภาระต่อตามปกติ เปิดแล้ว")
+except Exception as _e:
+    print(f"[R93A ERROR] ต่อไม่ติด: {_e}")
+
+
+# ---------- A1/A2/A4 + B — แทรกที่ชั้น _decide ----------
+try:
+    _R93_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r93(self, msg, user_id, state, bucket, is_new):
+        # ---- B: กำลังรอคำตอบยอดขาย/ภ.พ.30 อยู่ ----
+        if state.get("_r93_wait_biz"):
+            try:
+                return _r93_consume_biz(self, msg, user_id, state, bucket, is_new)
+            except Exception as _e:
+                print(f"[R93 BIZ ERROR] {_e} — ไปทางเดิม")
+                state.pop("_r93_wait_biz", None)
+                state.pop("_r93_biz_resume", None)
+
+        # ---- A1: เบอร์โทรมาตอนบอทถามงบเงินสด -> อย่ากลืนเป็นงบ ----
+        try:
+            if state.get("awaiting") == "cash_budget" and _r93_has_phone(msg):
+                state["awaiting"] = "contact"
+                print(f"[R93] {str(user_id)[:8]}... เบอร์มาตอนถามงบ — เก็บเป็นเบอร์ ไม่ใช่งบ")
+        except Exception as _e:
+            print(f"[R93 PHONE ERROR] {_e}")
+
+        _prev_wait = state.get("awaiting")
+        bubbles, grade = _R93_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+        # ---- A2/A4: เพิ่งกลายเป็นสายเงินสด -> ล้างค่าหลอก + ติดธง ----
+        try:
+            _d = state.get("data") or {}
+            if _d.get("cash") and not _d.get("_r93_cash_noted"):
+                _d["_r93_cash_noted"] = True
+                _d["_r93_keep_qualifying"] = True
+                if str(_d.get("income", "")).strip() == "ซื้อเงินสด":
+                    _d.pop("income", None)
+                if str(_d.get("debt", "")).strip() == "-":
+                    _d.pop("debt", None)
+                self._add_signal(
+                    state,
+                    "ลูกค้าแจ้งว่าซื้อเงินสด — ยังคัดกรองรายได้/ภาระต่อตามปกติ "
+                    "(สถิติ 10 ปี: สายนี้ปิดจริง 0.1%) ตีเกรดจากข้อมูลจริง ไม่ให้คิวพิเศษ")
+                print(f"[R93] {str(user_id)[:8]}... สายเงินสด — คัดกรองต่อ ไม่หยุด")
+            # งบเงินสดถูกยัดลงช่อง debt -> ย้ายออก ไม่งั้นบอทไม่ถามภาระจริง
+            if str(_d.get("debt", "")).startswith("งบเงินสด"):
+                _d["cash_budget_note"] = _d.pop("debt")
+        except Exception as _e:
+            print(f"[R93 CASH ERROR] {_e}")
+
+        # ---- B: ถึงเวลาถามยอดขาย/ภ.พ.30 หรือยัง ----
+        try:
+            _d = state.get("data") or {}
+            if (state.get("self_employed") and grade is None
+                    and not state.get("done") and not _d.get("cash")
+                    and "biz_sales" not in _d
+                    and not state.get("_r93_biz_asked")
+                    and (_d.get("self_emp_years") is not None
+                         or _d.get("biz_registered") or _d.get("self_emp_tax") is not None)
+                    # ต้องได้ตัวเลขรายได้ก่อน ไม่งั้นคำถามยอดขายจะไปกินคำตอบรายได้
+                    and (_d.get("income_total") or _d.get("income_baht")
+                         or _bl9._parse_income(str(_d.get("income", ""))))
+                    and bubbles and state.get("awaiting")):
+                state["_r93_biz_asked"] = True
+                state["_r93_biz_resume"] = list(bubbles)
+                state["_r93_wait_biz"] = True
+                print(f"[R93] {str(user_id)[:8]}... เคสธุรกิจ — ถามยอดขาย + ภ.พ.30")
+                return [R93_BIZ_Q], None
+        except Exception as _e:
+            print(f"[R93 BIZ ASK ERROR] {_e}")
+
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r93
+    print("[R93] เคสธุรกิจ — ถามยอดขาย/เดือน + ภ.พ.30 เปิดแล้ว")
+except Exception as _e:
+    print(f"[R93B ERROR] ต่อไม่ติด: {_e}")
+
+
+def _r93_consume_biz(self, msg, user_id, state, bucket, is_new):
+    """กินคำตอบยอดขาย/ภ.พ.30 แล้วส่งคำถามที่พักไว้ต่อทันที"""
+    state.pop("_r93_wait_biz", None)
+    resume = state.pop("_r93_biz_resume", None) or []
+    data = state["data"]
+    # ลูกค้าส่งเบอร์แทนคำตอบ -> ห้ามกลืน คืนเทิร์นให้เอนจินเดิมจับเบอร์
+    if _r93_has_phone(msg):
+        return _R93_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+    _sales = _r93_parse_sales(msg)
+    _vat = _r93_parse_vat(msg)
+    if _sales is None and self._is_question(msg):
+        state["_r93_wait_biz"] = True          # ยังไม่ได้คำตอบ ถามใหม่รอบหน้า
+        state["_r93_biz_resume"] = resume
+        return _R93_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+    data["biz_sales"] = _sales                 # None = ถามแล้วไม่ได้ตัวเลข ห้ามถามซ้ำ
+    if _vat is not None:
+        data["biz_vat30"] = _vat
+    if _sales is not None:
+        if _sales >= R93_BIZ_SALES_BAR:
+            self._add_signal(
+                state,
+                f"เจ้าของธุรกิจ ยอดขาย ~{_sales:,}/เดือน (ก่อนหัก) เข้าเกณฑ์ "
+                f"(>= {R93_BIZ_SALES_BAR:,}) — รายได้จริงให้ทีมวิเคราะห์คิดจาก "
+                "ยอดขาย x margin x %หุ้น (§0.5) + เกรดบริษัทจาก DBD")
+        else:
+            self._add_signal(
+                state,
+                f"⚠️ เจ้าของธุรกิจ ยอดขาย ~{_sales:,}/เดือน ต่ำกว่าเกณฑ์ "
+                f"{R93_BIZ_SALES_BAR:,}/เดือน — เก็บเคสแจกปกติ เซลตรวจยอดจริงตอนโทร")
+    else:
+        self._add_signal(
+            state,
+            f"ถามยอดขายเจ้าของธุรกิจแล้ว ลูกค้าตอบ: {str(msg)[:60]} "
+            "— เซลถามยอดขาย/เดือน ตอนโทร")
+    if _vat is True:
+        self._add_signal(state, "ยื่น ภ.พ.30 — ใช้เป็นหลักฐานรายได้ได้ ขอย้อนหลัง 6-12 เดือน")
+    elif _vat is False:
+        self._add_signal(state, "ยังไม่ยื่น ภ.พ.30 — ไม่ตัดเคส ให้เซลขอหลักฐานอื่นแทน "
+                                "(ทะเบียนพาณิชย์ / statement บัญชีร้านย้อนหลัง)")
+    _head = ["รับทราบครับ"]
+    if _vat is False:
+        _head = [R93_NO_VAT_NOTE]
+    if resume and str(resume[0]).startswith(("ขอบคุณ", "รับทราบ")):
+        return resume, None
+    return _head + resume, None
+
+
+# ---------- r93c — "ทำธุรกิจส่วนตัว" ไม่ใช่การปฏิเสธบอกรายได้ ----------
+# _INCOME_REFUSE_WORDS มีคำว่า "ส่วนตัว" ลอยๆ (ตั้งใจจับ "เป็นเรื่องส่วนตัว")
+# แต่มันไปแมตช์ "ทำธุรกิจส่วนตัว" / "กิจการส่วนตัว" ด้วย
+# ผล: เจ้าของธุรกิจที่ตอบคำถามรายได้ว่า "ทำธุรกิจส่วนตัวครับ"
+#     ถูกบันทึกว่า income_refused = True -> เกณฑ์ข้อ 3 -> X ไม่รับเคส ไม่แจก ไม่โทร
+# ซ้ำร้าย คำเดียวกันนี้อยู่ใน _SELF_EMP_WORDS ด้วย = ข้อความเดียวถูกตีความขัดกันเอง
+# เคสจริง FB-WE-20260827-232: "รายได้/อาชีพ (Q2): ทำธุรกิจส่วนตัว"
+# แก้: ตัดวลีธุรกิจออกก่อนเช็คคำปฏิเสธ — "เป็นเรื่องส่วนตัว" ยังนับว่าปฏิเสธเหมือนเดิม
+_R93_BIZ_PRIVATE = ("ธุรกิจส่วนตัว", "กิจการส่วนตัว", "งานส่วนตัว", "ร้านส่วนตัว",
+                    "อาชีพส่วนตัว", "ค้าขายส่วนตัว", "บริษัทส่วนตัว", "กิจส่วนตัว")
+try:
+    _R93_ORIG_REFUSE = _bl9._refuses_income
+
+    def _refuses_income_r93(msg):
+        try:
+            _s = str(msg or "")
+            _cleaned = _s
+            for _w in _R93_BIZ_PRIVATE:
+                _cleaned = _cleaned.replace(_w, " ")
+            if _cleaned != _s:
+                _out = _R93_ORIG_REFUSE(_cleaned)
+                if not _out:
+                    print(f"[R93] {_s[:32]!r} = บอกอาชีพ ไม่ใช่ปฏิเสธบอกรายได้")
+                return _out
+        except Exception as _e:
+            print(f"[R93 REFUSE ERROR] {_e} — ใช้ทางเดิม")
+        return _R93_ORIG_REFUSE(msg)
+
+    _bl9._refuses_income = _refuses_income_r93
+    print("[R93] 'ทำธุรกิจส่วนตัว' ไม่ถูกนับเป็นปฏิเสธบอกรายได้แล้ว")
+except Exception as _e:
+    print(f"[R93C ERROR] ต่อไม่ติด: {_e}")
+
+print("[R93] ครบชุด — ซื้อสดคัดกรองต่อ · เคสธุรกิจถามยอดขาย+ภ.พ.30")
+
 
 
 
