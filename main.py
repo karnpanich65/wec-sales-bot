@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r90"
+BOT_REVISION = "r92"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -3348,6 +3348,162 @@ try:
     print("[R91] เคสบริดจ์ไม่มีผู้กู้ร่วม — ไม่ปิดเคส ขอเบอร์ต่อ เปิดแล้ว")
 except Exception as _e:
     print(f"[R91B ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+# ======================================================================
+# r92 — จับอายุให้ได้ทุกแบบที่คนพูด + เตือนเมื่อระบบเดาอายุ (Gift เคาะ 28 ส.ค. 2026)
+# ----------------------------------------------------------------------
+# ปัญหาที่เจอตอนตรวจเกณฑ์:
+#   _has_age_signal("อายุ 58 แล้วค่ะ") = False  <-- ไม่รู้จักคำว่า "อายุ 58"
+#   รู้จักแค่ เกษียณ/บำนาญ/อายุมาก/สูงวัย เท่านั้น
+#   พอไม่รู้อายุ -> DEFAULT_AGE = 35 -> ได้ปีกู้เต็ม -> วงเงินสูงเกินจริง
+#
+# ลูกค้าคนเดียวกัน รายได้ 30,000 อายุ 58 พูดคนละแบบ ได้ผลตรงข้ามกัน:
+#   "อายุ 58 แล้วค่ะ"        -> ระบบไม่เก็บอายุ -> คิดที่ 35 -> วงเงิน 3.56M -> A โทรใน 2 ชม.
+#   "ใกล้เกษียณแล้วครับ"      -> ระบบถามอายุ ได้ 58 -> วงเงิน 1.91M -> X
+# (ข้อความ "อายุ 58 แล้วค่ะ" มีอยู่จริงใน Chat_Log ของเราแล้ว)
+#
+# แก้ 3 อย่าง:
+#   1. อ่านอายุจากข้อความได้เอง ไม่ต้องรอให้บอทถาม — "อายุ 58" / "58 ปีแล้ว" / "เกิดปี 2510"
+#   2. เก็บแล้วเดินเส้นทางเดียวกับตอนตอบคำถามอายุเป๊ะ (ปีกู้ · ธงปีกู้สั้น · เสนอผู้กู้ร่วม)
+#      -> พูดแบบไหนก็ได้ผลเหมือนกัน ไม่มีทางลัดให้เกรดเพี้ยน
+#   3. ถ้ายังไม่รู้อายุจริง ติดธงบอกเซลว่า "วงเงินนี้คิดบนสมมติฐานอายุ 35"
+#
+# ไม่ถามอายุทุกคนเหมือนเดิม (Gift เคาะ 19 ส.ค.) — แค่ "ได้ยินแล้วต้องเก็บ"
+# ======================================================================
+import time as _t92
+
+# คำที่บอกว่าตัวเลขนั้นคือ "อายุงาน" ไม่ใช่อายุคน — เจอแล้วห้ามอ่านเป็นอายุ
+_R92_JOB_WORDS = ("อายุงาน", "ทำงานมา", "ทำมา", "ประสบการณ์", "ผ่อนมา", "เปิดร้านมา",
+                  "ขายมา", "ทำอาชีพนี้มา", "อยู่บริษัทนี้", "ทำงานที่นี่",
+                  "จดทะเบียนมา", "เปิดบริษัทมา", "ปิดมา", "ผ่อนมาแล้ว")
+
+
+def _r92_parse_age(msg):
+    """อ่านอายุจากข้อความ เฉพาะตอนที่บริบทชัดว่าเป็น 'อายุคน'
+
+    รับ: "อายุ 58" · "อายุ58ปี" · "58 ปีแล้วครับ" · "เกิดปี 2510" · "เกิด พ.ศ. 2510"
+    ไม่รับ: "ทำงานมา 20 ปี" · "อายุงาน 3 ปี" · "ปิดมา 5 ปี" · "ห้อง 35 ตร.ม."
+    อ่านไม่ออกคืน None (ห้ามเดา)
+    """
+    try:
+        s = str(msg or "").replace(",", "")
+        # ประโยคที่พูดเรื่องอายุงาน/ระยะเวลา — ห้ามเดาจากรูปแบบ "NN ปี" เด็ดขาด
+        _job = any(w in s for w in _R92_JOB_WORDS)
+        for w in _R92_JOB_WORDS:
+            s = s.replace(w, " ")
+        # 1) มีคำว่า "อายุ" นำหน้าตัวเลข = ชัดเจนที่สุด
+        mt = re.search(r"อายุ\s*(?:ประมาณ|ราว|ราวๆ)?\s*(\d{1,2})", s)
+        if mt:
+            n = int(mt.group(1))
+            if 18 <= n <= 90:
+                return n
+        # 2) ปีเกิด — รับทั้ง พ.ศ. และ ค.ศ.
+        mt = re.search(r"เกิด[^0-9]{0,12}(\d{4})", s)
+        if mt:
+            y = int(mt.group(1))
+            _ce = _t92.localtime().tm_year
+            if 2300 <= y <= _ce + 543:          # พ.ศ.
+                n = (_ce + 543) - y
+            elif 1900 <= y <= _ce:              # ค.ศ.
+                n = _ce - y
+            else:
+                n = None
+            if n is not None and 18 <= n <= 90:
+                return n
+        # 3) "58 ปีแล้ว" / "58 ปีครับ" — เฉพาะตอนไม่มีคำเรื่องอายุงานปนอยู่
+        mt = None if _job else re.search(r"(?<!\d)(\d{2})\s*ปี(?!\s*ที่แล้ว)", s)
+        if mt:
+            n = int(mt.group(1))
+            if 18 <= n <= 90:
+                return n
+    except Exception as _e:
+        print(f"[R92 PARSE ERROR] {_e}")
+    return None
+
+
+def _r92_apply_age(self, user_id, state, age):
+    """เก็บอายุแล้วเดินเส้นทางเดียวกับตอนลูกค้าตอบคำถามอายุ (bot_logic §0.46)
+
+    คืน list ของบับเบิล ถ้าต้องพูดเรื่องผู้กู้ร่วมต่อ · คืน None ถ้าไหลต่อตามปกติ
+    """
+    data = state["data"]
+    data["age"] = age
+    _term = max(0, _bl9.AGE_CAP_MAX - age)
+    data["age_term"] = _term
+    if _term <= _bl9.AGE_TERM_ALERT:
+        data["age_short_term"] = True
+        data["low_income"] = True
+        self._add_signal(
+            state,
+            f"⚠️ อายุ {age} — เพดานผ่อนถึง {_bl9.AGE_CAP_MAX} เหลือกู้ได้ {_term} ปี "
+            f"ค่างวด/ล้านสูงกว่าปกติเกือบเท่าตัว · แบงก์ที่ปิดที่ 65 "
+            f"(TTB/SCB/BBL/KBANK/BAY) แทบใช้ไม่ได้ · ต้องหาผู้กู้ร่วมอายุน้อย "
+            f"(ลูกค้าบอกอายุเอง ไม่ได้ถาม)")
+        if not state.get("done") and not state.get("asked", {}).get("co_borrower"):
+            state["awaiting"] = "co_borrower"
+            state.setdefault("asked", {})["co_borrower"] = 1
+            print(f"[R92] {str(user_id)[:8]}... ลูกค้าบอกอายุ {age} เอง เหลือกู้ {_term} ปี "
+                  "— เสนอผู้กู้ร่วมอายุน้อย")
+            return [_bl9.AGE_COBORROWER_MSG.format(years=_term), _bl9.AGE_COBORROWER_Q]
+    else:
+        self._add_signal(state, f"อายุ {age} — กู้ได้ถึง {_term} ปี ยังอยู่ในเกณฑ์ปกติ "
+                                "(ลูกค้าบอกเอง ไม่ได้ถาม)")
+    print(f"[R92] {str(user_id)[:8]}... เก็บอายุ {age} จากข้อความลูกค้า (ปีกู้ {_term})")
+    return None
+
+
+try:
+    _R92_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r92(self, msg, user_id, state, bucket, is_new):
+        try:
+            _d = state.get("data") or {}
+            if (_d.get("age") is None and not state.get("awaiting_age")
+                    and not state.get("closed") and not state.get("done")):
+                _age = _r92_parse_age(msg)
+                if _age is not None:
+                    _bub = _r92_apply_age(self, user_id, state, _age)
+                    state["age_asked"] = True     # รู้แล้ว ไม่ต้องถามซ้ำ
+                    if _bub:
+                        return _bub, None
+        except Exception as _e:
+            print(f"[R92 DECIDE ERROR] {_e} — ใช้ทางเดิม")
+        return _R92_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+    CalmBotEngine._decide = _decide_r92
+    print("[R92] อ่านอายุจากข้อความลูกค้าได้เองแล้ว (อายุ 58 / 58 ปี / เกิดปี 2510)")
+except Exception as _e:
+    print(f"[R92 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+# ---------- r92b — ไม่รู้อายุ ต้องบอกเซลว่าวงเงินนี้เดามา ----------
+# DEFAULT_AGE = 35 ทำให้วงเงินสูงกว่าความจริงได้ถึง 46% ถ้าลูกค้าอายุ 58
+# เซลต้องรู้ว่าตัวเลขนี้ยังไม่ยืนยัน จะได้ถามอายุตอนโทรก่อนเสนอห้อง
+try:
+    _R92_ORIG_GRADE = _bl9.BotEngine._grade
+
+    def _grade_r92(self, data, state=None):
+        _g = _R92_ORIG_GRADE(self, data, state)
+        try:
+            if (state is not None and _g in ("A", "B", "C", "N")
+                    and data.get("age") is None and data.get("co_age") is None
+                    and not data.get("cash") and data.get("capacity_now") is not None):
+                self._add_signal(
+                    state,
+                    f"⚠️ ยังไม่รู้อายุลูกค้า — วงเงิน {data['capacity_now']/1e6:.1f}M นี้ "
+                    f"คิดบนสมมติฐานอายุ {_bl9.DEFAULT_AGE} ปี (ได้ปีกู้เต็ม) "
+                    "ถ้าอายุจริง 55+ วงเงินจะหายเกือบครึ่ง · ถามอายุตอนโทรก่อนเสนอห้อง")
+        except Exception as _e:
+            print(f"[R92B ERROR] {_e}")
+        return _g
+
+    _bl9.BotEngine._grade = _grade_r92
+    print("[R92] เตือนเซลเมื่อวงเงินคิดบนสมมติฐานอายุ 35 เปิดแล้ว")
+except Exception as _e:
+    print(f"[R92B ERROR] ต่อไม่ติด: {_e}")
+
+print("[R92] ครบชุด — อายุ: พูดแบบไหนก็ได้ผลเหมือนกัน")
+
 
 
 
