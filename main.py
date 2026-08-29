@@ -4553,6 +4553,192 @@ print("[R97] เกณฑ์/เกรด/ชีต ไม่แตะ — เ�
 
 
 
+
+
+# ======================================================
+# r102 — ขอเบอร์ทั้งที่ยังไม่ผ่านเกณฑ์ (Gift 29 ส.ค. "ขอเบอร์มาทำไมยังไม่ผ่านเกณฑ์เลย")
+# ======================================================
+# เคสจริงเพจ Star Condominium (Callme Joy) — เล่นซ้ำได้ทุกครั้ง:
+#   บอท: "พอมีใครกู้ร่วมได้ไหมครับ"        (awaiting=co_borrower)
+#   ลูกค้า: "มีเป็นลูกชายได้มั้ยค่ะ"        <- ตอบว่ามี + บอกด้วยว่าเป็นใคร
+#   บอท: "รับทราบค่ะ" แล้วข้ามไปถามหนี้     <- ไม่ได้บันทึกว่ามีผู้กู้ร่วมเลย
+#   ...
+#   บอท: "ขอเบอร์หน่อยครับ"                <- ขอเบอร์ทั้งที่รายได้ 18,000 ไม่ผ่านเกณฑ์
+#                                             และยังไม่รู้รายได้ผู้กู้ร่วมสักบาท
+#
+# 3 รูรั่วซ้อนกัน:
+#  A) คำตอบที่ "พูดเป็นคำถาม" ไม่ถูกเก็บ — process() ข้ามการ capture เมื่อ _is_question
+#     "มีเป็นลูกชายได้มั้ยค่ะ" คือคำตอบว่ามี แต่ระบบเห็นเป็นคำถามล้วน -> co_borrower_yes ไม่ถูกตั้ง
+#     -> co_income ไม่ถูกถาม -> ไม่มีอะไรกั้นไม่ให้เดินไปขอเบอร์
+#  B) ด่านขอเบอร์เช็คแค่ "รู้รายได้หรือยัง" (_income_known) ไม่ได้เช็ค "ผ่านเกณฑ์หรือยัง"
+#     18,000 = รู้แล้ว -> ผ่านด่าน ทั้งที่ต่ำกว่าเกณฑ์ 25,000 และต้องมีผู้กู้ร่วม
+#  C) คำตอบอาชีพหล่นลงช่องหนี้ — "ประจำค่ะ" ไปต่อท้าย debt
+#     -> r97 ทวนกลับว่า "นอกจากประจำค่ะ มีผ่อนมอเตอร์2100 ที่แจ้งมา..." = อ่านแล้วไม่โปร
+#     (เจอแบบเดียวกันในเพจ Millionaire asset: "นอกจากไม่มี ที่แจ้งมา...")
+#
+# กฎเหล็กที่ยังถือ: ห้ามทิ้งเคส — ด่านใหม่กั้นได้จำกัดรอบ ครบแล้วปล่อยผ่าน + ติดธงให้เซล
+# ไม่แตะสูตรคำนวณ ไม่แตะเกณฑ์เกรด ไม่แตะชีต ไม่แตะการแจกเคส
+
+R102_CO_ASK_MAX = 2      # กั้นไม่ให้ขอเบอร์ได้สูงสุดกี่รอบ ครบแล้วปล่อย + ติดธง
+
+# คำที่บอกว่า "มีผู้กู้ร่วม" แม้จะพูดเป็นคำถาม
+_R102_COB_PERSON = ("ลูกชาย", "ลูกสาว", "ลูก", "แฟน", "สามี", "ภรรยา", "เมีย", "ผัว",
+                    "คู่สมรส", "คู่ชีวิต", "พ่อ", "แม่", "บิดา", "มารดา", "พี่ชาย",
+                    "พี่สาว", "น้องชาย", "น้องสาว", "พี่", "น้อง", "ญาติ", "ลุง", "ป้า",
+                    "น้า", "อา")
+# คำตอบเรื่อง "อาชีพ" ที่ไม่ใช่ยอดหนี้ — ห้ามหล่นลงช่องหนี้
+_R102_JOB_WORDS = ("ประจำ", "พนักงาน", "ข้าราชการ", "รัฐวิสาหกิจ", "ฟรีแลนซ์",
+                   "อิสระ", "ธุรกิจส่วนตัว", "ค้าขาย", "รับจ้าง", "เจ้าของกิจการ")
+
+
+def _r102_says_has_cob(msg):
+    """ข้อความนี้แปลว่า 'มีผู้กู้ร่วม' ไหม — รับได้แม้พูดเป็นคำถาม"""
+    try:
+        s = str(msg or "")
+        if _bl9._says_no_coborrower(s):
+            return False
+        low = s.lower()
+        if any(h in low for h in _bl9._NO_COB_HINTS):
+            return False
+        return any(w in s for w in _R102_COB_PERSON)
+    except Exception as _e:
+        print(f"[R102 COB ERROR] {_e}")
+        return False
+
+
+def _r102_submittable(data, state):
+    """เคสนี้ 'ยื่นได้จริง' หรือยัง — ใช้ตัดสินว่าควรขอเบอร์ได้หรือยัง
+
+    ยังไม่ได้ = รายได้ไม่ถึงเกณฑ์/ภาระหนัก + ต้องพึ่งผู้กู้ร่วม แต่ยังไม่รู้รายได้เขา
+    """
+    try:
+        d = data or {}
+        if d.get("cash") or d.get("income_unknown"):
+            return True                      # ซื้อสด/ไม่ยอมบอก = ไม่ต้องกั้น
+        _need_cob = bool(d.get("low_income") or d.get("high_burden"))
+        if not _need_cob:
+            return True                      # ยื่นเดี่ยวได้ ไม่ต้องกั้น
+        if d.get("co_borrower_none"):
+            return True                      # บอกแล้วว่าไม่มี — ทางอื่นจัดการต่อ
+        if d.get("co_borrower_income"):
+            return True                      # รู้รายได้ผู้กู้ร่วมแล้ว
+        # ต้องมีผู้กู้ร่วม แต่ยังไม่รู้รายได้เขา -> ยังไม่ควรขอเบอร์
+        return False
+    except Exception as _e:
+        print(f"[R102 SUBMIT ERROR] {_e}")
+        return True                          # พลาดเมื่อไหร่ = ไม่กั้น (ห้ามทำให้ตัน)
+
+
+try:
+    _R102_ORIG_NEXT = _bl9.BotEngine._next_missing
+
+    def _next_missing_r102(self, data, state=None, skip=None):
+        _f, _q = _R102_ORIG_NEXT(self, data, state, skip)
+        try:
+            if _f == "contact":
+                _st = state or {}
+                _d = data or {}
+                if not _r102_submittable(_d, _st):
+                    # นับจาก asked ของ funnel เอง (เพิ่มตอน "ถามจริง" เท่านั้น)
+                    # ห้ามใช้ตัวนับของตัวเอง — _next_missing ถูกเรียกหลายรอบต่อเทิร์น
+                    # โควตาจะไหม้หมดตั้งแต่เทิร์นแรกโดยที่ยังไม่ได้ถามลูกค้าเลย
+                    _asked = (_st.get("asked") or {})
+                    _n = int(_asked.get("co_income") or 0)
+                    if _n < R102_CO_ASK_MAX:
+                        print(f"[R102 GATE] ยังไม่ผ่านเกณฑ์ (รายได้ "
+                              f"{_d.get('income_baht') or _d.get('income')!r} "
+                              f"+ ยังไม่รู้รายได้ผู้กู้ร่วม) — ยังไม่ขอเบอร์ "
+                              f"ถามผู้กู้ร่วมต่อ รอบ {_n + 1}/{R102_CO_ASK_MAX}")
+                        if _d.get("co_borrower_yes"):
+                            return "co_income", _bl9.CO_INCOME_Q
+                        return "co_borrower", _bl9.QUALIFY_QUESTIONS[
+                            _bl9.FIELD_Q_INDEX["co_borrower"]]
+                    # ครบโควตาแล้ว — ห้ามทิ้งเคส ปล่อยขอเบอร์ แต่ติดธงให้เซลเห็น
+                    try:
+                        _bl9.BotEngine._add_signal(
+                            _st, "⚠️ ขอเบอร์ทั้งที่ยังไม่ผ่านเกณฑ์ — รายได้ต่ำกว่า "
+                                 f"{_bl9.LOW_INCOME_BAHT:,} และยังไม่ได้รายได้ผู้กู้ร่วม "
+                                 "(ถามครบโควตาแล้ว) เซลต้องเช็คก่อนเสนอ")
+                    except Exception:
+                        pass
+                    print("[R102 GATE] ถามครบโควตาแล้ว — ปล่อยขอเบอร์ + ติดธงให้เซล")
+        except Exception as _e:
+            print(f"[R102 NEXT ERROR] {_e} — ใช้ทางเดิม")
+        return _f, _q
+
+    _bl9.BotEngine._next_missing = _next_missing_r102
+    print(f"[R102] ด่านขอเบอร์: ต้องผ่านเกณฑ์ก่อน (กั้นได้ {R102_CO_ASK_MAX} รอบ "
+          "แล้วปล่อย + ติดธง ไม่ทิ้งเคส)")
+except Exception as _e:
+    print(f"[R102 NEXT PATCH ERROR] ต่อไม่ติด: {_e}")
+
+
+try:
+    _R102_ORIG_CAPTURE = _bl9.BotEngine._capture
+
+    def _capture_r102(self, state, field, msg):
+        try:
+            # (C) คำตอบอาชีพล้วน ไม่มีตัวเลข -> ห้ามลงช่องหนี้
+            _s = str(msg or "")
+            _job_only = (any(w in _s for w in _R102_JOB_WORDS)
+                         and not _bl9._has_any(_s, _bl9._DEBT_SAYS))
+            if field in ("debt", "debt_baht"):
+                if _job_only and _bl9._parse_debt_monthly(_s) is None:
+                    print(f"[R102 SLOT] {_s[:30]!r} เป็นคำตอบอาชีพ ไม่ใช่ยอดผ่อน "
+                          "— ไม่เขียนช่องหนี้")
+                    return None
+            # หมายเหตุ: ไม่ดรอปช่อง co_income แม้คำตอบจะเป็นอาชีพล้วน
+            # เพราะ funnel นับ asked ไปแล้ว ถ้าช่องยังว่างมันจะ "ข้าม" ช่องนี้ทิ้ง
+            # ปล่อยให้เขียนได้ แล้วใช้ด่าน _r102_submittable กั้นแทน
+            # (ด่านดู co_borrower_income ที่เป็นตัวเลขจริง ไม่ได้ดูข้อความ)
+        except Exception as _e:
+            print(f"[R102 CAPTURE ERROR] {_e} — ใช้ทางเดิม")
+        return _R102_ORIG_CAPTURE(self, state, field, msg)
+
+    _bl9.BotEngine._capture = _capture_r102
+    print("[R102] คำตอบอาชีพไม่หล่นลงช่องหนี้แล้ว")
+except Exception as _e:
+    print(f"[R102 CAPTURE PATCH ERROR] ต่อไม่ติด: {_e}")
+
+
+# ---------- (A) คำตอบผู้กู้ร่วมที่พูดเป็นคำถาม ต้องถูกบันทึก ----------
+try:
+    _R102_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r102(self, msg, user_id, state, bucket, is_new):
+        try:
+            _d = (state or {}).get("data") or {}
+            if ((state or {}).get("awaiting") == "co_borrower"
+                    and not _d.get("co_borrower_yes")
+                    and not _d.get("co_borrower_none")
+                    and _r102_says_has_cob(msg)):
+                _d["co_borrower_yes"] = True
+                _d.setdefault("co_borrower", str(msg)[:80])
+                print(f"[R102 COB] {str(user_id)[:8]}... ตอบว่ามีผู้กู้ร่วม "
+                      f"(พูดเป็นคำถามก็นับ) | {str(msg)[:40]!r}")
+        except Exception as _e:
+            print(f"[R102 COB ERROR] {_e} — ใช้ทางเดิม")
+        bubbles, grade = _R102_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            # กันถามเรื่องผู้กู้ร่วม 2 คำถามในเทิร์นเดียว (ด่าน r102 + คำถามทวนของเดิม)
+            # กติกา Gift: 1 เทิร์น 1 คำถาม
+            if isinstance(bubbles, list) and len(bubbles) > 1:
+                _hit = [i for i, b in enumerate(bubbles) if "ผู้กู้ร่วม" in str(b)]
+                if len(_hit) > 1:
+                    for i in reversed(_hit[1:]):
+                        bubbles.pop(i)
+                    print(f"[R102] {str(user_id)[:8]}... ตัดคำถามผู้กู้ร่วมที่ซ้ำ "
+                          f"ในเทิร์นเดียว เหลือ 1 ข้อ")
+        except Exception as _e:
+            print(f"[R102 BUBBLE ERROR] {_e} — ใช้ชุดเดิม")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r102
+    print("[R102] 'มีเป็นลูกชายได้มั้ยคะ' = ตอบว่ามีผู้กู้ร่วม ไม่ใช่แค่คำถาม")
+except Exception as _e:
+    print(f"[R102 DECIDE PATCH ERROR] ต่อไม่ติด: {_e}")
+
+
 # ======================================================
 # r100 — คำตอบลงผิดช่อง: "งบ" กลายเป็นรายได้ · "เงินเดือน" กลายเป็นหนี้
 # ======================================================
