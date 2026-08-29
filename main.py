@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r96"
+BOT_REVISION = "r97"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -4303,6 +4303,241 @@ except Exception as _e:
     print(f"[R96 JOBS ERROR] ต่อไม่ติด — ใช้ลิสต์เดิม: {_e}")
 
 print("[R96] อาชีพอิสระ: ถามก่อน แล้วค่อยตอบตามจริง — ไม่สร้างความหวังเกินจริง")
+
+
+# ======================================================================
+# r97 — ถามหนี้ให้ละเอียดขึ้น + ประเมินวงเงินแบบปลอดภัย + เสนอบริการปิดภาระ
+#        (Gift สั่ง 29 ส.ค. 2026 ตี 2)
+# ----------------------------------------------------------------------
+# กติกาที่ Gift ย้ำ 2 รอบ: **เกณฑ์ใช้เกณฑ์เดิม ห้ามแตะ**
+#   เกรด A/B/C/N/X · แจกเคส · ลงชีต · ธงเซล  = ตัวเลขจริง เหมือนเดิมทุกตัว
+#   ที่เพิ่มคือ "คำพูดกับลูกค้า" เท่านั้น — คนละชั้นกับเครื่องคิดเลข
+#
+# 3 ส่วน:
+#   A. ถามหนี้ต่ออีก 1 ข้อ โดยทวนของเดิมกลับไป
+#      เคสจริง: ถาม "มีผ่อนอะไรอยู่ไหม (เช่น บ้าน รถ บัตรเครดิต)"
+#               ลูกค้าตอบแค่ "รถ เดือนละ 10000" — อ่านผ่านคำว่าบัตร
+#      Gift: "นอกจากรถเดือนละ 10000 ที่แจ้ง มีอื่นๆ อีกไหม เช่น บัตร สินเชื่อ บ้าน"
+#      -> ทวนของเดิม = พิสูจน์ว่าฟังอยู่ + ไม่ถามซ้ำสิ่งที่ตอบไปแล้ว
+#
+#   B. ลูกค้าถามวงเงินแต่ข้อมูลไม่ครบ -> "ขยี้" ด้วยเรื่องจริงที่คนพลาด
+#      แล้ว **ปล่อยกลับ funnel เดิม** ถามทีละข้อ (ห้ามถามรวบ — Gift สั่ง
+#      เพราะคำตอบจะปนกันแล้วยัดผิดช่องเหมือนบั๊กที่เพิ่งแก้ใน r95)
+#
+#   C. ครบ (รายได้+ภาระ+อายุ) -> แจ้งวงเงิน "ต่ำกว่าจริง" + ชี้ส่วนต่างถ้าปิดภาระ
+#      Gift: "ตอบน้อยกว่าความเป็นจริงเพื่อความปลอดภัย อ้างว่าเป็นการสัมภาษณ์
+#             ไม่เห็นเอกสาร ซึ่งธนาคารใช้หลักเอกสาร ... แล้วแจ้งวงเงินให้น้อยๆ
+#             เพื่อเสนอบริการปิดภาระ"
+#      เหตุผลที่อ้างเป็นความจริง 100% — ธนาคารตัดสินจากเอกสารจริงๆ
+#      และส่วนต่าง (cap_clear - cap_now) ก็เป็นเลขจริงจากเครื่อง ไม่ได้ปั้น
+# ======================================================================
+
+# แจ้งลูกค้าที่ 70-80% ของวงเงินที่คำนวณได้ (ปัดลงหลักแสน)
+# ปรับตัวเลขนี้ตัวเดียวจบ — Gift อยากให้ต่ำกว่านี้อีกก็ลดค่านี้
+R97_QUOTE_PCT = 0.70
+R97_QUOTE_SPAN = 0.10          # ช่วงบน = PCT + SPAN
+R97_BRIDGE_MIN = 300_000       # ส่วนต่างต้องเกินเท่านี้ถึงจะเสนอบริการปิดภาระ
+
+
+def _r97_band(value):
+    """คืนข้อความช่วงวงเงินแบบปัดลงหลักแสน เช่น '2.5-2.9 ล้าน'"""
+    lo = int(value * R97_QUOTE_PCT / 100000) * 100000
+    hi = int(value * (R97_QUOTE_PCT + R97_QUOTE_SPAN) / 100000) * 100000
+    if hi <= lo:
+        hi = lo + 100000
+    return f"{lo/1e6:.1f}-{hi/1e6:.1f} ล้าน"
+
+
+# ---------- A: ถามหนี้ต่ออีก 1 ข้อ โดยทวนของเดิม ----------
+_R97_DEBT_MORE_TAIL = ("มีอื่นๆ เพิ่มเติมอีกไหมครับ "
+                       "เช่น บัตรเครดิต สินเชื่อส่วนบุคคล หรือผ่อนบ้าน")
+_R97_NO_MORE = ("ไม่มี", "ไม่มีแล้ว", "หมดแล้ว", "แค่นี้", "เท่านี้", "มีแค่",
+                "ไม่มีอื่น", "ไม่มีเพิ่ม", "no", "ครบแล้ว")
+
+
+def _r97_debt_more_q(data):
+    """สร้างคำถามทวนของเดิม — 'นอกจาก<ที่แจ้ง> มีอื่นๆ อีกไหม'"""
+    try:
+        raw = str((data or {}).get("debt") or "").strip()
+        said = _bl9.BotEngine._tidy(raw)
+        if said and len(said) <= 60:
+            return f"นอกจาก{said} ที่แจ้งมา {_R97_DEBT_MORE_TAIL}"
+    except Exception as _e:
+        print(f"[R97 DEBTQ ERROR] {_e}")
+    return f"นอกจากที่แจ้งมา {_R97_DEBT_MORE_TAIL}"
+
+
+# ---------- B: ขยี้ตอนลูกค้าถามวงเงิน ----------
+_R97_ASK_LIMIT = ("กู้ได้เท่าไหร่", "กู้ได้เท่าไร", "กู้ได้กี่", "วงเงิน",
+                  "กู้ได้ประมาณ", "ซื้อได้เท่าไหร่", "ซื้อได้เท่าไร",
+                  "ผ่อนไหวไหม", "กู้ผ่านไหม", "กู้ได้ไหม", "ประเมินให้หน่อย",
+                  "คำนวณให้หน่อย", "คิดให้หน่อย", "ได้กี่ล้าน", "กี่ล้าน")
+
+R97_TEASE = [
+    "บอกคร่าวๆ ได้ครับ แต่ขอออกตัวก่อนนะครับ อันนี้คุยปากเปล่า "
+    "ธนาคารเขาดูจากเอกสารล้วนๆ ครับ",
+
+    "ที่คนพลาดกันเยอะสุดคือประวัติการผ่อนกับบัตรเครดิตครับ "
+    "จ่ายช้าไปไม่กี่วันเมื่อปีก่อนโดยไม่รู้ตัว หรือบัตรที่เลิกใช้แล้วแต่ยังไม่ได้ปิด "
+    "ธนาคารคิดจากวงเงินบัตร ไม่ใช่ยอดที่ใช้จริงครับ",
+
+    "อีกตัวที่แรงมากคืออายุ รายได้เท่ากันเป๊ะ อายุ 35 กับ 55 "
+    "วงเงินต่างกันเกือบล้าน เพราะปีผ่อนสั้นลง ค่างวดต่อล้านก็แพงขึ้นครับ "
+    "ยังมีเรื่องบริษัทกับอายุงานอีก แต่พวกนั้นไว้ดูตอนส่งเอกสาร",
+
+    "ขอถามทีละข้อสั้นๆ นะครับ ตอบครบเมื่อไหร่ผมคำนวณให้เลย",
+]
+
+
+def _r97_asks_limit(msg):
+    try:
+        return _bl9._has_any(str(msg or ""), _R97_ASK_LIMIT)
+    except Exception:
+        return False
+
+
+# ---------- C: แจ้งวงเงินแบบปลอดภัย + เสนอบริการปิดภาระ ----------
+R97_SERVICE_LINE = ("เรามีบริการช่วยปิดภาระตรงนี้ครับ "
+                    "ขอเบอร์ให้ที่ปรึกษาดูเอกสารให้ เลขจริงจะชัดกว่านี้เยอะครับ")
+
+
+def _r97_quote(data, state):
+    """คืน list บับเบิลแจ้งวงเงิน (ต่ำกว่าจริง) — คืน [] ถ้ายังคำนวณไม่ได้
+
+    ใช้ input ชุดเดียวกับ _grade เป๊ะ แต่ "ตัวเลขที่พูด" ถูกกดลงเหลือ 70-80%
+    เกรด/ชีต/ธงเซล ยังใช้ตัวเลขจริงเหมือนเดิม ไม่กระทบกันเลย
+    """
+    try:
+        d = data or {}
+        st = state or {}
+        inc = (d.get("income_total") or d.get("income_baht")
+               or _bl9._parse_income(str(d.get("income", ""))))
+        inc = int(inc) if inc else 0
+        if not inc:
+            return []
+        if st.get("self_employed"):
+            inc = int(inc * _bl9.FREELANCE_INCOME_PCT)
+        debt = d.get("debt_baht")
+        if debt is None:
+            debt = _bl9._parse_debt_monthly(str(d.get("debt", "")))
+        if debt is None:
+            return []                     # ยังไม่รู้ภาระ = ยังคำนวณไม่ได้
+        debt = max(0, int(debt)) + int(d.get("co_debt_baht") or 0)
+        _own, _co = d.get("age"), d.get("co_age")
+        if _co is not None:
+            age = min(_own, _co) if _own else _co
+        elif d.get("co_borrower_income"):
+            age = None
+        else:
+            age = _own
+        if age is None and not d.get("co_borrower_income"):
+            return []                     # ไม่รู้อายุ = ห้ามเดา (เลขจะสูงเกินจริง)
+
+        now = _bl9._capacity(inc, debt, age)
+        clear = _bl9._capacity(inc, 0, age)
+        if now <= 0 and clear <= 0:
+            return []
+
+        out = [f"ผมให้ตัวเลขแบบปลอดภัยไว้ก่อนนะครับ ตอนนี้น่าจะราว {_r97_band(now)}"
+               if now > 0 else
+               "ตรงๆ นะครับ ภาระที่ผ่อนอยู่ตอนนี้กินวงเงินจนแทบไม่เหลือเลยครับ"]
+
+        if clear - now >= R97_BRIDGE_MIN:
+            out.append(f"ที่ผ่อนอยู่ {debt:,} ต่อเดือนกินวงเงินไปเยอะเลยครับ "
+                       f"ถ้าปิดตัวนี้ได้ ขยับขึ้นเป็นราว {_r97_band(clear)}")
+            out.append(R97_SERVICE_LINE)
+            try:
+                st_ = st if isinstance(st, dict) else {}
+                _bl9.BotEngine._add_signal(
+                    st_, f"💡 เสนอบริการปิดภาระแล้ว — วงเงินจริง {now/1e6:.2f}M "
+                         f"-> ปิดภาระได้ {clear/1e6:.2f}M (ต่าง {(clear-now)/1e6:.2f}M) "
+                         f"· แจ้งลูกค้าที่ {_r97_band(now)} (กดลงเพื่อความปลอดภัย)")
+            except Exception:
+                pass
+        return out
+    except Exception as _e:
+        print(f"[R97 QUOTE ERROR] {_e}")
+        return []
+
+
+# บับเบิลเดิมที่ซ้ำความกับ R97 — ยิงพร้อมกันแล้วลูกค้างง (เจอตอนเทส)
+_R97_DROP = ("วงเงินกู้ขึ้นกับรายได้",
+             "รบกวนบอกรายได้ต่อเดือนและยอดผ่อน",
+             "เดี๋ยวผมประเมินเบื้องต้นให้")
+
+
+def _r97_is_question(b):
+    try:
+        return "?" in str(b) or "ไหมครับ" in str(b) or "เท่าไหร่ครับ" in str(b) \
+            or "ไหมคะ" in str(b) or "เท่าไหร่คะ" in str(b)
+    except Exception:
+        return False
+
+
+try:
+    _R97_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r97(self, msg, user_id, state, bucket, is_new):
+        _uid = str(user_id)[:8]
+        _tease = False
+        try:
+            _d = state.get("data") or {}
+            # B: ถามวงเงินแต่ยังคำนวณไม่ได้ -> ขยี้ แล้วปล่อยกลับ funnel
+            if (_r97_asks_limit(msg) and not state.get("_r97_teased")
+                    and not state.get("done") and not _r97_quote(_d, state)):
+                state["_r97_teased"] = True
+                _tease = True
+        except Exception as _e:
+            print(f"[R97 TEASE ERROR] {_e}")
+
+        bubbles, grade = _R97_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+        try:
+            if not isinstance(bubbles, list):
+                bubbles = [bubbles] if bubbles else []
+            _d = state.get("data") or {}
+
+            if _tease:
+                # ตัดบับเบิล FAQ วงเงินเดิมทิ้ง — ซ้ำความกับ R97_TEASE
+                bubbles = [b for b in bubbles
+                           if not any(k in str(b) for k in _R97_DROP)]
+                bubbles = list(R97_TEASE) + bubbles
+                print(f"[R97] {_uid}... ถามวงเงินแต่ข้อมูลไม่ครบ — ขยี้แล้วส่งกลับ funnel")
+
+            # A: เพิ่งได้คำตอบเรื่องหนี้ครั้งแรก -> ถามต่ออีก 1 ข้อ ทวนของเดิม
+            elif (_d.get("debt") and not state.get("_r97_debt_more")
+                  and not state.get("done") and not state.get("closed")
+                  and not _bl9._has_any(str(msg or ""), _R97_NO_MORE)):
+                state["_r97_debt_more"] = True
+                # 1 คำถาม/เทิร์น (Gift สั่ง) — ตัดคำถามอื่นในเทิร์นนี้ทิ้ง
+                # ข้อที่ตัดยังว่างอยู่ _next_missing จะถามเองในเทิร์นถัดไป
+                bubbles = [b for b in bubbles if not _r97_is_question(b)]
+                bubbles.append(_r97_debt_more_q(_d))
+                print(f"[R97] {_uid}... ถามหนี้ต่อ (ทวนของเดิม + บัตร/สินเชื่อ/บ้าน)")
+
+            # C: ข้อมูลครบแล้ว -> แจ้งวงเงินแบบปลอดภัย ครั้งเดียวต่อแชท
+            if (not state.get("_r97_quoted") and not state.get("closed")
+                    and (state.get("_r97_teased") or _r97_asks_limit(msg))):
+                _q = _r97_quote(_d, state)
+                if _q:
+                    state["_r97_quoted"] = True
+                    bubbles = [b for b in bubbles
+                               if not any(k in str(b) for k in _R97_DROP)]
+                    bubbles = bubbles + _q
+                    print(f"[R97] {_uid}... แจ้งวงเงินแบบปลอดภัย ({R97_QUOTE_PCT:.0%}) "
+                          "+ เสนอบริการปิดภาระ")
+        except Exception as _e:
+            print(f"[R97 DECIDE ERROR] {_e} — ใช้ทางเดิม")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r97
+    print(f"[R97] ถามหนี้ละเอียดขึ้น + แจ้งวงเงินที่ {R97_QUOTE_PCT:.0%}-"
+          f"{R97_QUOTE_PCT+R97_QUOTE_SPAN:.0%} ของจริง + เสนอบริการปิดภาระ")
+except Exception as _e:
+    print(f"[R97 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+print("[R97] เกณฑ์/เกรด/ชีต ไม่แตะ — เปลี่ยนเฉพาะคำพูดกับลูกค้า")
+
 
 
 
