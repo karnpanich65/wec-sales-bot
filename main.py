@@ -4710,23 +4710,15 @@ except Exception as _e:
 #
 # ไม่แตะเกณฑ์ ไม่แตะเกรด ไม่แตะชีต ไม่แตะการแจกเคส
 
-_R99_SEEN = set()          # user ที่เคยคุยแล้ว (กันหน่วยความจำบวมด้วย maxlen ข้างล่าง)
-_R99_SEEN_ORDER = deque(maxlen=5000)
-
-
-def _r99_first_contact(uid):
-    """เทิร์นแรกของคนนี้ไหม — เรียกครั้งเดียวต่อข้อความ"""
-    u = str(uid or "")
-    if not u:
-        return False
-    if u in _R99_SEEN:
-        return False
-    if len(_R99_SEEN_ORDER) == _R99_SEEN_ORDER.maxlen and _R99_SEEN_ORDER:
-        _R99_SEEN.discard(_R99_SEEN_ORDER[0])
-    _R99_SEEN_ORDER.append(u)
-    _R99_SEEN.add(u)
-    return True
-
+# r99 แก้ 29 ส.ค. 04:35 — ของเดิมใช้ set ใน RAM จำว่า "ใครเคยคุยแล้ว"
+# ซึ่งพังทันทีที่ deploy: RAM ล้าง -> ทุกบทสนทนาที่ค้างอยู่กลายเป็น "เทิร์นแรก" หมด
+# -> บอทถามวัตถุประสงค์ซ้ำกลางคัน (Gift 29 ส.ค.: "มาถามซ้ำซ้อน ไม่โปร")
+# หลักฐานจาก log 04:26-04:34: [R99] ยิง 18 ครั้งจาก 17 ข้อความ รวมถึงข้อความ
+# ที่เป็นคำตอบกลางบทสนทนา เช่น 'บางซื่อ อยู่เอง' · 'เป็นpcขายปั๊มลมpumaคะ' · 'ค่ะ'
+#
+# ของใหม่: ใช้ is_new ที่บอทคำนวณเองใน _resolve_state (r88 โหลด session จาก
+# Postgres ก่อนเสมอ) -> ลูกค้าเก่าที่กลับมาหลัง deploy ไม่ถูกนับเป็นเทิร์นแรกอีก
+# ไม่มี state เป็นของตัวเองเลย = ไม่มีอะไรให้หายตอนรีสตาร์ท
 
 try:
     _R99_OPEN_FLAG = {"first": False}
@@ -4750,24 +4742,32 @@ try:
 
     _bl._is_zone_ask = _zone_ask_r99
 
-    _R99_BASE_PROCESS = CalmBotEngine.process
+    _R99_BASE_DECIDE = CalmBotEngine._decide
 
-    def _process_r99(self, msg, user_id, *a, **kw):
-        # ใช้ user_id อย่างเดียวเป็นคีย์ — PSID ผูกกับเพจอยู่แล้ว ไม่ชนกันข้ามเพจ
-        # (ไม่ดึง page_id จากตำแหน่ง arg เพราะลำดับพารามิเตอร์เปลี่ยนเมื่อไหร่จะพังเงียบ)
+    def _decide_r99(self, msg, user_id, state, bucket, is_new):
+        # เช็คจาก state จริง ไม่ใช่ set ใน RAM และไม่ใช่ is_new
+        # (is_new ของ bot_logic แปลว่า "ต้องทักทายใหม่ไหม" ไม่ใช่ "เทิร์นแรกไหม"
+        #  ลูกค้าใหม่เอี่ยมก็ได้ is_new=False ได้ — ตรวจแล้ว 29 ส.ค.)
+        # "ยังไม่เคยได้อะไรจากเขาเลย" = ยังไม่รู้ว่าอยู่เองหรือลงทุน = อย่าเพิ่งเท
+        # state ถูกโหลดจาก Postgres มาก่อนถึงตรงนี้แล้ว -> ทนต่อการ deploy
         try:
-            _R99_OPEN_FLAG["first"] = _r99_first_contact(user_id)
+            _st = state or {}
+            _R99_OPEN_FLAG["first"] = (
+                not (_st.get("data") or {})
+                and not _st.get("awaiting")
+                and not _st.get("zone_told")
+                and not _st.get("done"))
         except Exception as _e:
             _R99_OPEN_FLAG["first"] = False
             print(f"[R99 FLAG ERROR] {_e}")
         try:
-            return _R99_BASE_PROCESS(self, msg, user_id, *a, **kw)
+            return _R99_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         finally:
             _R99_OPEN_FLAG["first"] = False
 
-    CalmBotEngine.process = _process_r99
-    print("[R99] เทิร์นแรกถามวัตถุประสงค์ก่อน — ยังไม่เทชุดย่าน/ช่วงราคา/ขอเบอร์ "
-          "(คำถามทำเลจริงยังตอบเหมือนเดิม · เทิร์น 2 ขึ้นไปไม่แตะ)")
+    CalmBotEngine._decide = _decide_r99
+    print("[R99] เทิร์นแรก (is_new จาก session จริง) ถามวัตถุประสงค์ก่อน — "
+          "ยังไม่เทชุดย่าน/ช่วงราคา/ขอเบอร์ · คำถามทำเลจริงยังตอบเหมือนเดิม")
 except Exception as _e:
     print(f"[R99 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
