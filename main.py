@@ -4547,6 +4547,334 @@ print("[R97] เกณฑ์/เกรด/ชีต ไม่แตะ — เ�
 
 
 
+
+
+# ======================================================
+# r98 — ค่า API: cache ไม่แตก · วัดได้ · ไม่ถูกเกรียนดูด · ไม่ตายเงียบ
+# ======================================================
+# ที่มา (Gift 29 ส.ค. 2026 "เชค log ทำไมใช้เปลืองมาก" + "พวกเกรียนๆ มาพิมซ้ำๆ")
+#
+# 1) เครดิตหมด 28 ส.ค. 21:32 UTC -> [CLAUDE ERROR] 400 รัว 120+ ครั้ง 5 ชม.
+#    ทุกครั้งตกไป FALLBACK_MSG ประโยคเดิม ลูกค้าเห็นซ้ำทั้งคืน
+#    = ที่ Gift บอกว่า "ตอบไม่ดี ไม่ฉลาด ไม่มี tone voice" — ไม่ใช่โมเดลโง่ แต่ไม่มีโมเดล
+#
+# 2) system prompt 16,385 ตัว ใส่ cache_control ไว้ แต่โค้ดเดิม "ต่อท้าย"
+#    FEMALE_VOICE_RULE / ANGER_RULE / BEHAVIOR_READ_RULE เข้าไปในสตริงเดียวกัน
+#    -> ต่อท้ายแค่ 250-400 ตัว แต่ cache key เปลี่ยนทั้งก้อน 12,000 โทเคน
+#    -> 6 กระปุก cache TTL 5 นาที ทราฟฟิกจริง ~2 ข้อความ/นาที
+#    -> หมดอายุก่อนโดนใช้ซ้ำ = จ่ายราคา "เขียน cache" เกือบทุกครั้ง
+#       ไม่เคยได้ส่วนลด "อ่าน cache" ที่เป็นเหตุผลที่เปิด cache ตั้งแต่แรก
+#    แก้: แยกเป็น 2 บล็อก — ก้อนใหญ่คงที่ใส่ cache / กฎแปรผันต่อท้ายไม่ใส่ cache
+#         เหลือ cache เดียวต่อโมเดล อยู่ warm ตลอด
+#
+# 3) โค้ดเดิมทิ้ง usage ที่ API ส่งกลับมา -> ไล่ไม่ได้ว่าเงินหายไปกับอะไร
+#    แก้: log ทุกครั้ง + สะสมยอดประมาณการเป็น USD
+#
+# 4) ไม่มีเพดานต่อคน -> คนพิมพ์รัวๆ ดูดเครดิตได้ไม่จำกัด
+#    แก้: พิมพ์ซ้ำ = ตอบเดิม ไม่ยิง API · เพดานต่อคนต่อชั่วโมง/ต่อวัน · เพดานรวม
+#
+# กฎเหล็กที่ยังถือ: ห้ามทำให้บอทเงียบ — ทุกทางออกคืนข้อความเสมอ
+# ไม่แตะเกณฑ์ ไม่แตะเกรด ไม่แตะชีต ไม่แตะการแจกเคส
+
+import time as _t98
+import difflib as _dm98
+from collections import deque as _dq98
+
+# --- เพดานกันเกรียน ---
+R98_SIMILAR       = 0.90     # ความเหมือน 90% ขึ้นไป = นับว่าถามซ้ำ
+R98_REPEAT_WINDOW = 600      # วิ — พิมพ์ข้อความเดิมซ้ำใน 10 นาที = ตอบเดิม ไม่ยิง API
+R98_HOUR_MAX      = 20       # ยิง API ได้กี่ครั้ง/คน/ชั่วโมง
+R98_DAY_MAX       = 60       # ยิง API ได้กี่ครั้ง/คน/วัน
+R98_GLOBAL_HOUR   = 400      # เพดานรวมทุกคน/ชั่วโมง — กันบิลวิ่งหนี
+
+# --- เบรกเกอร์ตอนเครดิตหมด ---
+R98_CREDIT_FAILS  = 3        # 400 credit ติดกันกี่ครั้งถึงหยุดยิง
+R98_CREDIT_COOL   = 600      # วิ — หยุดยิงนานแค่ไหนก่อนลองใหม่
+
+R98_FLOOD_MSG  = "ขอเวลาสักครู่นะครับ เดี๋ยวที่ปรึกษาเข้ามาดูให้ครับ"
+R98_AIDOWN_MSG = "ขอเวลาสักครู่นะครับ เดี๋ยวที่ปรึกษาเข้ามาตอบให้ครับ"
+
+# ราคา USD ต่อ 1 ล้านโทเคน: (input, เขียน cache, อ่าน cache, output)
+R98_PRICE = {
+    "haiku":  (1.00,  1.25,  0.10,  5.00),
+    "sonnet": (3.00,  3.75,  0.30, 15.00),
+    "opus":  (15.00, 18.75,  1.50, 75.00),
+}
+R98_PRICE_DEFAULT = R98_PRICE["sonnet"]      # ไม่รู้จัก = คิดแพงไว้ก่อน ไม่ประเมินต่ำ
+
+_R98_LAST: dict = {}          # uid -> [ข้อความที่ normalize แล้ว, คำตอบ, เวลา]
+_R98_HITS: dict = {}          # uid -> deque(เวลาที่ยิง API)
+_R98_DAY: dict = {}           # uid -> [วันที่, จำนวน]
+_R98_GLOBAL: _dq98 = _dq98()  # เวลาที่ยิง API ทั้งระบบ
+_R98_CREDIT = {"fails": 0, "until": 0.0}
+_R98_SPEND = {"usd": 0.0, "calls": 0, "in": 0, "cw": 0, "cr": 0, "out": 0,
+              "gated": 0, "repeat": 0}
+
+
+# คำลงท้ายที่ไม่เปลี่ยนความหมายของคำถาม — ตัดทิ้งก่อนเทียบว่า "ถามซ้ำ" ไหม
+# (เกรียนชอบพิมพ์เรื่องเดิมแล้วสลับคำลงท้าย/ยืดสระ ให้ระบบคิดว่าเป็นคำถามใหม่)
+_R98_PARTICLE = _re94.compile(
+    r"(ครับผม|ครับ|คร้าบ|คับ|ค่ะ|คะ|ค่า|จ้า|จ้ะ|จ๊ะ|ฮะ|นะ|น่ะ|เลย|อ่ะ|อะ|อ่า|หน่อย|ด้วย)")
+
+
+def _r98_norm(s):
+    """ตัดช่องว่าง/วรรคตอน/คำลงท้าย/ตัวซ้ำ เพื่อเทียบว่า 'ข้อความเดิม' ไหม"""
+    t = _re94.sub(r"[\s\.\!\?,~ๆฯ\-_]+", "", str(s or "")).lower()
+    t = _R98_PARTICLE.sub("", t)
+    # ยุบตัวซ้ำ 3 ตัวขึ้นไปเหลือ 2 — แต่ห้ามแตะตัวเลข
+    # (ถ้ายุบเลขด้วย "งบ 500,000" กับ "งบ 5,000,000" จะกลายเป็นข้อความเดียวกัน
+    #  แล้วบอทจะตอบคำถามเก่าให้ลูกค้าที่ถามเรื่องใหม่ — ห้ามเด็ดขาด)
+    return _re94.sub(r"([^\d])\1{2,}", r"\1\1", t)   # ฮ่าาาาา -> ฮ่าา
+
+
+def _r98_same(a, b):
+    """ถามซ้ำไหม — ตรงเป๊ะ หรือใกล้เคียงมาก (พิมพ์ผิด/ยืดสระ/สลับคำลงท้าย)
+
+    กฎเหล็ก: ตัวเลขต่างกันเมื่อไหร่ = คนละคำถามเสมอ ห้ามนับว่าซ้ำ
+    ในบอทนี้ตัวเลขคือเนื้อหาทั้งหมด (รายได้ ยอดผ่อน อายุ งบ)
+    "งบ 500,000" กับ "งบ 5,000,000" หน้าตาเหมือนกัน 94% แต่คนละเรื่องคนละเกรด
+    """
+    if not a or not b:
+        return False
+    if _re94.sub(r"\D", "", a) != _re94.sub(r"\D", "", b):
+        return False
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > max(6, min(len(a), len(b)) // 3):
+        return False
+    try:
+        return _dm98.SequenceMatcher(None, a, b).ratio() >= R98_SIMILAR
+    except Exception:
+        return False
+
+
+def _r98_price(model):
+    m = str(model or "").lower()
+    for k, v in R98_PRICE.items():
+        if k in m:
+            return v
+    return R98_PRICE_DEFAULT
+
+
+def _r98_prune(uid, now):
+    dq = _R98_HITS.get(uid)
+    if dq is not None:
+        while dq and now - dq[0] > 3600:
+            dq.popleft()
+        if not dq:
+            _R98_HITS.pop(uid, None)
+    while _R98_GLOBAL and now - _R98_GLOBAL[0] > 3600:
+        _R98_GLOBAL.popleft()
+    # กันหน่วยความจำบวม — ล้างของเก่าเมื่อโตเกิน
+    if len(_R98_LAST) > 3000:
+        for k, v in list(_R98_LAST.items()):
+            if now - v[2] > R98_REPEAT_WINDOW * 3:
+                _R98_LAST.pop(k, None)
+    if len(_R98_DAY) > 5000:
+        _today = _t98.strftime("%Y-%m-%d", _t98.gmtime(now))
+        for k, v in list(_R98_DAY.items()):
+            if v[0] != _today:
+                _R98_DAY.pop(k, None)
+
+
+def _r98_gate(uid, msg, state):
+    """ยิง API ได้ไหม — คืน (ok, ข้อความสำเร็จรูปถ้าไม่ให้ยิง)
+
+    ห้ามคืน (False, "") เด็ดขาด — บอทต้องมีอะไรตอบเสมอ
+    """
+    now = _t98.time()
+    _r98_prune(uid, now)
+
+    # (0) เครดิตหมด/API ล่ม — ไม่ยิงซ้ำให้เปลืองเวลา ลูกค้ารอ
+    if _R98_CREDIT["until"] > now:
+        return False, R98_AIDOWN_MSG
+
+    # (1) พิมพ์ข้อความเดิมซ้ำ -> ตอบคำตอบเดิม ไม่เสียเงิน
+    n = _r98_norm(msg)
+    prev = _R98_LAST.get(uid)
+    if (n and prev and prev[1] and now - prev[2] <= R98_REPEAT_WINDOW
+            and _r98_same(prev[0], n)):
+        _R98_SPEND["repeat"] += 1
+        print(f"[R98 REPEAT] {uid[:8]}... พิมพ์ซ้ำใน {int(now - prev[2])} วิ "
+              f"— ตอบเดิม ไม่ยิง API")
+        return False, prev[1]
+
+    # (2) เพดานรวมทั้งระบบ
+    if len(_R98_GLOBAL) >= R98_GLOBAL_HOUR:
+        _R98_SPEND["gated"] += 1
+        print(f"[R98 GLOBAL CAP] ⚠️ ยิง API ครบ {R98_GLOBAL_HOUR} ครั้งใน 1 ชม. "
+              f"— หยุดชั่วคราว เช็คว่ามีคนยิงถล่มไหม")
+        return False, R98_FLOOD_MSG
+
+    # (3) เพดานต่อคน
+    dq = _R98_HITS.setdefault(uid, _dq98())
+    if len(dq) >= R98_HOUR_MAX:
+        _R98_SPEND["gated"] += 1
+        try:
+            _bl9.BotEngine._add_signal(
+                state,
+                f"🚧 พิมพ์ถี่มาก — ยิง AI ครบ {R98_HOUR_MAX} ครั้งใน 1 ชม. "
+                f"บอทหยุดใช้ AI ชั่วคราว ให้คนเข้าไปดู")
+        except Exception:
+            pass
+        print(f"[R98 RATE] {uid[:8]}... ครบ {R98_HOUR_MAX} ครั้ง/ชม. — ไม่ยิง API")
+        return False, R98_FLOOD_MSG
+
+    today = _t98.strftime("%Y-%m-%d", _t98.gmtime(now))
+    d = _R98_DAY.get(uid)
+    if not d or d[0] != today:
+        d = [today, 0]
+        _R98_DAY[uid] = d
+    if d[1] >= R98_DAY_MAX:
+        _R98_SPEND["gated"] += 1
+        print(f"[R98 DAY CAP] {uid[:8]}... ครบ {R98_DAY_MAX} ครั้ง/วัน — ไม่ยิง API")
+        return False, R98_FLOOD_MSG
+
+    dq.append(now)
+    d[1] += 1
+    _R98_GLOBAL.append(now)
+    return True, ""
+
+
+try:
+    _R98_BASE_ASK = _bl9.BotEngine._ask_claude
+
+    def _ask_claude_r98(self, user_message, user_id, gender="",
+                        done=False, state=None):
+        _st = state or {}
+        if not _bl9.ANTHROPIC_API_KEY:
+            return _bl9.STATUS_MSG if done else _bl9.FALLBACK_MSG
+
+        _ok, _canned = _r98_gate(user_id, user_message, _st)
+        if not _ok:
+            return _canned or (_bl9.STATUS_MSG if done else _bl9.FALLBACK_MSG)
+
+        # ---------- ประวัติ (เหมือนเดิมทุกประการ) ----------
+        history = _bl9._conversations.get(user_id, [])[-10:]
+        if not history and _bl9.pg_store is not None:
+            try:
+                history = _bl9.pg_store.load_history(
+                    _st.get("page_id", ""), user_id, 10, _bl9._hash_psid(user_id))
+            except Exception:
+                history = []
+            if history:
+                print(f"[PG] AI ใช้ประวัติ {len(history)} ท่อนจาก Postgres")
+        messages = history + [{"role": "user", "content": user_message}]
+
+        _angry = bool(_st.get("angry_now"))
+        _smart = _angry or _bl9._needs_smart(user_message, _st)
+        _model = _bl9.CLAUDE_MODEL_SMART if _smart else _bl9.CLAUDE_MODEL
+
+        # ---------- หัวใจของ r98: แยก cache ออกจากกฎแปรผัน ----------
+        # บล็อก 1 = ก้อนใหญ่ที่เหมือนกันทุกครั้ง -> cache เดียวต่อโมเดล อยู่ warm
+        # บล็อก 2 = กฎที่เปลี่ยนตามเทิร์น -> ไม่ cache (สั้นมาก ไม่คุ้มและทำ key แตก)
+        _sys = [{"type": "text",
+                 "text": _bl9.WEC_SYSTEM_PROMPT,
+                 "cache_control": {"type": "ephemeral"}}]
+        _tail = ""
+        if gender == "female":
+            _tail += _bl9.FEMALE_VOICE_RULE
+        if _angry:
+            _tail += _bl9.ANGER_RULE
+            _st.pop("angry_now", None)
+        if _smart:
+            _tail += _bl9.BEHAVIOR_READ_RULE
+        if _tail:
+            _sys.append({"type": "text", "text": _tail})
+
+        try:
+            resp = requests.post(
+                _bl9.ANTHROPIC_URL,
+                headers={
+                    "x-api-key": _bl9.ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
+                },
+                json={"model": _model, "max_tokens": 400,
+                      "system": _sys, "messages": messages},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                _body = resp.text[:200]
+                print(f"[CLAUDE ERROR] {resp.status_code}: {_body}")
+                if "credit balance" in _body or "billing" in _body.lower():
+                    _R98_CREDIT["fails"] += 1
+                    if _R98_CREDIT["fails"] >= R98_CREDIT_FAILS:
+                        _R98_CREDIT["until"] = _t98.time() + R98_CREDIT_COOL
+                        print("[R98 CREDIT] 🔴🔴🔴 เครดิต Anthropic หมด — "
+                              f"หยุดยิง API {R98_CREDIT_COOL // 60} นาที "
+                              "ลูกค้าจะได้ข้อความให้รอที่ปรึกษาแทน "
+                              "→ เติมเงินที่ platform.claude.com/settings/billing")
+                        try:
+                            _bl9.BotEngine._add_signal(
+                                _st,
+                                "🔴 เครดิต AI หมด — บอทตอบด้วยข้อความสำรอง "
+                                "ต้องมีคนเข้าไปคุยแทน")
+                        except Exception:
+                            pass
+                    return R98_AIDOWN_MSG if not done else _bl9.STATUS_MSG
+                return _bl9.STATUS_MSG if done else _bl9.FALLBACK_MSG
+
+            _R98_CREDIT["fails"] = 0
+            _R98_CREDIT["until"] = 0.0
+            data = resp.json()
+
+            # ---------- วัดเงิน ----------
+            try:
+                u = data.get("usage") or {}
+                _in = int(u.get("input_tokens") or 0)
+                _cw = int(u.get("cache_creation_input_tokens") or 0)
+                _cr = int(u.get("cache_read_input_tokens") or 0)
+                _out = int(u.get("output_tokens") or 0)
+                p = _r98_price(_model)
+                _usd = (_in * p[0] + _cw * p[1] + _cr * p[2] + _out * p[3]) / 1e6
+                _R98_SPEND["usd"] += _usd
+                _R98_SPEND["calls"] += 1
+                _R98_SPEND["in"] += _in
+                _R98_SPEND["cw"] += _cw
+                _R98_SPEND["cr"] += _cr
+                _R98_SPEND["out"] += _out
+                _hit = "HIT " if _cr > _cw else "MISS"
+                print(f"[CLAUDE $] {_model} smart={int(_smart)} cache={_hit} "
+                      f"in={_in} cw={_cw} cr={_cr} out={_out} "
+                      f"= ${_usd:.5f} | รวม {_R98_SPEND['calls']} ครั้ง "
+                      f"${_R98_SPEND['usd']:.3f} "
+                      f"(ซ้ำ {_R98_SPEND['repeat']} · กัน {_R98_SPEND['gated']})")
+            except Exception as _ue:
+                print(f"[R98 USAGE] อ่านไม่ได้: {_ue}")
+
+            raw = data["content"][0]["text"].strip()
+            if data.get("stop_reason") == "max_tokens":
+                print(f"[CLAUDE TRUNCATED] {len(raw)} chars -> trimming")
+                raw = _bl9._trim_to_sentence(raw)
+                if not raw:
+                    return _bl9.STATUS_MSG if done else _bl9.FALLBACK_MSG
+            raw = self._take_behavior(raw, _st, _model)
+            text = self._sanitize(raw)
+            text = _bl9._strip_dup_greeting(text)
+            before = len(text)
+            text = _bl9._limit_sentences(text)
+            if before > len(text):
+                print(f"[CLAUDE TRIMMED] {before} -> {len(text)} chars")
+            if done and any(k in text for k in ["ขอเบอร์", "ID LINE", "เบอร์ติดต่อ"]):
+                return _bl9.STATUS_MSG
+            out = text or (_bl9.STATUS_MSG if done else _bl9.FALLBACK_MSG)
+            # จำไว้เผื่อลูกค้าพิมพ์ซ้ำ -> ตอบเดิมฟรี
+            _R98_LAST[user_id] = [_r98_norm(user_message), out, _t98.time()]
+            return out
+        except Exception as e:
+            print(f"[CLAUDE EXCEPTION] {e}")
+            return _bl9.STATUS_MSG if done else _bl9.FALLBACK_MSG
+
+    _bl9.BotEngine._ask_claude = _ask_claude_r98
+    print(f"[R98] cache แยกบล็อกแล้ว (ก้อนคงที่ {len(_bl9.WEC_SYSTEM_PROMPT):,} ตัว) "
+          f"· log ค่าใช้จ่ายทุกครั้ง · เพดาน {R98_HOUR_MAX}/ชม. {R98_DAY_MAX}/วัน/คน "
+          f"· รวม {R98_GLOBAL_HOUR}/ชม. · เบรกเกอร์เครดิต {R98_CREDIT_FAILS} ครั้ง")
+except Exception as _e:
+    print(f"[R98 ERROR] ต่อไม่ติด — ใช้ _ask_claude เดิมทุกประการ: {_e}")
+
+
 # ======================================================
 # Main
 # ======================================================
