@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r107"
+BOT_REVISION = "r108"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -5518,8 +5518,8 @@ except Exception as _e106:
 R107_ASK_AGE = True
 # ต้องมี "เท่าไหร่ครับ" เพื่อให้ _r97_is_question() มองเห็นว่าเป็นคำถาม
 # ไม่งั้นตัวนับ 1 คำถาม/เทิร์น ของแพตช์อื่นจะนับข้อนี้ไม่ติด
-R107_AGE_Q = ("ขออีกข้อเดียวครับ คุณลูกค้าอายุเท่าไหร่ครับ "
-              "เดี๋ยวผมประเมินวงเงินคร่าวๆ ให้เลย")
+R107_AGE_Q = ("เดี๋ยวผมประเมินวงเงินคร่าวๆ ให้เลยครับ "
+              "คุณลูกค้าอายุเท่าไหร่ครับ")
 
 try:
     _R107_BASE_DECIDE = CalmBotEngine._decide
@@ -5612,6 +5612,91 @@ try:
     print("[R107] ไม่แตะเกณฑ์ ไม่แตะสูตร ไม่แตะเกรด ไม่แตะชีต ไม่แตะการแจกเคส")
 except Exception as _e:
     print(f"[R107 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+# ============================================================================
+# r108 — ต้องรู้อายุ "ก่อน" ขอเบอร์ เพราะอายุเปลี่ยนเกรด
+#
+# Gift 30 ส.ค.: "ควรถามอายุก่อนจะขอเบอร์ด้วย เพราะมันจัดเกรดลูกค้า"
+#             + "มันขออีกข้อเดียว หลายครั้งก็ตลกๆ อยู่นะ" (แก้คำพูดแล้วข้างบน)
+#
+# ทำไมถึงสำคัญจริง — ธงของ r92b พูดเองอยู่แล้ว:
+#   "วงเงิน X นี้คิดบนสมมติฐานอายุ 35 ปี ถ้าอายุจริง 55+ วงเงินจะหายเกือบครึ่ง"
+# แปลว่าเกรดที่ส่งให้เซล/ชีต/การตลาด ตอนไม่รู้อายุ = เกรดที่ยังไม่ยืนยัน
+# ขอเบอร์แล้วแจกเคสตอนนั้น = แจกเกรดที่อาจผิดครึ่งหนึ่งเข้าคิวเซล
+#
+# กติกา: จะขอเบอร์ได้ ต้องรู้อายุก่อน (กั้นได้ 2 รอบ แล้วปล่อย + ติดธง)
+#   · ห้ามทิ้งเคสเด็ดขาด — ครบโควตาแล้วปล่อยขอเบอร์ตามเดิม แต่ติดธงให้เซลรู้
+#   · ใช้ท่อ awaiting_age เดิมของ bot_logic (บล็อก 0.46) เก็บคำตอบ
+#     -> ลูกค้าตอบเลขเปล่า "34" ก็อ่านออก เพราะมีบริบทว่ากำลังถามอายุ
+#   · เคลียร์ awaiting ทิ้งด้วย กัน "34" หล่นไปลงช่องเบอร์
+#     ปลอดภัยเพราะ _next_missing คำนวณช่องถัดไปจาก data ใหม่ทุกเทิร์นอยู่แล้ว
+#   · ซื้อสด / เซลรับช่วง / ปิดเคสแล้ว / รู้อายุอยู่แล้ว = ไม่กั้น
+# ============================================================================
+R108_MAX_ASK = 2
+_R108_CONTACT_MARK = ("ขอเบอร์", "เบอร์ติดต่อ", "เบอร์โทร", "ขอช่องทางติดต่อ",
+                      "ไลน์ไอดี", "LINE ID", "ขอเบอร์ติดต่อ")
+
+try:
+    _R108_BASE_DECIDE = CalmBotEngine._decide
+
+    def _r108_asks_contact(state, bubbles):
+        try:
+            if (state or {}).get("awaiting") == "contact":
+                return True
+            return any(any(k in str(b) for k in _R108_CONTACT_MARK) for b in bubbles)
+        except Exception:
+            return False
+
+    def _decide_r108(self, msg, user_id, state, bucket, is_new):
+        bubbles, grade = _R108_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            _uid = str(user_id)[:8]
+            st = state or {}
+            d = st.get("data") or {}
+            if (d.get("age") is not None or d.get("co_age") is not None
+                    or d.get("cash") or st.get("awaiting_age") or st.get("age_pending")
+                    or st.get("handover") or st.get("closed") or st.get("done")
+                    or st.get("bot_off")):
+                return bubbles, grade
+            if not isinstance(bubbles, list):
+                bubbles = [bubbles] if bubbles else []
+            if not _r108_asks_contact(st, bubbles):
+                return bubbles, grade
+
+            _n = int(st.get("_r108_n") or 0)
+            if _n >= R108_MAX_ASK:
+                if not st.get("_r108_flag"):
+                    st["_r108_flag"] = True
+                    try:
+                        _bl9.BotEngine._add_signal(
+                            st, "⚠️ ขอเบอร์ทั้งที่ยังไม่รู้อายุ (ถามครบโควตาแล้ว) "
+                                "— เกรดยังไม่ยืนยัน วงเงินคิดบนสมมติฐานอายุ "
+                                f"{_bl9.DEFAULT_AGE} ปี · ถามอายุตอนโทรก่อนเสนอห้อง")
+                    except Exception:
+                        pass
+                    print(f"[R108] {_uid}... ถามอายุครบโควตาแล้ว — "
+                          "ปล่อยขอเบอร์ + ติดธงให้เซล (ไม่ทิ้งเคส)")
+                return bubbles, grade
+
+            st["_r108_n"] = _n + 1
+            st["awaiting_age"] = True
+            st["awaiting"] = None          # กัน "34" หล่นลงช่องเบอร์
+            bubbles = [b for b in bubbles
+                       if not any(k in str(b) for k in _R108_CONTACT_MARK)]
+            bubbles = [b for b in bubbles if not _r97_is_question(b)]
+            bubbles.append(R107_AGE_Q)
+            print(f"[R108] {_uid}... ยังไม่รู้อายุ — ถามอายุก่อนขอเบอร์ "
+                  f"รอบ {_n + 1}/{R108_MAX_ASK}")
+        except Exception as _e108:
+            print(f"[R108 DECIDE ERROR] {_e108} — ใช้ทางเดิม")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r108
+    print(f"[R108] ต้องรู้อายุก่อนขอเบอร์ (กั้น {R108_MAX_ASK} รอบ แล้วปล่อย + ติดธง)")
+    print(f"[R108] คำถามอายุ: {R107_AGE_Q}")
+except Exception as _e:
+    print(f"[R108 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
