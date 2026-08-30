@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r106"
+BOT_REVISION = "r107"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -5478,6 +5478,140 @@ try:
     print("[NO REASK ZONE] คีย์กันถามซ้ำอัปเดตตามข้อความใหม่แล้ว")
 except Exception as _e106:
     print(f"[R106 PATCH FAIL] {_e106} — ใช้ข้อความเดิม ไม่กระทบการทำงาน")
+
+
+# ============================================================================
+# r107 — บอกวงเงินกับ "ลูกค้า" เอง ไม่ต้องรอให้เขาถาม
+#
+# Gift 30 ส.ค.: "อันไหนดีที่สุด แก้แล้วได้ภาพใหญ่ ... ได้ใจลูกค้า (ลูกค้าที่ใช่)"
+#
+# หลักฐาน:
+#   · log 22 ชม.: บอทแจ้งวงเงินให้ลูกค้า 0 ครั้ง (ลูกค้าถาม 2 ครั้ง ข้อมูลไม่ครบ)
+#     เพราะ r97 ข้อ C ติดเงื่อนไข "_r97_teased หรือ ลูกค้าถามเอง" เท่านั้น
+#   · ส.ค. ทุกเพจ: ทักใหม่ 1,749 · ตีเกรดได้ 719 -> 1,030 คน (59%) ตายกลางทาง
+#   · สแกนสุขภาพบอท 171 เคส: ตายที่ await_objective / qualifying / await_income
+#     = ตายตอนถูกถาม 2-3 ข้อแรก โดยยังไม่ได้อะไรกลับเลย
+#   · r104 (วันนี้) ต่อท่อวงเงินให้ ชีต/เซล/การตลาด/CEO ครบแล้ว
+#     เหลือคนเดียวที่ยังไม่รู้ = คนที่ทักมาถาม
+#
+# เปลี่ยนแค่ "เมื่อไหร่" ไม่เปลี่ยน "อะไร":
+#   ตัวเลขยังเป็นชุด r97 เดิม (กดลงเหลือ 70-80% ของจริง) · เกรด/สูตร/ชีตไม่แตะ
+#   _r97_quote() คุมความปลอดภัยเองอยู่แล้ว — ไม่รู้รายได้/ภาระ/อายุ = ไม่พูด
+#
+# ข้อ ก) ข้อมูลครบ -> แจ้งวงเงินเลย
+#   · ครั้งเดียวต่อแชท (ใช้ธง _r97_quoted ร่วมกับ r97 ไม่ซ้อนกัน)
+#   · เทิร์นนั้นตัดคำถามอื่นทิ้ง = "ให้ข้อมูล" ไม่ใช่ "ให้+ถามรัว"
+#     (แพตเทิร์นเดียวกับ r97 ข้อ A ที่ Gift สั่งไว้ว่า 1 คำถาม/เทิร์น
+#      ข้อที่ตัดยังว่างอยู่ _next_missing จะถามเองเทิร์นถัดไป)
+#   · ถ้ายังไม่ผ่านด่านขอเบอร์ของ r102 -> ตัดประโยคขอเบอร์ออก เหลือแต่ตัวเลข
+#
+# ข้อ ข) ติดแค่ "ไม่รู้อายุ" อย่างเดียว -> ถามอายุแบบมีเหตุผลให้ตอบ
+#   หมายเหตุถึง Gift: ข้อนี้ปรับกติกา 19 ส.ค. ("ถามอายุเฉพาะตอนเจอสัญญาณ
+#   เกษียณ/บำนาญ ไม่ถามทุกคน เพราะ funnel จะยาวขึ้นโดยไม่จำเป็น")
+#   เหตุผลที่ขอปรับ: ตอนนั้นถามอายุแล้วลูกค้าไม่ได้อะไรกลับ = ยาวขึ้นเปล่าๆ จริง
+#   ตอนนี้อายุคือชิ้นสุดท้ายที่ปลดล็อกตัวเลขที่เขาอยากรู้ = ถามแล้วมีของแลก
+#   ถามแทนคำถามเดิมของเทิร์นนั้น (ไม่ได้เพิ่มจำนวนคำถาม) · ครั้งเดียวต่อแชท
+#   ไม่เอาข้อนี้: ตั้ง R107_ASK_AGE = False บรรทัดเดียว
+#
+# ห้ามแทรกเมื่อ: เซลรับช่วงอยู่ · ปิดเคสแล้ว · สายเจ้าของห้อง/ผู้เช่า/ไม่รับเคส
+# ============================================================================
+R107_ASK_AGE = True
+# ต้องมี "เท่าไหร่ครับ" เพื่อให้ _r97_is_question() มองเห็นว่าเป็นคำถาม
+# ไม่งั้นตัวนับ 1 คำถาม/เทิร์น ของแพตช์อื่นจะนับข้อนี้ไม่ติด
+R107_AGE_Q = ("ขออีกข้อเดียวครับ คุณลูกค้าอายุเท่าไหร่ครับ "
+              "เดี๋ยวผมประเมินวงเงินคร่าวๆ ให้เลย")
+
+try:
+    _R107_BASE_DECIDE = CalmBotEngine._decide
+
+    def _r107_skip(state, grade):
+        st = state or {}
+        if st.get("_r97_quoted") or st.get("_r107_done"):
+            return True
+        if st.get("closed") or st.get("done") or st.get("bot_off") or st.get("handover"):
+            return True
+        g = str(grade or "").strip().upper()[:1]
+        if g in ("O", "R", "X"):
+            return True
+        d = st.get("data") or {}
+        if d.get("cash"):            # ซื้อสด ไม่ต้องพูดเรื่องวงเงินกู้
+            return True
+        return False
+
+    def _r107_age_is_only_blocker(d):
+        """ติดแค่ 'ไม่รู้อายุ' จริงไหม — รายได้/ภาระต้องมีครบแล้ว"""
+        try:
+            inc = (d.get("income_total") or d.get("income_baht")
+                   or _bl9._parse_income(str(d.get("income", ""))))
+            if not inc:
+                return False
+            debt = d.get("debt_baht")
+            if debt is None:
+                debt = _bl9._parse_debt_monthly(str(d.get("debt", "")))
+            if debt is None:
+                return False
+            return (d.get("age") is None and d.get("co_age") is None
+                    and not d.get("co_borrower_income"))
+        except Exception:
+            return False
+
+    def _decide_r107(self, msg, user_id, state, bucket, is_new):
+        bubbles, grade = _R107_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            _uid = str(user_id)[:8]
+            st = state or {}
+            if _r107_skip(st, grade):
+                return bubbles, grade
+            d = st.get("data") or {}
+            if not isinstance(bubbles, list):
+                bubbles = [bubbles] if bubbles else []
+
+            # ---------- ก) ข้อมูลครบ -> แจ้งวงเงินเลย ----------
+            _q = _r97_quote(d, st)
+            if _q:
+                st["_r97_quoted"] = True
+                st["_r107_done"] = True
+                try:
+                    if not _r102_submittable(d, st):
+                        _q = [b for b in _q if b != R97_SERVICE_LINE]
+                except Exception:
+                    pass
+                _kept = [b for b in bubbles
+                         if not _r97_is_question(b)
+                         and not any(k in str(b) for k in _R97_DROP)]
+                bubbles = _kept + _q
+                print(f"[R107] {_uid}... แจ้งวงเงินเองโดยไม่ต้องรอลูกค้าถาม "
+                      f"({len(_q)} บับเบิล · ตัดคำถามอื่นในเทิร์นนี้ทิ้ง)")
+                return bubbles, grade
+
+            # ---------- ข) ติดแค่ไม่รู้อายุ -> ถามอายุแบบมีของแลก ----------
+            if (R107_ASK_AGE and not st.get("age_asked")
+                    and not st.get("_r107_age_q")
+                    and _r107_age_is_only_blocker(d)):
+                st["_r107_age_q"] = True
+                st["age_asked"] = True
+                st["age_pending"] = True
+                _kept = [b for b in bubbles if not _r97_is_question(b)]
+                bubbles = _kept + [R107_AGE_Q]
+                try:
+                    _bl9.BotEngine._add_signal(
+                        st, "ถามอายุเพื่อปลดล็อกการแจ้งวงเงินให้ลูกค้า "
+                            "(รายได้/ภาระครบแล้ว เหลืออายุอย่างเดียว)")
+                except Exception:
+                    pass
+                print(f"[R107] {_uid}... รายได้+ภาระครบ เหลือแค่อายุ — "
+                      f"ถามอายุแทนคำถามเดิมของเทิร์นนี้")
+        except Exception as _e107:
+            print(f"[R107 DECIDE ERROR] {_e107} — ใช้ทางเดิม")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r107
+    print(f"[R107] บอทบอกวงเงินกับลูกค้าเองแล้ว (ตัวเลขชุดเดิม {R97_QUOTE_PCT:.0%}-"
+          f"{R97_QUOTE_PCT+R97_QUOTE_SPAN:.0%} ของจริง) · "
+          f"ถามอายุเมื่อเหลือติดอายุอย่างเดียว = {R107_ASK_AGE}")
+    print("[R107] ไม่แตะเกณฑ์ ไม่แตะสูตร ไม่แตะเกรด ไม่แตะชีต ไม่แตะการแจกเคส")
+except Exception as _e:
+    print(f"[R107 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
