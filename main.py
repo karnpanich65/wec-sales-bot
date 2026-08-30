@@ -5699,6 +5699,37 @@ except Exception as _e:
     print(f"[R108 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
+# ----------------------------------------------------------------------
+# r109 (30 ส.ค. 2569) — ส่ง "อายุ" เข้าชีต
+# ----------------------------------------------------------------------
+# บอทถามอายุมาตั้งแต่ r107/r108 และใช้คำนวณวงเงินจริง (_capacity: room = cap - age)
+# แต่ payload ที่ยิงเข้า Apps Script ไม่เคยมีช่องนี้ -> อายุที่ได้มาถูกทิ้งทุกเคส
+# ชีตเลยไม่มีอายุสักแถว ทั้งที่เป็นตัวแปรที่ทำให้วงเงินต่างกันเป็นล้าน
+# ใส่ที่ _income_numbers เพราะเป็นทางผ่านเดียวของทุกคอลัมน์ตัวเลขที่เข้าชีต (เหมือน r104)
+# ปลายทาง: Apps Script P4_C.AGE = คอลัมน์ 36 (P4_COLS 35 -> 36)
+try:
+    _R109_PREV_INUM = _bl9.BotEngine._income_numbers
+
+    def _income_numbers_r109(data):
+        _out = dict(_R109_PREV_INUM(data))
+        try:
+            _age = (data or {}).get("age")
+            if _age in (None, ""):
+                _out["age"] = ""
+            else:
+                _a = int(_age)
+                # กันค่าเพี้ยน (เช่นลูกค้าพิมพ์ปี พ.ศ. หรือเลขมั่ว) ไม่ให้ลงชีต
+                _out["age"] = _a if 15 <= _a <= 90 else ""
+        except Exception:
+            _out["age"] = ""
+        return _out
+
+    _bl9.BotEngine._income_numbers = staticmethod(_income_numbers_r109)
+    print("[R109] ส่งอายุเข้าชีต (คอลัมน์ 36) ผ่าน _income_numbers")
+except Exception as _e:
+    print(f"[R109 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
