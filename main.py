@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r97"
+BOT_REVISION = "r103"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -2852,21 +2852,41 @@ def _grade_r89(self, data, state=None):
         return "A"
     if cap_clear >= R89_UNIT_PRICE:
         # ข้อ 10 — เคสบริดจ์ · เช็ค "บริดจ์แท้" สำหรับคิวโม/เล็ก
+        # r103 — ธงบอกเซลเป็น "ตัวเลข" ไม่ใช่คำตัดสิน
+        #        (เราไม่รู้ว่าลูกค้ามีเงินก้อนปิดเองไหม จึงห้ามสรุปแทนเขา)
         _tot = data.get("debt_total_baht")
         _gap = cap_clear - R89_UNIT_PRICE
-        if _tot:
-            if _gap >= _tot:
-                data["bridge_ok"] = 1
+        try:
+            _cash = ("ลูกค้าแจ้งว่ามีเงินก้อน"
+                     if data.get("cash")
+                     else "ลูกค้ายังไม่ได้บอกว่ามีเงินก้อนหรือไม่")
+            _clear = f"ปิดหนี้แล้วกู้ได้ {cap_clear/1e6:.2f} ล้าน"
+            if _tot:
+                if _gap >= _tot:
+                    data["bridge_ok"] = 1
+                    self._add_signal(
+                        st, f"💰 {_clear} · ยอดหนี้รวม {int(_tot):,} บาท · "
+                            f"ส่วนต่างวงเงิน {_gap/1e6:.2f} ล้าน คลุมยอดหนี้ครบ · "
+                            f"{_cash}")
+                else:
+                    self._add_signal(
+                        st, f"💰 {_clear} · ยอดหนี้รวม {int(_tot):,} บาท · "
+                            f"ส่วนต่างวงเงิน {_gap/1e6:.2f} ล้าน "
+                            f"ต้องเคลียร์เพิ่มอีก {int(_tot - _gap):,} บาท · "
+                            f"{_cash}")
+            elif state is not None:
                 self._add_signal(
-                    st, f"[บริดจ์แท้] ส่วนต่างวงเงิน {_gap/1e6:.2f}M ≥ "
-                        f"ยอดหนี้รวม {_tot/1e6:.2f}M — เข้าเกณฑ์แจกโม/เล็ก")
-            else:
-                self._add_signal(
-                    st, f"ส่วนต่างวงเงิน {_gap/1e6:.2f}M ไม่พอปิดยอดหนี้รวม "
-                        f"{_tot/1e6:.2f}M — ไม่ใช่บริดจ์แท้ (ไม่เข้าคิวโม/เล็ก)")
-        elif state is not None:
-            self._add_signal(st, "ยังไม่รู้ยอดหนี้รวมคงเหลือ — เช็คบริดจ์แท้ไม่ได้ "
-                                 "(ไม่เข้าคิวโม/เล็ก จนกว่าเซลยืนยันยอด)")
+                    st, f"💰 {_clear} · ส่วนต่างวงเงิน {_gap/1e6:.2f} ล้าน · "
+                        f"ยังไม่รู้ยอดหนี้รวมคงเหลือ — เซลถามยอดปิดจริงก่อนวางแผน")
+        except Exception as _e103:
+            print(f"[R103 SIGNAL ERROR] {_e103} — ใช้ข้อความสำรอง")
+            try:
+                if _tot and _gap >= _tot:
+                    data["bridge_ok"] = 1
+                self._add_signal(st, f"เคสบริดจ์ · ปิดหนี้แล้วกู้ได้ "
+                                     f"{cap_clear/1e6:.2f} ล้าน")
+            except Exception:
+                pass
         return "B"
     # ข้อ 11 + 12 — ยุบ D เข้า C ทั้งหมด (เกณฑ์ 28 ส.ค.)
     if debt > income and state is not None:
