@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r104"
+BOT_REVISION = "r105"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -4958,11 +4958,20 @@ try:
         # state ถูกโหลดจาก Postgres มาก่อนถึงตรงนี้แล้ว -> ทนต่อการ deploy
         try:
             _st = state or {}
+            _d99 = _st.get("data") or {}
+            # r105 — เดิมปิดเฉพาะ "เทิร์นแรกเป๊ะๆ" (data ว่าง + ไม่มี awaiting)
+            # เคสจริง 30 ส.ค. เพจ Wealth Owner (Kam Phl):
+            #   บอทถาม "ซื้อปล่อยเช่า หรืออยู่เองคะ"  -> awaiting=objective
+            #   ลูกค้า "สนใจรายละเอียด"               <- ไม่ใช่คำตอบ แต่มีคำว่า "รายละเอียด"
+            #   บอทเท 3 ฟองรวด: ถามวัตถุประสงค์ซ้ำ + ย่าน/ราคา 2.1-11 ล้าน + ขอเบอร์
+            # ทีม MKT: "ลูกค้าเห็นแบบนี้อ่านไม่ตอบกันหมดเลย"
+            # ตราบใดที่ยังไม่รู้ว่าอยู่เองหรือลงทุน = ยังไม่เทชุดย่าน/ราคา/ขอเบอร์
+            # คำถามทำเลจริง ("แถวไหนบ้าง") ยังตอบเหมือนเดิม (_ORIG_ZONE_ASK)
             _R99_OPEN_FLAG["first"] = (
-                not (_st.get("data") or {})
-                and not _st.get("awaiting")
+                not _d99.get("objective")
                 and not _st.get("zone_told")
-                and not _st.get("done"))
+                and not _st.get("done")
+                and (not _st.get("awaiting") or _st.get("awaiting") == "objective"))
         except Exception as _e:
             _R99_OPEN_FLAG["first"] = False
             print(f"[R99 FLAG ERROR] {_e}")
@@ -5347,6 +5356,72 @@ try:
           "— ช่องการตลาดที่ว่างมาตั้งแต่วันแรก")
 except Exception as _e104:
     print(f"[R104 PATCH FAIL] {_e104} — ใช้ของเดิม ไม่กระทบการทำงาน")
+
+
+# ============================================================================
+# r105 — เซลพิมพ์ต่อโดยไม่ทวนชื่อ บอทต้องหยุด (ทีม MKT 30 ส.ค.)
+#
+# "พอเราพิมพ์ชื่อไป บอทมันยังไม่หยุดช่วยตอบนะคะ ของ wealth owner"
+#
+# หลักฐานจาก log 30 ส.ค. — กติกา r57 (ต้องมีชื่อเซลถึงจะหยุด) แก้ปัญหา
+# ข้อความออโต้ได้จริง แต่เหวี่ยงกลับอีกทาง: เซล "คนจริง" ที่พิมพ์ต่อ
+# โดยไม่ทวนชื่อ ถูกนับเป็นออโต้ -> บอทพิมพ์ทับ
+#   07:16 [ECHO IGNORE] 'แฟนมีรายได้ต่อเดือนประมาณเท่าไหร่คะ'
+#   09:06 [ECHO IGNORE] 'ครับผม ไม่ทราบ ลูกค้าเป็น พนักงานประจำ /'  (2 แชท)
+#
+# กติกาใหม่ (แคบมาก ไม่รื้อ r57):
+#   ถ้าแชทนี้ "เคยมีเซลตัวจริงแนะนำตัวแล้ว" (handover_by เป็นชื่อคน)
+#   ข้อความจากฝั่งเพจครั้งต่อ ๆ ไปถือเป็นคนเสมอ ไม่ต้องพิมพ์ชื่อซ้ำ
+#   แชทที่ยังไม่เคยมีเซลเลย = ใช้กติกา r57 เดิมทุกประการ (ออโต้ยังไม่หยุดบอท)
+#
+# ค่าที่ขึ้นต้นด้วย "(" เป็นสถานะระบบ ไม่ใช่ชื่อคน — ไม่นับ
+#   เช่น "(เพจยังไม่เปิดบอทตอบ)" "(ปิดบอทรายเพจ)" "(เคสร้องเรียน — รอผู้จัดการ)"
+#
+# ทำงานหลังของเดิมเสมอ: ให้ handle_page_echo ตัวจริงตัดสินก่อน
+# แล้วค่อยอัปเกรดเฉพาะผลลัพธ์ที่ออกมาเป็น "logged" (= โดน ECHO IGNORE)
+# -> พฤติกรรมเดิมทุกเส้นทางไม่ถูกแตะ
+# ============================================================================
+try:
+    import time as _t105
+    _R105_BASE_ECHO = CalmBotEngine.handle_page_echo
+
+    def _handle_page_echo_r105(self, customer_id, text, platform="facebook",
+                               page_id="", from_app=False):
+        _res = _R105_BASE_ECHO(self, customer_id, text, platform, page_id, from_app)
+        try:
+            if _res != "logged" or from_app:
+                return _res
+            _skey = f"{page_id}:{customer_id}" if page_id else customer_id
+            _st = _bl9._lead_states.get(_skey) or {}
+            _prev = str(_st.get("handover_by") or "").strip()
+            if not _prev or _prev.startswith("(") or _st.get("handover"):
+                return _res
+            _now105 = int(_t105.time())
+            _st["handover"] = True
+            _st["handover_at"] = _now105
+            _st["handover_sale_at"] = _now105
+            _st["handover_cust"] = 0
+            _st.pop("handover_idle_released", None)
+            _bl9._lead_states[_skey] = _st
+            try:
+                _bl9.BotEngine._add_signal(
+                    _st, f"เซล{_prev} พิมพ์ต่อในแชทนี้ (ไม่ได้ทวนชื่อ) "
+                         f"— บอทหยุดตอบต่อ ไม่พิมพ์ทับ")
+            except Exception:
+                pass
+            print(f"[R105 HANDOVER] {str(customer_id)[:8]}... เซล{_prev} "
+                  f"เคยรับช่วงแชทนี้แล้ว — ข้อความฝั่งเพจถือเป็นคน "
+                  f"| {str(text or '')[:40]!r}")
+            return "handover"
+        except Exception as _e105:
+            print(f"[R105 ECHO ERROR] {_e105} — ใช้ผลของเดิม")
+        return _res
+
+    CalmBotEngine.handle_page_echo = _handle_page_echo_r105
+    print("[R105] เซลที่เคยรับช่วงแล้ว พิมพ์ต่อโดยไม่ทวนชื่อ = บอทหยุด "
+          "(แชทที่ยังไม่เคยมีเซล ใช้กติกา r57 เดิม)")
+except Exception as _e:
+    print(f"[R105 PATCH FAIL] {_e} — ใช้ของเดิม ไม่กระทบการทำงาน")
 
 
 if __name__ == "__main__":
