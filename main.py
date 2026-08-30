@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r103"
+BOT_REVISION = "r104"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -5307,6 +5307,48 @@ except Exception as _e:
 # ======================================================
 # Main
 # ======================================================
+# ============================================================================
+# r104 — ส่ง "วงเงินที่คำนวณได้" เข้าชีต
+#
+# Gift 30 ส.ค.: "ไม่ต้องระบบให้เซลรู้แค่แจก แต่ระบุให้ marketing รู้"
+#
+# ตรวจแล้วพบว่าท่อ marketing มีอยู่ครบ (คิวแจกเคส / ลีดเต็ม / สรุปรายวัน /
+# สรุปตาม Ad ID) แต่คอลัมน์ "วงเงินกู้ที่คำนวณได้ (บาท)" ว่างเปล่าทุกแถว
+# ตั้งแต่วันแรก เพราะ payload ที่บอทยิงเข้าชีตไม่เคยมีตัวเลขนี้เลย
+# ทั้งที่ _grade_r89 คำนวณไว้แล้วใน data["capacity_now"] / ["capacity_clear"]
+#
+# แก้ที่ _income_numbers เพราะถูก spread เข้า payload ทั้ง 2 ทาง
+# (_send_to_sheets และ _upsert_lead) — จุดเดียวครอบคลุมหมด
+# ห้ามทำให้ชุดเดิมพัง: ถ้าอะไรพลาด ให้คืนค่าชุดเดิมเสมอ
+# ============================================================================
+try:
+    _R104_ORIG_INUM = _bl9.BotEngine._income_numbers
+
+    def _income_numbers_r104(data):
+        try:
+            _base = _R104_ORIG_INUM(data)
+        except Exception as _e104a:
+            print(f"[R104 BASE ERROR] {_e104a}")
+            raise
+        try:
+            out = dict(_base)
+            _d = data or {}
+            _now = _d.get("capacity_now")
+            _clr = _d.get("capacity_clear")
+            out["capacity"] = "" if _now in (None, "") else int(_now)
+            out["capacity_clear"] = "" if _clr in (None, "") else int(_clr)
+            return out
+        except Exception as _e104b:
+            print(f"[R104 CAP ERROR] {_e104b} — ส่งชุดเดิมแทน")
+            return _base
+
+    _bl9.BotEngine._income_numbers = staticmethod(_income_numbers_r104)
+    print("[R104] ส่งวงเงินประเมินเข้าชีตแล้ว (capacity + capacity_clear) "
+          "— ช่องการตลาดที่ว่างมาตั้งแต่วันแรก")
+except Exception as _e104:
+    print(f"[R104 PATCH FAIL] {_e104} — ใช้ของเดิม ไม่กระทบการทำงาน")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
