@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r111"
+BOT_REVISION = "r112"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -1448,7 +1448,28 @@ def send_message(recipient_id: str, text: str, page_id: str = "") -> bool:
                 timeout=10,
             )
             if resp.status_code != 200:
-                print(f"[FB SEND ERROR] {resp.status_code}: {resp.text[:200]}")
+                # r112 (31 ส.ค. 2569) — เดิมพิมพ์ resp.text ดิบ ตัดที่ 200 ตัว
+                # ภาษาไทยออกมาเป็น \uXXXX อ่านไม่ออก และไม่รู้ว่าใช้โทเค็นเพจไหนยิง
+                # -> ไล่เหตุ IG ส่งไม่ออกไม่ได้เลย ตอนนี้พิมพ์ให้ครบ
+                _e112 = {}
+                try:
+                    _e112 = ((resp.json() or {}).get("error") or {})
+                except Exception:
+                    pass
+                try:
+                    _tok_src = ("PAGE_TOKEN_%s" % page_id
+                                if page_id and os.environ.get(
+                                    f"PAGE_TOKEN_{page_id}", "").strip()
+                                else "FB_PAGE_ACCESS_TOKEN")
+                    print(f"[FB SEND ERROR] {resp.status_code} "
+                          f"page={page_id or '-'} tok={_tok_src} "
+                          f"to={_mask(recipient_id)} "
+                          f"code={_e112.get('code')}/"
+                          f"{_e112.get('error_subcode')} "
+                          f"type={_e112.get('type')} "
+                          f"msg={str(_e112.get('message') or resp.text)[:300]}")
+                except Exception:
+                    print(f"[FB SEND ERROR] {resp.status_code}: {resp.text[:200]}")
                 log_event("SEND_ERROR", f"HTTP {resp.status_code}",
                           {"body": resp.text[:300]})
                 if _is_unreachable(resp):
@@ -5964,6 +5985,103 @@ try:
     print("[R111] ยามกันลูป _next_missing เปิดแล้ว (แก้เหตุบอทค้าง 31 ส.ค.)")
 except Exception as _e:
     print(f"[R111 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+
+# ============================================================
+# r112 (31 ส.ค. 2569) — หา IG account ที่ผูกกับแต่ละเพจเอง
+# ------------------------------------------------------------
+# เหตุ: webhook ของ Instagram ส่ง entry.id = "IG account id"
+#       ถ้าไม่ได้ตั้ง ig_id ใน WEC_PAGES -> resolve_ig_page ถอยไปใช้เพจหลัก
+#       -> ยิงด้วยโทเค็นผิดเพจ -> Meta ตอบ (#10) "ส่งนอกช่วงเวลาที่อนุญาต"
+#       ทั้งที่ลูกค้าเพิ่งพิมพ์มา 6 วินาทีก่อน (เคสจริง 31 ส.ค. 2569)
+# แก้: ถาม Graph เองว่าเพจไหนผูกกับ IG ไหน แล้วเติมลง IG_TO_PAGE
+#      ไม่ต้องแก้ env ไม่ทับค่าที่ตั้งมือไว้ใน WEC_PAGES ตอนบูท
+# ห้ามทำให้บอทเงียบ: หาไม่เจอ = ใช้เพจหลักเหมือนเดิมทุกประการ
+# ============================================================
+_R112_LOCK = threading.Lock()
+_R112_LAST = 0.0
+_R112_MANUAL = set(IG_TO_PAGE.keys())     # ที่ตั้งมือไว้ ห้ามทับ
+
+
+def _r112_discover_ig(force: bool = False) -> dict:
+    global _R112_LAST
+    try:
+        with _R112_LOCK:
+            if not force and (time.time() - _R112_LAST) < 300:
+                return IG_TO_PAGE
+            _R112_LAST = time.time()
+    except Exception:
+        pass
+    _ids = [str(p) for p in (PAGES or {}).keys()]
+    if str(MAIN_PAGE_ID) not in _ids:
+        _ids.append(str(MAIN_PAGE_ID))
+    _found = 0
+    for _pid in _ids:
+        try:
+            _tok = page_token(_pid)
+            if not _tok:
+                continue
+            _r = requests.get(
+                f"https://graph.facebook.com/v22.0/{_pid}",
+                params={"fields": "instagram_business_account{id,username},"
+                                  "connected_instagram_account{id,username}",
+                        "access_token": _tok},
+                timeout=8)
+            if _r.status_code != 200:
+                _e = {}
+                try:
+                    _e = ((_r.json() or {}).get("error") or {})
+                except Exception:
+                    pass
+                print(f"[IG MAP] page={_pid} ถามไม่ได้ {_r.status_code} "
+                      f"code={_e.get('code')} "
+                      f"{str(_e.get('message') or '')[:140]}")
+                continue
+            _j = _r.json() or {}
+            for _k in ("instagram_business_account",
+                       "connected_instagram_account"):
+                _o = _j.get(_k) or {}
+                _iid = str(_o.get("id") or "").strip()
+                if not _iid or _iid in _R112_MANUAL:
+                    continue
+                _old = IG_TO_PAGE.get(_iid)
+                IG_TO_PAGE[_iid] = str(_pid)
+                _found += 1
+                print(f"[IG MAP] ig={_iid} (@{_o.get('username', '-')}) "
+                      f"-> page={_pid}"
+                      + ("" if _old in (None, str(_pid))
+                         else f"  (เดิมชี้ไป {_old})"))
+        except Exception as _e:
+            print(f"[IG MAP ERROR] page={_pid}: {_e}")
+    if not IG_TO_PAGE:
+        print(f"[IG MAP] ไม่เจอ IG ผูกกับเพจไหนเลย "
+              f"— ใช้เพจหลัก {MAIN_PAGE_ID} เหมือนเดิม "
+              f"(เช็คสิทธิ์ instagram_basic / instagram_manage_messages)")
+    else:
+        print(f"[IG MAP] สรุป: {json.dumps(IG_TO_PAGE, ensure_ascii=False)}")
+    return IG_TO_PAGE
+
+
+try:
+    _R112_ORIG_RESOLVE = resolve_ig_page
+
+    def resolve_ig_page(ig_id: str) -> str:      # noqa: F811
+        """เจอ IG id ที่ยังไม่รู้จัก -> ถาม Graph ก่อน 1 ครั้ง (คูลดาวน์ 5 นาที)
+        แล้วค่อยตัดสินใจตามตรรกะเดิม"""
+        _i = str(ig_id or "")
+        try:
+            if _i and _i not in IG_TO_PAGE:
+                _r112_discover_ig()
+        except Exception as _e:
+            print(f"[IG MAP ERROR] {_e} — ใช้ทางเดิม")
+        return _R112_ORIG_RESOLVE(_i)
+
+    threading.Thread(target=_r112_discover_ig,
+                     kwargs={"force": True}, daemon=True).start()
+    print("[R112] ค้นหา IG ที่ผูกกับแต่ละเพจเอง + log error การส่งแบบเต็ม")
+except Exception as _e:
+    print(f"[R112 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
