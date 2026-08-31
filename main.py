@@ -5730,6 +5730,187 @@ except Exception as _e:
     print(f"[R109 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
+# ----------------------------------------------------------------------
+# r110 (31 ส.ค. 2569) — รายได้ผันแปร (คอม/OT/โบนัส) + อายุที่ลูกค้าบอกเอง
+# ----------------------------------------------------------------------
+# เคสจริง เพจ Intake คุณ Ohm Ja (ภาพจาก Gift 31 ส.ค.):
+#   ลูกค้า: "เงินเดือน 25000 ได้มั้ยคะ อายุ 45 แต่มีค่าคอมด้วย"
+#   บอท  : "ได้ค่ะ ค่าคมประมาณเดือนละเท่าไหร่ธรรมชาติคะ"   <- พิมพ์ผิด + คำขยะ
+#   บอท  : "ดีเลยค่ะ ค่าคมเดือนละประมาณเท่าไหร่คะ"          <- ถามซ้ำข้อเดิม
+#   แล้วขอเบอร์ในเทิร์นเดียวกัน ทั้งที่ยังไม่ได้คำตอบ
+#
+# ต้นเหตุจริง (พิสูจน์แล้วด้วย _public_guard):
+#   "ค่าคอม" และ "คอมมิชชั่น" อยู่ในลิสต์ _NEVER_SAY  ->  ประโยคถูก "บล็อก"
+#   ลิสต์นั้นตั้งใจกันไม่ให้บอทเผย "ค่าคอมของบริษัท" (ข้อมูลภายใน)
+#   แต่มันบล็อก "ค่าคอมของลูกค้า" ซึ่งเป็นคนละความหมายไปด้วย
+#   -> บอทถามคำนี้ตรงๆ ไม่ได้เลย AI เลยเลี่ยงไปพิมพ์ผิดจนหลุดยาม ("ค่าคม" ผ่าน)
+#   -> ได้ข้อความเพี้ยน + ถามซ้ำ เพราะคำตอบไม่เคยถูกเก็บ
+#
+# และไม่มีช่องเก็บรายได้ผันแปรเลยทั้งระบบ (ไม่มี income_var/OT/โบนัสที่ไหน)
+#   -> "ค่าคอมอีกหมื่นกว่าถึง 20,000" ตกพื้น เกรดคิดจากเงินเดือน 25,000 อย่างเดียว
+#   -> เคสที่จริงๆ รายได้ ~45,000 ถูกตัดเป็นเคสก้ำกึ่ง
+#
+# r110 แก้ 3 อย่าง — ไม่แตะเกณฑ์ ไม่แตะสูตร แตะแค่ "อะไรลงช่องไหน"
+#   1) เก็บ income_var แล้วบวกเข้า income_total (ทุกที่อ่าน income_total ก่อนอยู่แล้ว)
+#   2) ถามด้วยประโยคที่ผ่านยาม ถามครั้งเดียว และห้ามขอเบอร์เทิร์นเดียวกัน
+#   3) ลูกค้าบอกอายุเองก่อนบอทถาม = เก็บทันที ไม่ต้องถามซ้ำ
+# ----------------------------------------------------------------------
+try:
+    import re as _re110
+
+    # คำที่แปลว่า "มีรายได้ส่วนอื่นนอกจากเงินเดือน"
+    _R110_VAR_WORDS = (
+        "ค่าคอม", "คอมมิชชั่น", "คอมมิชชัน", "commission", "คอมฯ",
+        "โอที", "โอ.ที", "ot", "ล่วงเวลา",
+        "โบนัส", "bonus", "เบี้ยเลี้ยง", "ค่าตำแหน่ง", "ค่าน้ำมัน",
+        "incentive", "อินเซนทีฟ", "เงินพิเศษ", "รายได้เสริม", "รายได้พิเศษ",
+    )
+
+    # ประโยคถามที่ "ผ่านยาม" — ห้ามมีคำว่า ค่าคอม/คอมมิชชั่น เด็ดขาด
+    R110_VAR_Q = ("นอกจากเงินเดือน มีรายได้ส่วนอื่นอีกเดือนละประมาณเท่าไหร่ครับ")
+
+    def _r110_mentions_var(msg):
+        m = str(msg or "").lower()
+        return any(w in m for w in _R110_VAR_WORDS)
+
+    def _r110_recalc_total(data):
+        """income_total = เงินเดือน + ผันแปร + ผู้กู้ร่วม (ส่วนไหนไม่รู้ = 0)"""
+        try:
+            _own = data.get("income_baht")
+            if _own is None:
+                _own = _bl9._parse_income(str(data.get("income", "")))
+            if _own is None:
+                return
+            _var = data.get("income_var") or 0
+            _cob = data.get("co_borrower_income") or 0
+            data["income_total"] = int(_own) + int(_var) + int(_cob)
+        except Exception:
+            pass
+
+    # ---------- 1) เก็บรายได้ผันแปร + อายุ ที่ลูกค้าพูดเอง ----------
+    _R110_PREV_CAPTURE = _bl9.BotEngine._capture
+
+    def _capture_r110(self, state, field, msg):
+        _out = _R110_PREV_CAPTURE(self, state, field, msg)
+        try:
+            _d = state.get("data") or {}
+            if _r110_mentions_var(msg):
+                _d["income_var_said"] = True
+        except Exception:
+            pass
+        return _out
+
+    _bl9.BotEngine._capture = _capture_r110
+
+    _R110_PREV_DECIDE = CalmBotEngine._decide
+
+    def _decide_r110(self, msg, user_id, state, bucket, is_new):
+        _txt = str(msg or "")
+        try:
+            _d = state.setdefault("data", {})
+
+            # (ก) ลูกค้าบอกอายุเองก่อนบอทถาม -> เก็บทันที
+            if _d.get("age") is None and "อาย" in _txt:
+                _a = _bl9._parse_age(_txt)
+                if _a is not None and 18 <= int(_a) <= 90:
+                    try:
+                        _r92_apply_age(self, user_id, state, int(_a))
+                    except Exception:
+                        _d["age"] = int(_a)
+                    state["awaiting_age"] = False
+                    print(f"[R110] ลูกค้าบอกอายุเอง {_a} — เก็บแล้ว ไม่ถามซ้ำ")
+
+            # (ข) ลูกค้าพูดถึงรายได้ผันแปร
+            if _r110_mentions_var(_txt):
+                _d["income_var_said"] = True
+
+            # (ค) กำลังรอตัวเลขผันแปรอยู่ -> อ่านเลขจากข้อความนี้
+            if state.get("awaiting_income_var") and _d.get("income_var") is None:
+                _n = _bl9._parse_income(_txt)
+                if _n is not None and 1000 <= int(_n) <= 2_000_000:
+                    _d["income_var"] = int(_n)
+                    state["awaiting_income_var"] = False
+                    _r110_recalc_total(_d)
+                    self._add_signal(
+                        state,
+                        f"รายได้ส่วนอื่นนอกเหนือเงินเดือน {int(_n):,} บาท/เดือน "
+                        f"(ลูกค้าแจ้งเอง) · รายได้รวมที่ใช้ประเมิน "
+                        f"{int(_d.get('income_total') or 0):,} บาท")
+                    print(f"[R110] เก็บรายได้ผันแปร {_n:,} -> รวม "
+                          f"{_d.get('income_total')}")
+                elif _bl9._has_any(_txt, ("ไม่มี", "ไม่แน่นอน", "ไม่ได้ทุกเดือน")):
+                    _d["income_var"] = 0
+                    state["awaiting_income_var"] = False
+                    print("[R110] ลูกค้าบอกว่าไม่มีรายได้ส่วนอื่น")
+        except Exception as _e110:
+            print(f"[R110 PRE ERROR] {_e110}")
+
+        bubbles, grade = _R110_PREV_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+        # ---------- 2) ถามตัวเลขผันแปร ครั้งเดียว ห้ามพ่วงขอเบอร์ ----------
+        try:
+            _d = state.get("data") or {}
+            _need = (_d.get("income_var_said")
+                     and _d.get("income_var") is None
+                     and not state.get("_r110_asked")
+                     and not state.get("closed") and not state.get("done")
+                     and not state.get("bot_off") and not state.get("handover")
+                     and grade not in ("O", "R", "X"))
+            if _need:
+                _kept = [b for b in bubbles
+                         if not _r97_is_question(b)
+                         and not any(k in str(b) for k in _R108_CONTACT_MARK)]
+                bubbles = _kept + [R110_VAR_Q]
+                state["_r110_asked"] = True
+                state["awaiting_income_var"] = True
+                print("[R110] ถามรายได้ส่วนอื่น (ครั้งเดียว) — ตัดคำถามอื่น"
+                      "และคำขอเบอร์ออกจากเทิร์นนี้")
+
+            # กันข้อความที่พิมพ์คำต้องห้ามแบบเลี่ยงยาม ("ค่าคม") หลุดออกไป
+            _fixed = []
+            for _b in bubbles:
+                _s = str(_b)
+                if "ค่าคม" in _s:
+                    _s = _s.replace("ค่าคมเดือนละประมาณเท่าไหร่คะ", R110_VAR_Q)
+                    _s = _s.replace("ค่าคม", "รายได้ส่วนอื่น")
+                    print("[R110] แก้คำพิมพ์ผิด 'ค่าคม' ที่เลี่ยงยามออกไปได้")
+                if "ธรรมชาติคะ" in _s or "ธรรมชาติครับ" in _s:
+                    _s = _s.replace("ธรรมชาติคะ", "คะ").replace("ธรรมชาติครับ", "ครับ")
+                    print("[R110] ตัดคำขยะ 'ธรรมชาติ' ท้ายประโยค")
+                _fixed.append(_s)
+            bubbles = _fixed
+        except Exception as _e110b:
+            print(f"[R110 POST ERROR] {_e110b} — ใช้ทางเดิม")
+
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r110
+
+    # ---------- 3) ส่ง income_var เข้าชีตผ่านจุดผ่านเดิม ----------
+    _R110_PREV_INUM = _bl9.BotEngine._income_numbers
+
+    def _income_numbers_r110(data):
+        _out = dict(_R110_PREV_INUM(data))
+        try:
+            _v = (data or {}).get("income_var")
+            _out["income_var"] = "" if _v in (None, "") else int(_v)
+            _t = (data or {}).get("income_total")
+            if _t not in (None, ""):
+                _out["income_total"] = int(_t)
+                _out["qualified25k"] = "1" if int(_t) >= _bl9.LOW_INCOME_BAHT else "0"
+        except Exception:
+            pass
+        return _out
+
+    _bl9.BotEngine._income_numbers = staticmethod(_income_numbers_r110)
+
+    print("[R110] รายได้ผันแปร (คอม/OT/โบนัส) เก็บแยกช่อง + บวกเข้ารายได้รวม")
+    print(f"[R110] คำถามที่ใช้ (ผ่านยาม): {R110_VAR_Q}")
+    print("[R110] อายุที่ลูกค้าบอกเอง = เก็บทันที ไม่ถามซ้ำ")
+except Exception as _e:
+    print(f"[R110 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
