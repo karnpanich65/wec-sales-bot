@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r108"
+BOT_REVISION = "r111"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -4664,7 +4664,22 @@ try:
                     # โควตาจะไหม้หมดตั้งแต่เทิร์นแรกโดยที่ยังไม่ได้ถามลูกค้าเลย
                     _asked = (_st.get("asked") or {})
                     _n = int(_asked.get("co_income") or 0)
-                    if _n < R102_CO_ASK_MAX:
+                    _sk = skip or set()
+                    _want = ("co_income" if _d.get("co_borrower_yes")
+                             else "co_borrower")
+                    # ★ r111 (31 ส.ค. 2569) — กันลูปไม่รู้จบ
+                    # _decide มี while วนเรียก _next_missing(skip=...) จนกว่าจะ
+                    # ได้ช่องที่ยังไม่ตันโควตา ถ้าเราคืนช่องที่อยู่ใน skip แล้ว
+                    # (หรือช่องนั้นถามครบ MAX_ASK_PER_FIELD แล้ว) while จะวนไม่จบ
+                    # -> บอทค้างทั้งเทิร์น ไม่ส่งข้อความ + log ท่วมจน Railway
+                    #    ตัดทิ้ง (เหตุการณ์จริง 31 ส.ค. 2569 ทั้งวัน)
+                    try:
+                        _maxask = int(_bl9.MAX_ASK_PER_FIELD)
+                    except Exception:
+                        _maxask = 2
+                    _burned = (_want in _sk
+                               or int(_asked.get(_want) or 0) >= _maxask)
+                    if _n < R102_CO_ASK_MAX and not _burned:
                         print(f"[R102 GATE] ยังไม่ผ่านเกณฑ์ (รายได้ "
                               f"{_d.get('income_baht') or _d.get('income')!r} "
                               f"+ ยังไม่รู้รายได้ผู้กู้ร่วม) — ยังไม่ขอเบอร์ "
@@ -4673,6 +4688,9 @@ try:
                             return "co_income", _bl9.CO_INCOME_Q
                         return "co_borrower", _bl9.QUALIFY_QUESTIONS[
                             _bl9.FIELD_Q_INDEX["co_borrower"]]
+                    if _burned:
+                        print(f"[R102 GATE] ถาม {_want} ครบโควตา/ถูกข้ามแล้ว "
+                              "— ปล่อยขอเบอร์ + ติดธง (กันลูป r111)")
                     # ครบโควตาแล้ว — ห้ามทิ้งเคส ปล่อยขอเบอร์ แต่ติดธงให้เซลเห็น
                     try:
                         _bl9.BotEngine._add_signal(
@@ -5909,6 +5927,43 @@ try:
     print("[R110] อายุที่ลูกค้าบอกเอง = เก็บทันที ไม่ถามซ้ำ")
 except Exception as _e:
     print(f"[R110 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+
+# ============================================================
+# r111 (31 ส.ค. 2569) — ยามกันลูป _next_missing
+# เหตุ: _decide (bot_logic ~3274) มี
+#         while field and asked[field] >= MAX_ASK_PER_FIELD:
+#             _skipped.add(field)
+#             field, question = self._next_missing(data, state, skip=_skipped)
+#       ถ้าชั้น patch ไหนคืนช่องที่อยู่ใน skip อยู่แล้ว -> วนไม่จบ
+#       บอทค้างทั้งเทิร์น ไม่ตอบลูกค้า และ log ท่วมจนโดน rate limit
+# ยามนี้เป็นตาข่ายชั้นสุดท้าย: ใครคืนช่องที่สั่งข้ามมา ให้ตกกลับไปใช้
+# ผลลัพธ์ของ _next_missing เดิม (ซึ่งเคารพ skip เสมอ)
+# ห้ามทำให้บอทเงียบ: ถ้าพลาดตรงไหน คืนค่าที่ได้มาตามเดิม
+# ============================================================
+try:
+    _R111_PREV_NEXT = _bl9.BotEngine._next_missing
+
+    def _next_missing_r111(self, data, state=None, skip=None):
+        _f, _q = _R111_PREV_NEXT(self, data, state, skip)
+        try:
+            _sk = skip or set()
+            if _f and _f in _sk:
+                print(f"[R111 LOOP GUARD] มีชั้นไหนคืน {_f!r} ทั้งที่สั่งข้ามแล้ว "
+                      "— ตัดลูป ใช้ผลของ _next_missing เดิมแทน")
+                _f2, _q2 = _R102_ORIG_NEXT(self, data, state, _sk)
+                if _f2 and _f2 in _sk:
+                    return None, None
+                return _f2, _q2
+        except Exception as _e111:
+            print(f"[R111 GUARD ERROR] {_e111} — ใช้ค่าเดิม")
+        return _f, _q
+
+    _bl9.BotEngine._next_missing = _next_missing_r111
+    print("[R111] ยามกันลูป _next_missing เปิดแล้ว (แก้เหตุบอทค้าง 31 ส.ค.)")
+except Exception as _e:
+    print(f"[R111 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
