@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r118"
+BOT_REVISION = "r119"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -6592,6 +6592,175 @@ try:
     print("[R116] ส่ง 12 ช่องใหม่เข้าชีต (คอลัมน์ 37–48)")
 except Exception as _e:
     print(f"[R116 NUM PATCH ERROR] ต่อไม่ติด: {_e}")
+
+
+
+# ============================================================
+# r119 (1 ก.ย. 2569, Gift สั่ง) — ห้ามเคสลงทุนหลุดไปสายเช่า/เจ้าของ
+# ------------------------------------------------------------
+# ตัวจับเดิม (_is_renter) กันคำว่า "ปล่อยเช่า/ลงทุน" ได้เฉพาะ "ในข้อความเดียวกัน"
+# แต่ธง renter ตั้งได้ทุกเทิร์น -> ลูกค้าที่คุยสายซื้อมาครึ่งทางแล้วพิมพ์คำว่า
+# "เช่า" ลอยๆ จะโดนสลับสายทันที แล้ว _upsert_lead เขียนลงไฟล์ห้องเช่าเลย
+# เคสจริงในไฟล์ผู้เช่า FB-XX-20260901-016: รายได้ 59,000 · ภาระ 60,000 ·
+# อายุ 44 · เสนอปิดภาระ 2.68M ครบแบบนักลงทุน แต่ไปจบที่ไฟล์ห้องเช่า
+# r118 ทำให้แรงขึ้นอีก เพราะสายเช่าข้ามคำถามคนซื้อทั้งหมด = หลุดเงียบ
+#
+# แก้ 2 ชั้น:
+#   1. ถามยืนยันก่อนสลับสายเสมอ (Gift สั่ง) — ไม่สลับทันทีอีกต่อไป
+#   2. ถ้าเคสมีหลักฐานนักลงทุนอยู่แล้ว (รู้รายได้/ภาระ/อายุ/วงเงิน/เกรด)
+#      ตอบไม่ชัด = อยู่สายซื้อไว้ก่อน + ติดธงให้เซล (ห้ามทิ้งเคส)
+# ใช้ threading.local เก็บ state ของเทิร์นนั้น — บอทรับหลายคนพร้อมกัน
+# ถ้าใช้ตัวแปร global ธรรมดาจะสลับ state ข้ามคนได้
+# ============================================================
+R119_CONFIRM_Q = ("ขอเช็กให้ชัดนิดนึงนะครับ ลูกค้ากำลังมองหาห้องเช่าไว้อยู่เอง "
+                  "หรือสนใจซื้อคอนโดไว้ปล่อยเช่าครับ")
+# ลำดับสำคัญมาก: "ซื้อไว้ปล่อยเช่าครับ" มีคำว่าเช่าอยู่ด้วย
+# ถ้าเช็คคำเช่าก่อนจะตีเป็นผู้เช่าทันที = เคสลงทุนหลุด (ตัวทดสอบจับได้ก่อน deploy)
+# จึงต้องเรียง: ปฏิเสธการซื้อ -> คำสายซื้อ -> คำสายเช่า
+_R119_SAY_NOTBUY = ("ไม่ได้ซื้อ", "ไม่ซื้อ", "ไม่ได้ลงทุน", "ไม่ลงทุน",
+                    "ไม่ได้จะซื้อ", "ยังไม่ซื้อ")
+_R119_SAY_BUY = ("ซื้อ", "ลงทุน", "ปล่อยเช่า", "ให้เช่า", "เก็บค่าเช่า", "ผ่อน",
+                 "กู้", "สินเชื่อ", "ฝากเช่า", "ฝากขาย")
+_R119_SAY_RENT = ("เช่าอยู่เอง", "อยู่เอง", "หาเช่า", "จะเช่า", "เช่าอย่างเดียว",
+                  "อยากเช่า", "หาห้องเช่า", "เช่าห้อง", "มาเช่า")
+
+
+def _r119_read_answer(t):
+    """คืน 'rent' / 'buy' / '' — เรียงตามลำดับที่กันเคสลงทุนหลุดไว้แล้ว"""
+    t = str(t or "")
+    if any(w in t for w in _R119_SAY_NOTBUY):
+        return "rent"
+    if any(w in t for w in _R119_SAY_BUY):
+        return "buy"
+    if any(w in t for w in _R119_SAY_RENT):
+        return "rent"
+    return ""
+_R119_TL = threading.local()
+
+
+def _r119_state():
+    return getattr(_R119_TL, "state", None) or {}
+
+
+def _r119_has_invest_evidence(state) -> bool:
+    """เคสนี้เดินสายซื้อมาแล้วจริงไหม — ดูจากของที่เก็บได้เท่านั้น"""
+    try:
+        d = (state or {}).get("data") or {}
+        if state.get("done") or d.get("grade"):
+            return True
+        for k in ("income_baht", "income_total", "capacity_now", "capacity_clear",
+                  "age", "co_borrower_income", "debt_total_baht"):
+            if d.get(k):
+                return True
+        if d.get("debt_baht") is not None:
+            return True
+        _asked = (state.get("asked") or {})
+        if any(_asked.get(k) for k in ("income", "debt", "co_borrower", "contact")):
+            return True
+    except Exception as _e:
+        print(f"[R119 EVIDENCE ERROR] {_e}")
+    return False
+
+
+def _r119_gate(kind, raw_hit):
+    """ตัวกลางของทั้ง _is_renter และ _is_owner_listing
+    คืน True = ปล่อยให้สลับสายได้ · False = ยังไม่สลับ (ตั้งธงถามยืนยันแทน)"""
+    if not raw_hit:
+        return False
+    st = _r119_state()
+    if not st:
+        return raw_hit                     # ไม่มี state = เรียกจากที่อื่น อย่าไปยุ่ง
+    d = st.get("data") or {}
+    if d.get(f"_r119_{kind}_ok"):
+        return True                        # ลูกค้ายืนยันแล้ว
+    if d.get("_r119_invest_ok"):
+        return False                       # ยืนยันแล้วว่าเป็นสายซื้อ ห้ามสลับอีก
+    st["_r119_pending"] = kind
+    return False
+
+
+try:
+    _R119_ORIG_RENTER = _bl9._is_renter
+    _R119_ORIG_OWNER = _bl9._is_owner_listing
+
+    def _is_renter_r119(msg):
+        return _r119_gate("rent", _R119_ORIG_RENTER(msg))
+
+    def _is_owner_listing_r119(msg):
+        return _r119_gate("own", _R119_ORIG_OWNER(msg))
+
+    _bl9._is_renter = _is_renter_r119
+    _bl9._is_owner_listing = _is_owner_listing_r119
+    print("[R119] ต้องยืนยันก่อนสลับไปสายเช่า/เจ้าของ (กันเคสลงทุนหลุด)")
+except Exception as _e:
+    print(f"[R119 GATE ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+try:
+    _R119_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r119(self, msg, user_id, state, bucket, is_new):
+        _R119_TL.state = state
+        try:
+            data = state.get("data") or {}
+            # ---- (ก) กำลังรอคำตอบยืนยัน ----
+            if state.get("_r119_wait"):
+                _kind = state.pop("_r119_wait", None)
+                _orig = state.pop("_r119_orig", None) or msg
+                _ans = _r119_read_answer(msg)
+                _rent = (_ans == "rent")
+                _buy = (_ans == "buy")
+                if _rent:
+                    data[f"_r119_{_kind}_ok"] = True
+                    self._add_signal(state, "ลูกค้ายืนยันเองว่าต้องการเช่า/ฝากปล่อยเช่า "
+                                            "— ไม่ใช่เคสลงทุน")
+                    print(f"[R119] {str(user_id)[:8]}... ยืนยันสาย {_kind} — สลับสาย")
+                    return _R119_BASE_DECIDE(self, _orig, user_id, state,
+                                             bucket, is_new)
+                if _buy:
+                    data["_r119_invest_ok"] = True
+                    self._add_signal(state, "ลูกค้ายืนยันว่าสนใจซื้อ/ลงทุน "
+                                            "— เคยพิมพ์คำว่าเช่าแต่ไม่ใช่ผู้เช่า")
+                    print(f"[R119] {str(user_id)[:8]}... ยืนยันสายซื้อ — อยู่สายลงทุนต่อ")
+                elif _r119_has_invest_evidence(state):
+                    data["_r119_invest_ok"] = True
+                    self._add_signal(
+                        state, "⚠️ ลูกค้าพิมพ์คำว่าเช่าแต่ตอบยืนยันไม่ชัด — "
+                               "เคสนี้ให้ข้อมูลรายได้/ภาระมาแล้ว จึงคงไว้ในสายลงทุน "
+                               "เซลเช็กตอนโทรว่าจะซื้อหรือเช่า")
+                    print(f"[R119] {str(user_id)[:8]}... ตอบไม่ชัด + มีหลักฐาน"
+                          "นักลงทุน — คงสายซื้อ")
+                else:
+                    data[f"_r119_{_kind}_ok"] = True
+                    print(f"[R119] {str(user_id)[:8]}... ตอบไม่ชัด แต่ยังไม่มีข้อมูล"
+                          f"สายซื้อเลย — ไปสาย {_kind}")
+                    return _R119_BASE_DECIDE(self, _orig, user_id, state,
+                                             bucket, is_new)
+
+            state.pop("_r119_pending", None)
+            bubbles, grade = _R119_BASE_DECIDE(self, msg, user_id, state,
+                                               bucket, is_new)
+
+            # ---- (ข) เทิร์นนี้เกือบสลับสาย -> ถามยืนยันก่อน ----
+            _pend = state.pop("_r119_pending", None)
+            if _pend and not state.get("renter") and not state.get("owner"):
+                state["_r119_wait"] = _pend
+                state["_r119_orig"] = msg
+                bubbles = [b for b in (bubbles or []) if b and str(b).strip()]
+                bubbles.append(R119_CONFIRM_Q)
+                print(f"[R119] {str(user_id)[:8]}... เจอคำสาย {_pend} "
+                      "— ถามยืนยันก่อน ยังไม่สลับสาย")
+            return bubbles, grade
+        except Exception as _e:
+            print(f"[R119 DECIDE ERROR] {_e} — ใช้ทางเดิม")
+            return _R119_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        finally:
+            _R119_TL.state = None
+
+    CalmBotEngine._decide = _decide_r119
+    print("[R119] ชั้นถามยืนยันสายเช่า/ลงทุน เปิดแล้ว")
+except Exception as _e:
+    print(f"[R119 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
