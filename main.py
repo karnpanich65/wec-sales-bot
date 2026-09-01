@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r117"
+BOT_REVISION = "r118"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -4543,6 +4543,12 @@ try:
     _R97_BASE_DECIDE = CalmBotEngine._decide
 
     def _decide_r97(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R97_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         _uid = str(user_id)[:8]
         _tease = False
         try:
@@ -4789,6 +4795,12 @@ try:
     _R102_BASE_DECIDE = CalmBotEngine._decide
 
     def _decide_r102(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R102_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         try:
             _d = (state or {}).get("data") or {}
             if ((state or {}).get("awaiting") == "co_borrower"
@@ -4932,6 +4944,12 @@ try:
     _R100_BASE_DECIDE = CalmBotEngine._decide
 
     def _decide_r100(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R100_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         bubbles, grade = _R100_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         try:
             if state.pop("_r100_ask_now", False):
@@ -5014,6 +5032,12 @@ try:
     _R99_BASE_DECIDE = CalmBotEngine._decide
 
     def _decide_r99(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R99_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         # เช็คจาก state จริง ไม่ใช่ set ใน RAM และไม่ใช่ is_new
         # (is_new ของ bot_logic แปลว่า "ต้องทักทายใหม่ไหม" ไม่ใช่ "เทิร์นแรกไหม"
         #  ลูกค้าใหม่เอี่ยมก็ได้ is_new=False ได้ — ตรวจแล้ว 29 ส.ค.)
@@ -5619,6 +5643,12 @@ try:
             return False
 
     def _decide_r107(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R107_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         bubbles, grade = _R107_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         try:
             _uid = str(user_id)[:8]
@@ -5712,6 +5742,12 @@ try:
             return False
 
     def _decide_r108(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R108_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         bubbles, grade = _R108_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
         try:
             _uid = str(user_id)[:8]
@@ -5868,6 +5904,12 @@ try:
     _R110_PREV_DECIDE = CalmBotEngine._decide
 
     def _decide_r110(self, msg, user_id, state, bucket, is_new):
+        # r118 (1 ก.ย. 2569) — สายผู้เช่า/ผู้ขาย ไม่ใช่กรวยคนซื้อ ข้ามชั้นนี้
+        # เคสจริง 1 ก.ย. 11:06 น.: ลูกค้าบอก "สนใจเช่าคอนโด" ตั้งแต่ประโยคแรก
+        # แต่ชั้นนี้ยัดคำถาม อายุ/วงเงิน/ผู้กู้ร่วม/หนี้ ใส่จนลูกค้าพิมพ์ว่า
+        # "คุยกันไม่รู้เรื่องล่ะยกเลิกค่ะ" แล้วเซลต้องมาขอโทษแทนบอท
+        if state.get("renter") or state.get("owner"):
+            return _R110_PREV_DECIDE(self, msg, user_id, state, bucket, is_new)
         _txt = str(msg or "")
         try:
             _d = state.setdefault("data", {})
@@ -6135,7 +6177,13 @@ try:
                 _rcpt = str(((event or {}).get("recipient") or {}).get("id") or "")
                 _ts = (event or {}).get("timestamp") or 0
                 try:
-                    _age = time.time() - (float(_ts) / 1000.0) if _ts else -1.0
+                    # r118 — event ชนิด referral ส่ง timestamp เป็น "วินาที"
+                    # แต่ชนิด message ส่งเป็น "มิลลิวินาที" ของเดิมหาร 1000 หมด
+                    # ทำให้ลีดโฆษณาทุกตัวขึ้นเตือน "ย้อนหลัง 496,235 ชม." (56 ปี)
+                    _tsf = float(_ts) if _ts else 0.0
+                    if _tsf > 1e11:          # มิลลิวินาที
+                        _tsf = _tsf / 1000.0
+                    _age = (time.time() - _tsf) if _tsf else -1.0
                 except Exception:
                     _age = -1.0
                 try:
