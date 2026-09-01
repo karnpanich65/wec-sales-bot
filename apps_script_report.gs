@@ -94,6 +94,16 @@ function rptPhoneKeys_(v) {
 }
 function rptPhoneKey_(v) { var a = rptPhoneKeys_(v); return a.length ? a[0] : ''; }
 
+// เบอร์ที่ "กดโทรได้จริง" — ไฟล์หลักเก็บเป็นตัวเลข 0 หน้าหาย ต้องเติมคืน
+function rptPhoneShow_(v) {
+  var s = rptNorm_(v);
+  if (!s) return '';
+  var k = rptPhoneKeys_(v);
+  if (!k.length) return s;
+  var d = k[0];
+  return (d.charAt(0) === '0') ? d : '0' + d;   // มือถือไทย 9 หลักท้ายไม่ขึ้นต้นด้วย 0
+}
+
 function rptIsGood_(grade) {
   return RPT_GOOD_GRADES.indexOf(rptNorm_(grade).toUpperCase()) >= 0;
 }
@@ -284,7 +294,7 @@ function rptBuildPrach() {
     }
 
     out.push([pri, label, urgent, grade, stage, rptNorm_(r[3]) || '(ยังไม่ได้ชื่อ)',
-              rptNorm_(r[4]), rptNorm_(r[5]), age == null ? '' : age, rptNorm_(r[2]),
+              rptPhoneShow_(r[4]), rptNorm_(r[5]), age == null ? '' : age, rptNorm_(r[2]),
               rptNorm_(r[8]), rptNorm_(r[9]), rptNorm_(r[10]),
               past, noteReal, saleNote, rptNorm_(r[11]), rptNorm_(r[1])]);
   }
@@ -340,7 +350,7 @@ function rptBuildRecall() {
         past = hit.date + (hit.sale ? ' · ' + hit.sale : '') + (hit.note ? ' · ' + hit.note : '');
       }
       out.push([rptNorm_(r[7]), age, name, rptNorm_(r[3]) || '(ยังไม่ได้ชื่อ)',
-                rptNorm_(r[4]), rptNorm_(r[5]), rptNorm_(r[2]), rptNorm_(r[8]),
+                rptPhoneShow_(r[4]), rptNorm_(r[5]), rptNorm_(r[2]), rptNorm_(r[8]),
                 rptNorm_(r[9]), stage, past, rptNorm_(r[1])]);
     }
   }
