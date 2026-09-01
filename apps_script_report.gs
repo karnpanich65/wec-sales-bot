@@ -1,5 +1,5 @@
 // ============================================================
-// r-REPORT v3 (1 ก.ย. 2569) — 2 รีพอร์ตจัดลำดับการโทร
+// r-REPORT v3.3 (1 ก.ย. 2569) — 2 รีพอร์ตจัดลำดับการโทร
 // ------------------------------------------------------------
 // คอนเซ็ปต์ Gift: "โฟกัสเคสที่ใช่ ไม่คลุกฝุ่น"
 //   v3 (Gift สั่ง 1 ก.ย. บ่าย):
@@ -123,7 +123,13 @@ function rptAgeDays_(v) {
 
 // วันที่ในไฟล์เพจกลางเป็น d/m/พ.ศ.สองหลัก เช่น 31/3/69
 function rptLogDate_(v) {
-  if (v instanceof Date) return v.getTime();
+  if (v instanceof Date) {
+    // กับดัก: ชีตอ่าน "31/3/69" เป็นปี ค.ศ.1969 ทั้งที่คนพิมพ์หมายถึง พ.ศ.2569 (=2026)
+    // 2026 - 1969 = 57 ปี -> บวกคืน
+    var yy = v.getFullYear();
+    if (yy >= 1955 && yy <= 1999) return new Date(yy + 57, v.getMonth(), v.getDate()).getTime();
+    return v.getTime();
+  }
   var m = rptNorm_(v).match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
   if (!m) return 0;
   var y = Number(m[3]);
@@ -465,7 +471,7 @@ function rptTick_() {
   var p = PropertiesService.getScriptProperties();
   var last = Number(p.getProperty('RPT_LAST') || 0);
   var now = new Date().getTime();
-  if (now - last < 15 * 60 * 1000) return 'skip';
+  if (now - last < 5 * 60 * 1000) return 'skip';   // Gift ขอให้ไวขึ้น 1 ก.ย.
   p.setProperty('RPT_LAST', String(now));
   return rptBuildAll();
 }
