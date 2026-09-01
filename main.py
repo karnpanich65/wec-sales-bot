@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r112"
+BOT_REVISION = "r113"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -6082,6 +6082,66 @@ try:
     print("[R112] ค้นหา IG ที่ผูกกับแต่ละเพจเอง + log error การส่งแบบเต็ม")
 except Exception as _e:
     print(f"[R112 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+
+# ============================================================
+# r113 (1 ก.ย. 2569) — ไล่เหตุ "ลีดจากโฆษณาทักมาแล้วส่งกลับไม่ได้"
+# ------------------------------------------------------------
+# เคสจริง 31 ส.ค. 23:45 น. เพจ Realty Smart ad_id=120249256510440716
+#   [NAME ERROR] Graph 100: Object with ID '2625796...' does not exist
+#   [FB SEND ERROR] code=10/2018278 (#10) ส่งนอกช่วงเวลาที่อนุญาต
+# ทั้งที่เป็นข้อความแรกของลูกค้า -> หน้าต่าง 24 ชม. ควรเปิดอยู่
+# ตั้งสมมติฐาน 2 ทาง แล้ววัดทั้งคู่ในบรรทัดเดียว:
+#   (ก) webhook มาช้า/ยิงย้อนหลัง -> วัดจาก event.timestamp เทียบเวลาจริง
+#   (ข) entry.id ไม่ใช่เพจที่รับข้อความจริง -> เทียบกับ recipient.id
+#       ถ้าไม่ตรง = เราหยิบโทเค็นผิดเพจ (อาการเดียวกับ IG ก่อน r112)
+#       กรณีนี้แก้ให้เลย: ใช้ recipient.id เป็นเพจที่ตอบกลับ
+# ไม่เปลี่ยนพฤติกรรมอื่นเลย ตรงกัน = เงียบเหมือนเดิมทุกประการ
+# ============================================================
+try:
+    _R113_ORIG_PROCESS_EVENT = process_event
+
+    def process_event(event: dict, platform: str = "facebook",   # noqa: F811
+                      page_id: str = ""):
+        try:
+            _msg113 = (event or {}).get("message") or {}
+            if not _msg113.get("is_echo"):
+                _snd = str(((event or {}).get("sender") or {}).get("id") or "")
+                _rcpt = str(((event or {}).get("recipient") or {}).get("id") or "")
+                _ts = (event or {}).get("timestamp") or 0
+                try:
+                    _age = time.time() - (float(_ts) / 1000.0) if _ts else -1.0
+                except Exception:
+                    _age = -1.0
+                try:
+                    _ref113 = extract_referral(event) or {}
+                except Exception:
+                    _ref113 = {}
+                _mismatch = bool(platform == "facebook" and _rcpt
+                                 and _rcpt != str(page_id) and _rcpt != _snd)
+                if _ref113.get("ad_id") or _ref113.get("ref") or _age > 120 or _mismatch:
+                    print(f"[EVENT DIAG] ({platform}) entry_page={page_id or '-'} "
+                          f"recipient={_rcpt or '-'} from={_mask(_snd)} "
+                          f"อายุ={_age:.0f} วิ "
+                          f"ad_id={_ref113.get('ad_id') or '-'} "
+                          f"src={_ref113.get('source') or '-'} "
+                          f"keys={sorted((event or {}).keys())}")
+                if _age > 86400:
+                    print(f"[STALE EVENT] {_mask(_snd)} Meta ส่งย้อนหลัง "
+                          f"{_age / 3600:.1f} ชม. — เกิน 24 ชม. ส่งกลับไม่ได้แน่นอน "
+                          "((#10) ไม่ใช่บั๊กของเรา) แต่ยังบันทึกลีดตามปกติ")
+                if _mismatch:
+                    print(f"[PAGE FIX] webhook บอก entry={page_id} "
+                          f"แต่ recipient={_rcpt} — ใช้ recipient เป็นเพจที่ตอบกลับ")
+                    page_id = _rcpt
+        except Exception as _e113:
+            print(f"[R113 DIAG ERROR] {_e113} — ใช้ทางเดิม")
+        return _R113_ORIG_PROCESS_EVENT(event, platform, page_id)
+
+    print("[R113] วินิจฉัยลีดโฆษณา: วัดอายุ event + เทียบ entry.id กับ recipient.id")
+except Exception as _e:
+    print(f"[R113 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
