@@ -127,8 +127,16 @@ function rptLogDate_(v) {
   var m = rptNorm_(v).match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
   if (!m) return 0;
   var y = Number(m[3]);
-  if (y < 100) y += 2500;
-  if (y > 2400) y -= 543;
+  if (y < 100) {
+    // ปีสองหลักในไฟล์ปนกัน: 69 = พ.ศ.2569 (=2026) แต่ 26 = ค.ศ.2026
+    // เดาโดยเลือกตัวที่ใกล้ปีนี้ที่สุดและไม่ล้ำอนาคต
+    var be = 1957 + y, ce = 2000 + y, nowY = new Date().getFullYear();
+    var okBe = be <= nowY + 1, okCe = ce <= nowY + 1;
+    if (okBe && okCe) y = (Math.abs(nowY - be) <= Math.abs(nowY - ce)) ? be : ce;
+    else if (okBe) y = be;
+    else if (okCe) y = ce;
+    else y = be;
+  } else if (y > 2400) y -= 543;
   return new Date(y, Number(m[2]) - 1, Number(m[1])).getTime();
 }
 function rptLogDateText_(v) {
@@ -372,10 +380,83 @@ function rptBuildRecall() {
   return out.length;
 }
 
+// ============================================================
+// ตัวตรวจ: "ทำไม match เบอร์ได้น้อย" — เขียนลงแท็บ "ตรวจ match"
+// ตอบ 3 คำถาม: (A) เพจกลางมีเบอร์เดือนไหนบ้าง
+//               (B) ไฟล์เซลแต่ละไฟล์ match ได้กี่เคส
+//               (C) กลับด้าน — เบอร์ในเพจกลางอยู่ใน CRM กี่เบอร์
+// ============================================================
+function rptDiagBuild_() {
+  var lg = rptReadPrachLog_(), log = lg.map;
+  var out = [];
+
+  // A) เบอร์ในเพจกลาง แยกตามเดือนที่ลงวันที่ไว้
+  var byMonth = {}, noDate = 0;
+  for (var k in log) {
+    var w = log[k].when;
+    if (!w) { noDate++; continue; }
+    var mk = Utilities.formatDate(new Date(w), 'Asia/Bangkok', 'yyyy-MM');
+    byMonth[mk] = (byMonth[mk] || 0) + 1;
+  }
+  var ms = [];
+  for (var mm in byMonth) ms.push(mm);
+  ms.sort();
+  for (var i = 0; i < ms.length; i++)
+    out.push(['A. เพจกลาง — เบอร์ที่ลงวันที่เดือน ' + ms[i], byMonth[ms[i]], '', '', '']);
+  out.push(['A. เพจกลาง — อ่านวันที่ไม่ออก', noDate, '', '', '']);
+  out.push(['', '', '', '', '']);
+
+  // B) ต่อไฟล์เซล
+  var allKeys = {}, gTot = 0, gHit = 0;
+  for (var s = 0; s < RPT_SALES.length; s++) {
+    var nm = RPT_SALES[s][0], rw = rptReadSales_(RPT_SALES[s][1]);
+    var tot = 0, ab = 0, ph = 0, hit = 0, hitAll = 0;
+    for (var j = 0; j < rw.length; j++) {
+      var r = rw[j];
+      if (!rptNorm_(r[1]) && !rptNorm_(r[3]) && !rptNorm_(r[4])) continue;
+      tot++;
+      var ks = rptPhoneKeys_(r[4]), m = false;
+      for (var a = 0; a < ks.length; a++) { allKeys[ks[a]] = 1; if (log[ks[a]]) m = true; }
+      if (m) hitAll++;
+      if (!rptIsGood_(r[7])) continue;
+      ab++;
+      if (ks.length) ph++;
+      if (m) hit++;
+    }
+    gTot += tot; gHit += hitAll;
+    out.push(['B. ไฟล์เซล ' + nm, 'ทุกเคส ' + tot, 'A/B ' + ab, 'มีเบอร์อ่านได้ ' + ph,
+              'match A/B ' + hit + ' · match ทุกเกรด ' + hitAll]);
+  }
+  out.push(['B. รวมทุกไฟล์', 'ทุกเคส ' + gTot, '', '', 'match ทุกเกรด ' + gHit]);
+  out.push(['', '', '', '', '']);
+
+  // C) กลับด้าน — เบอร์ในเพจกลาง อยู่ใน CRM กี่เบอร์
+  var lk = 0, lHit = 0, lRecent = 0, lRecentHit = 0;
+  var cut = new Date().getTime() - 45 * 86400000;
+  for (var k2 in log) {
+    lk++;
+    var inCrm = !!allKeys[k2];
+    if (inCrm) lHit++;
+    if (log[k2].when && log[k2].when >= cut) { lRecent++; if (inCrm) lRecentHit++; }
+  }
+  out.push(['C. เบอร์ในเพจกลางทั้งหมด', lk, 'อยู่ใน CRM ' + lHit,
+            'ไม่อยู่ใน CRM ' + (lk - lHit), '']);
+  out.push(['C. เพจกลาง เฉพาะ 45 วันล่าสุด', lRecent, 'อยู่ใน CRM ' + lRecentHit,
+            'ไม่อยู่ใน CRM ' + (lRecent - lRecentHit), '']);
+
+  rptWrite_(RPT_PRACH_FILE, 'ตรวจ match',
+    ['หัวข้อ', 'ค่า 1', 'ค่า 2', 'ค่า 3', 'ค่า 4'], out,
+    'ตัวตรวจ: ทำไม match เบอร์ได้น้อย · อัปเดต ' +
+    Utilities.formatDate(new Date(), 'Asia/Bangkok', 'd/M/yyyy HH:mm'));
+  Logger.log('[RPT] diag: ' + out.length + ' บรรทัด');
+  return out.length;
+}
+
 function rptBuildAll() {
   var a = 0, b = 0;
   try { a = rptBuildPrach(); } catch (e) { Logger.log('[RPT] ปราช ล้ม: ' + e); }
   try { b = rptBuildRecall(); } catch (e) { Logger.log('[RPT] recall ล้ม: ' + e); }
+  try { rptDiagBuild_(); } catch (e) { Logger.log('[RPT] diag ล้ม: ' + e); }
   return 'ปราช ' + a + ' เคส · recall ' + b + ' เคส';
 }
 
