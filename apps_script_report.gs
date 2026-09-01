@@ -148,39 +148,73 @@ function rptWrite_(fileId, tabName, head, rows, note) {
   }
 }
 
-// ---------- รีพอร์ต 1: Priority ของปราช ----------
+// ---------- รีพอร์ต 1: หน้างานของปราช (หน้าเดียว ครบทุกเคส) ----------
+// Gift สั่ง 1 ก.ย.: "ควรมีทุกเคส เป็นการรวมไฟล์ แต่ priority ต้องมาด้วย
+//                    และ recall ต้องมาด้วย ขอหน้าเดียว ทำงานง่าย ข้อมูลครบ"
+// = รวมไฟล์เซลของบอท + บันทึกการทำงานจริง (match ด้วยเบอร์โทร) ไว้แถวเดียวกัน
+// เรียงจากงานที่ต้องทำก่อน -> งานที่เก็บไว้ดูเฉยๆ
 function rptBuildPrach() {
   var log = rptReadPrachLog_();
   var rows = rptReadSales_('1lUwMfy1l7dDCTe_fURZ7PUDJEyMFtWrKnn2II2D5nXM');
-  var out = [], matched = 0;
+  var out = [], matched = 0, todo = 0, recall = 0;
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
-    if (!rptIsGood_(r[7])) continue;                       // H = เกรด
-    var key = rptPhoneKey_(r[4]);                          // E = เบอร์โทร
+    if (!rptNorm_(r[1]) && !rptNorm_(r[3]) && !rptNorm_(r[4])) continue;  // แถวว่าง
+    var key = rptPhoneKey_(r[4]);
     var hit = key ? log[key] : null;
     if (hit) matched++;
-    var stage = hit ? rptStageFromNote_(hit.note) : rptNorm_(r[18]);
-    var touched = !!hit || !rptUntouched_(r);
-    if (touched) continue;                                 // โฟกัสเฉพาะที่ยังไม่ได้โทร
+
+    var grade = rptNorm_(r[7]).toUpperCase();
+    var good = rptIsGood_(grade);
     var age = rptAgeDays_(r[0]);
-    out.push([rptNorm_(r[7]), age == null ? '' : age, rptNorm_(r[3]) || '(ยังไม่ได้ชื่อ)',
-              rptNorm_(r[4]), rptNorm_(r[5]), rptNorm_(r[2]), rptNorm_(r[8]),
-              rptNorm_(r[9]), rptNorm_(r[1]), stage]);
+    var noteReal = hit ? hit.note : '';
+    var stage = hit ? rptStageFromNote_(noteReal) : rptNorm_(r[18]);
+    var touched = !!hit || !rptUntouched_(r);
+    var dead = (stage === 'ตกเคส' || grade === 'X');
+
+    // ---- ลำดับงาน: เลขน้อย = ทำก่อน ----
+    var pri, label;
+    if (good && !touched && grade === 'A')      { pri = 1; label = '1 · โทรก่อน (A ยังไม่โทร)'; }
+    else if (good && !touched && grade === 'B') { pri = 2; label = '2 · โทรต่อ (B ยังไม่โทร)'; }
+    else if (good && !dead && stage === 'ติดต่อไม่ได้') { pri = 3; label = '3 · โทรไม่ติด ลองใหม่'; }
+    else if (good && !dead && (stage === 'นัดคุย' || stage === 'รีคอล')) { pri = 4; label = '4 · มีนัด/รีคอล'; }
+    else if (good && !dead)                     { pri = 5; label = '5 · กำลังดำเนินการ'; }
+    else if (!dead)                             { pri = 6; label = '6 · เกรดรอง'; }
+    else                                        { pri = 7; label = '7 · ปิดเคสแล้ว'; }
+    if (pri <= 2) todo++;
+
+    // ---- ธงเร่ง: เคสดีที่ปล่อยไว้เกิน 2 วันโดยไม่มีใครแตะ ----
+    var urgent = '';
+    if (good && !touched && age != null && age >= RPT_RECALL_DAYS) {
+      urgent = 'รีคอลด่วน ' + age + ' วัน';
+      recall++;
+    }
+
+    out.push([pri, label, urgent, grade, stage, rptNorm_(r[3]) || '(ยังไม่ได้ชื่อ)',
+              rptNorm_(r[4]), rptNorm_(r[5]), age == null ? '' : age, rptNorm_(r[2]),
+              rptNorm_(r[8]), rptNorm_(r[9]), rptNorm_(r[10]),
+              noteReal, rptNorm_(r[11]), rptNorm_(r[1])]);
   }
   out.sort(function (a, b) {
-    if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;        // A ก่อน B
-    return (b[1] || 0) - (a[1] || 0);                       // เก่าสุดก่อน
+    if (a[0] !== b[0]) return a[0] - b[0];              // ลำดับงาน
+    if (!!b[2] !== !!a[2]) return b[2] ? 1 : -1;        // เร่งขึ้นก่อน
+    return (b[8] || 0) - (a[8] || 0);                    // เก่าสุดก่อน
   });
-  rptWrite_(RPT_PRACH_FILE, 'Priority',
-    ['เกรด', 'อายุเคส(วัน)', 'ชื่อลูกค้า', 'เบอร์โทร', 'LINE', 'เพจ',
-     'รายได้/เดือน', 'ภาระผ่อน/เดือน', 'Lead ID', 'Stage'],
+  for (var k = 0; k < out.length; k++) out[k] = out[k].slice(1);   // ตัดเลขลำดับดิบทิ้ง
+
+  rptWrite_(RPT_PRACH_FILE, 'หน้างาน',
+    ['ลำดับงาน', 'เร่ง', 'เกรด', 'Stage', 'ชื่อลูกค้า', 'เบอร์โทร', 'LINE',
+     'อายุเคส(วัน)', 'เพจ', 'รายได้/เดือน', 'ภาระผ่อน/เดือน', 'วงเงินประเมิน',
+     'บันทึกจริงจากไฟล์งาน', 'สัญญาณจากบอท', 'Lead ID'],
     out,
-    'เคสเกรด A/B ของปราชที่ยังไม่มีใครแตะ — เรียงตามเกรดแล้วเก่าสุดก่อน · ' +
-    'จับคู่เบอร์กับไฟล์บันทึกจริงแล้ว ' + matched + ' เคส (เคสที่จับคู่ได้ = โทรแล้ว ตัดออก) · ' +
-    'อัปเดตล่าสุด ' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'd/M/yyyy HH:mm'));
-  Logger.log('[RPT] ปราช: ' + out.length + ' เคสรอโทร · จับคู่บันทึกจริงได้ ' + matched);
+    'หน้างานปราช — ทุกเคสในไฟล์เดียว เรียงจากงานที่ต้องทำก่อน · ' +
+    'รอโทร (A/B ยังไม่แตะ) ' + todo + ' เคส · เร่งรีคอล ' + recall + ' เคส · ' +
+    'จับคู่เบอร์กับไฟล์บันทึกจริงได้ ' + matched + ' เคส · รวม ' + out.length + ' เคส · ' +
+    'อัปเดต ' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'd/M/yyyy HH:mm'));
+  Logger.log('[RPT] ปราช: รวม ' + out.length + ' · รอโทร ' + todo + ' · เร่ง ' + recall);
   return out.length;
 }
+
 
 // ---------- รีพอร์ต 2: Recall ด่วน ทุกเซล ----------
 function rptBuildRecall() {
@@ -221,4 +255,15 @@ function rptBuildAll() {
   try { a = rptBuildPrach(); } catch (e) { Logger.log('[RPT] ปราช ล้ม: ' + e); }
   try { b = rptBuildRecall(); } catch (e) { Logger.log('[RPT] recall ล้ม: ' + e); }
   return 'ปราช ' + a + ' เคส · recall ' + b + ' เคส';
+}
+
+
+// ตัวคุมความถี่ — งานที่เกาะอยู่วิ่งทุก ~5 นาที ไม่ต้องสร้างรีพอร์ตทุกครั้ง
+function rptTick_() {
+  var p = PropertiesService.getScriptProperties();
+  var last = Number(p.getProperty('RPT_LAST') || 0);
+  var now = new Date().getTime();
+  if (now - last < 15 * 60 * 1000) return 'skip';
+  p.setProperty('RPT_LAST', String(now));
+  return rptBuildAll();
 }
