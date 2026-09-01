@@ -6900,6 +6900,59 @@ except Exception as _e:
     print(f"[R122 ERROR] ต่อไม่ติด — ใช้ของเดิม: {_e}")
 
 
+# ============================================================================
+# r123 (1 ก.ย. 2569, Gift สั่ง) — เปิดบอทตอบเพจ MillionCondo
+# ----------------------------------------------------------------------------
+# ตัวเลขที่ทำให้ตัดสินใจ (1 ก.ย.): เพจนี้มีลีดเข้า 24 ใบ แต่ "มีช่องทางติดต่อ 0"
+#   ทุกใบเงียบเพราะ WEC_PAGES ตั้ง "reply": false ไว้ตั้งแต่ r70 (22 ส.ค.)
+#   = จ่ายค่าแอดแล้วทิ้งทุกวัน
+#
+# ทำไมแก้ที่นี่ไม่ไปแก้ env: ตัวแปร WEC_PAGES อยู่รวมกับค่าตั้งค่าเพจอื่นทั้งหมด
+#   การเขียนทับทั้งก้อนเสี่ยงกว่าการ override ในชั้น patch ที่ย้อนกลับได้ทันที
+#   เมื่อ Gift แก้ env จริงเมื่อไหร่ แพตช์นี้จะไม่ทำอะไร (เจอ reply เป็น true อยู่แล้ว)
+#
+# จุดที่พลาดง่าย: main.py บรรทัด ~150 คำนวณ OBSERVE_PAGES ตอน import
+#   ซึ่งเกิด "ก่อน" แพตช์ทุกตัว -> ตั้ง reply=True เฉย ๆ ไม่พอ
+#   ต้องถอด page id ออกจาก OBSERVE_PAGES ด้วย ไม่งั้นบอทยังเงียบเหมือนเดิม
+#
+# จับเพจด้วยชื่อ ไม่ฮาร์ดโค้ด page id -> ถ้า id เปลี่ยนก็ยังทำงาน และไม่เดาผิดเพจ
+# ============================================================================
+try:
+    import re as _re123
+
+    _R123_MATCH = _re123.compile(r"millioncondo|อสังหาเงินล้าน", _re123.IGNORECASE)
+    _r123_hit, _r123_already = [], []
+
+    for _pid, _cfg in list((PAGES or {}).items()):
+        try:
+            _blob = " ".join(str((_cfg or {}).get(k, "")) for k in ("tab", "brand", "name"))
+            if not _R123_MATCH.search(_blob):
+                continue
+            _was_off = page_reply_off(_pid)
+            if not _was_off:
+                _r123_already.append(str(_pid))
+                continue
+            _cfg["reply"] = True
+            _cfg.pop("mode", None)          # กัน observe/silent/listen/log ค้างอยู่
+            try:
+                OBSERVE_PAGES.discard(str(_pid))
+            except Exception:
+                pass
+            _r123_hit.append(str(_pid))
+        except Exception as _e1:
+            print(f"[R123 WARN] เพจ {_pid}: {_e1}")
+
+    if _r123_hit:
+        print(f"[R123] เปิดบอทตอบแล้ว {len(_r123_hit)} เพจ: {', '.join(_r123_hit)} "
+              f"· OBSERVE_PAGES เหลือ {sorted(OBSERVE_PAGES)}")
+    elif _r123_already:
+        print(f"[R123] เพจ MillionCondo เปิดตอบอยู่แล้ว ({', '.join(_r123_already)}) — ไม่แตะ")
+    else:
+        print("[R123 WARN] หาเพจ MillionCondo ใน WEC_PAGES ไม่เจอ — บอทยังเงียบเหมือนเดิม")
+except Exception as _e:
+    print(f"[R123 ERROR] ต่อไม่ติด — เพจยังปิดตอบตามเดิม: {_e}")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
