@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r115"
+BOT_REVISION = "r116"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -6235,6 +6235,8 @@ try:
                     and _d.get("debt_baht")
                     and not _d.get("debt_total_baht")
                     and not state.get("_r114_asked")
+                    # r116 — เกรด B ใช้ชุดถามละเอียด 4 ข้อแทน ไม่ต้องถามสั้นซ้ำ
+                    and str(_d.get("grade") or "") != "B"
                     and not _d.get("cash")
                     and not state.get("renter") and not state.get("owner")):
                 state["_r114_asked"] = True
@@ -6251,6 +6253,285 @@ try:
     print("[R114] ยอดหนี้รวม: ถาม 2 จังหวะ (หลังยอดผ่อน + ซ้ำอีกครั้งหลังได้เบอร์)")
 except Exception as _e:
     print(f"[R114 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+
+# ============================================================
+# r116 (1 ก.ย. 2569, Gift เคาะ) — ชุดยืนยันตัวเลข "เฉพาะเกรด B"
+# ------------------------------------------------------------
+# เหตุผล: เกรด B = เคสบริดจ์ ต้องรู้ยอดปิดภาระจริงถึงจะวางแผนได้
+#   ยอดผ่อนรวมก้อนเดียวไม่พอ ต้องแยกรายการ เพราะแต่ละก้อนปิดยากง่ายไม่เท่ากัน
+# ถามหลังได้เบอร์แล้วเท่านั้น — จังหวะนี้เสียลีดยากกว่ามาก
+# 4 ข้อ ทีละข้อ · ข้อละครั้งเดียว (ถามกลับได้ 1 รอบ) · ตอบไม่ได้ = ข้ามไปข้อถัดไป
+# ลูกค้าบอกพอ = หยุดทั้งชุดทันที + ติดธง  (ห้ามไล่บี้ ห้ามทิ้งเคส)
+# ครบแล้ว: คิดวงเงินใหม่ -> ตีเกรดใหม่ + ติดธงว่าเปลี่ยนจากอะไร -> เขียนกลับแถวเดิม
+# คำถามทุกข้อผ่าน _public_guard แล้ว (ห้ามมีคำว่า "คอมมิชชั่น"/"ค่าคอม" เด็ดขาด
+# เพราะยามบล็อกทั้งบับเบิล = บอทเงียบ — บทเรียนจาก r110)
+# ============================================================
+R116_BRIDGE = ("ขอบคุณครับ ก่อนที่ปรึกษาจะโทรกลับ ขอเช็กตัวเลขเพิ่มอีก 4 ข้อสั้นๆ "
+               "เพื่อคำนวณวงเงินให้แม่นขึ้นนะครับ")
+R116_Q = {
+    1: ("ข้อแรกครับ ผ่อนบ้านกับผ่อนรถ เดือนละเท่าไหร่ "
+        "และยอดคงเหลือประมาณเท่าไหร่ครับ ถ้าไม่มีบอกว่าไม่มีได้เลยครับ"),
+    2: ("ข้อสองครับ สินเชื่อส่วนบุคคลกับบัตรเครดิต จ่ายขั้นต่ำเดือนละเท่าไหร่ "
+        "และยอดคงเหลือรวมประมาณเท่าไหร่ครับ"),
+    3: ("ข้อสามครับ มีภาระอื่นอีกไหมครับ เช่น สหกรณ์ หักหน้าซอง กยศ. "
+        "หรือผ่อนสินค้า ถ้ามีเดือนละเท่าไหร่ ยอดคงเหลือเท่าไหร่ครับ"),
+    4: ("ข้อสุดท้ายครับ เงินเดือนที่แจ้งไว้ รวมโอที โบนัส และรายได้ส่วนอื่นแล้ว"
+        "หรือยังครับ ถ้ายัง แต่ละอย่างเดือนละประมาณเท่าไหร่ครับ"),
+}
+R116_SLOT = {1: "home", 2: "loan", 3: "etc"}
+R116_STOP = ("พอแล้ว", "ไม่สะดวก", "ไม่อยากบอก", "ไม่บอก", "ขี้เกียจ",
+             "เดี๋ยวคุยกับ", "โทรมาเลย", "ไว้คุยโทร", "ไม่ตอบ", "พอก่อน")
+R116_NONE = ("ไม่มี", "ไม่ได้ผ่อน", "ไม่มีเลย", "ไม่มีครับ", "ไม่มีค่ะ", "0")
+R116_YES_ALL = ("รวมแล้ว", "รวมหมด", "รวมทุกอย่าง", "ครบแล้ว", "รวมอยู่แล้ว")
+R116_NOT_YET = ("ยังไม่รวม", "ยัง", "ไม่รวม", "แยกต่างหาก", "ไม่ได้รวม")
+_R116_UNIT = {"ล้าน": 1_000_000, "แสน": 100_000, "หมื่น": 10_000,
+              "พัน": 1_000, "k": 1_000, "m": 1_000_000}
+
+
+def _r116_amounts(msg):
+    """ดึงจำนวนเงินทุกก้อน รองรับทั้ง 'สามแสน' และ '300000' — ตัดเบอร์โทรทิ้งก่อน"""
+    s = str(msg or "").replace(",", "").lower()
+    s = _re94.sub(r"0[0-9]{8,9}", " ", s)
+    out = []
+    for m in _re94.finditer(r"([0-9]+(?:\.[0-9]+)?)\s*(ล้าน|แสน|หมื่น|พัน|k|m)", s):
+        v = round(float(m.group(1)) * _R116_UNIT[m.group(2)])
+        if 300 <= v <= 100_000_000:
+            out.append(v)
+    s2 = _re94.sub(r"([0-9]+(?:\.[0-9]+)?)\s*(ล้าน|แสน|หมื่น|พัน|k|m)", " ", s)
+    for x in _re94.findall(r"[0-9]+", s2):
+        v = int(x)
+        if 300 <= v <= 100_000_000:
+            out.append(v)
+    return out
+
+
+def _r116_split(msg):
+    """คืน (ยอดผ่อน/เดือน, ยอดคงเหลือ) — เดาจากขนาดเมื่อได้ตัวเดียว"""
+    if any(w in str(msg or "") for w in R116_NONE) and not _r116_amounts(msg):
+        return 0, 0
+    nums = _r116_amounts(msg)
+    if not nums:
+        return None, None
+    if len(nums) >= 2:
+        return min(nums), max(nums)
+    n = nums[0]
+    return (None, n) if n >= 100_000 else (n, None)
+
+
+def _r116_recalc(self, state, data):
+    """รวมตัวเลขใหม่ -> คิดวงเงิน -> ตีเกรดใหม่ + ติดธงว่าเปลี่ยนจากอะไร"""
+    _mo, _bal, _got = 0, 0, False
+    for k in ("home", "loan", "etc"):
+        _m = data.get(f"debt_{k}_monthly")
+        _b = data.get(f"debt_{k}_balance")
+        if _m is not None:
+            _mo += int(_m); _got = True
+        if _b is not None:
+            _bal += int(_b); _got = True
+    if _got:
+        if _mo > 0:
+            data["debt_baht"] = int(_mo)
+        if _bal > 0:
+            data["debt_total_baht"] = int(_bal)
+            data["close_amount"] = int(_bal)
+    _x = data.get("income_extra")
+    if _x:
+        data["income_var"] = int(_x)
+        _own = data.get("income_baht") or 0
+        _cob = data.get("co_borrower_income") or 0
+        data["income_total"] = int(_own) + int(_x) + int(_cob)
+    _old = str(data.get("grade") or "")
+    try:
+        _new = self._grade(data, state)
+    except Exception as _e:
+        print(f"[R116 REGRADE ERROR] {_e} — คงเกรดเดิม")
+        _new = _old
+    if _new == "X" and _old != "X":
+        self._add_signal(state, f"⚠️ ตัวเลขใหม่ทำให้ระบบตีเป็น X แต่คงเกรด {_old} "
+                                "ไว้เพราะแจกเคสไปแล้ว — เซลเช็กก่อนเสนอ")
+        _new = _old
+    if _new and _new != _old:
+        data["grade"] = _new
+        self._add_signal(state, f"🔁 เกรดเปลี่ยน {_old} → {_new} "
+                                "หลังยืนยันตัวเลขหนี้/รายได้จริง (ชุด 4 ข้อหลังได้เบอร์)")
+        print(f"[R116] เกรดเปลี่ยน {_old} -> {_new}")
+    _cc = data.get("capacity_clear")
+    _tot = data.get("debt_total_baht")
+    if _cc and _tot:
+        _gap = int(_cc) - R89_UNIT_PRICE
+        data["bcr"] = 1 if _gap >= int(_tot) else ""
+        if data["bcr"] == 1:
+            self._add_signal(state, f"💰 BCR — ปิดหนี้แล้วกู้ได้ {int(_cc)/1e6:.2f} ล้าน · "
+                                    f"ยอดปิดภาระ {int(_tot):,} บาท · "
+                                    f"ส่วนต่าง {_gap/1e6:.2f} ล้าน คลุมครบ")
+        else:
+            self._add_signal(state, f"ปิดหนี้แล้วกู้ได้ {int(_cc)/1e6:.2f} ล้าน · "
+                                    f"ยอดปิดภาระ {int(_tot):,} บาท · "
+                                    f"ส่วนต่างขาดอีก {int(_tot) - _gap:,} บาท")
+
+
+def _r116_save(self, user_id, state):
+    try:
+        self._send_name_update(user_id, state)
+    except Exception as _e:
+        print(f"[R116 SHEET ERROR] {_e}")
+
+
+try:
+    _R116_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r116(self, msg, user_id, state, bucket, is_new):
+        data = state.get("data") or {}
+        _step = state.get("_r116_step")
+
+        # ---------- กำลังอยู่ในชุดคำถาม ----------
+        if _step:
+            try:
+                _t = str(msg or "")
+                if any(w in _t for w in R116_STOP):
+                    state.pop("_r116_step", None)
+                    self._add_signal(state, "ลูกค้าขอไม่ตอบชุดยืนยันตัวเลขต่อ "
+                                            "— เซลถามที่เหลือตอนโทร")
+                    _r116_recalc(self, state, data)
+                    _r116_save(self, user_id, state)
+                    print(f"[R116] {str(user_id)[:8]}... ลูกค้าขอหยุด — ปิดชุด")
+                    return ["ได้เลยครับ เดี๋ยวที่ปรึกษาโทรคุยรายละเอียดให้นะครับ"], None
+
+                _advance = False
+                if _step <= 3:
+                    _m, _b = _r116_split(_t)
+                    if _m is not None or _b is not None:
+                        _slot = R116_SLOT[_step]
+                        if _m is not None:
+                            data[f"debt_{_slot}_monthly"] = int(_m)
+                        if _b is not None:
+                            data[f"debt_{_slot}_balance"] = int(_b)
+                        self._add_signal(
+                            state,
+                            f"[ยืนยันตัวเลข {_step}/4] {_slot} ผ่อน/เดือน "
+                            f"{('%s' % f'{int(_m):,}') if _m is not None else '-'} · "
+                            f"คงเหลือ "
+                            f"{('%s' % f'{int(_b):,}') if _b is not None else '-'}")
+                        _advance = True
+                else:
+                    _neg = any(w in _t for w in R116_NOT_YET)
+                    _pos = (not _neg) and any(w in _t for w in R116_YES_ALL)
+                    _nums = _r116_amounts(_t)
+                    if _pos:
+                        data["income_confirmed"] = "รวมแล้ว"
+                        self._add_signal(state, "[ยืนยันตัวเลข 4/4] เงินเดือนที่แจ้ง "
+                                                "รวมโอที/โบนัส/รายได้อื่นแล้ว")
+                        _advance = True
+                    elif _nums:
+                        data["income_confirmed"] = "ยังไม่รวม"
+                        data["income_extra"] = int(sum(_nums))
+                        self._add_signal(state, f"[ยืนยันตัวเลข 4/4] มีรายได้เพิ่มนอก"
+                                                f"เงินเดือนรวม {int(sum(_nums)):,}/เดือน")
+                        _advance = True
+                    elif _neg:
+                        data["income_confirmed"] = "ยังไม่รวม (ไม่ได้ตัวเลข)"
+                        self._add_signal(state, "[ยืนยันตัวเลข 4/4] บอกว่ายังไม่รวม "
+                                                "แต่ไม่ได้ตัวเลข — เซลถามตอนโทร")
+                        _advance = True
+
+                if not _advance:
+                    _tries = int(state.get("_r116_tries") or 0) + 1
+                    state["_r116_tries"] = _tries
+                    if _tries < 2 and self._is_question(msg):
+                        # ลูกค้าถามกลับ — ให้เอนจินเดิมตอบ แล้วทวนคำถามเดิมต่อท้าย
+                        _bb, _gg = _R116_BASE_DECIDE(self, msg, user_id,
+                                                     state, bucket, is_new)
+                        _bb = [b for b in (_bb or []) if b and str(b).strip()]
+                        _bb.append(R116_Q[_step])
+                        return _bb, _gg
+                    self._add_signal(state, f"[ยืนยันตัวเลข {_step}/4] ไม่ได้ตัวเลข "
+                                            f"— ลูกค้าตอบ: {_t[:40]} · เซลถามตอนโทร")
+                    _advance = True
+
+                state["_r116_tries"] = 0
+                _step += 1
+                if _step > 4:
+                    state.pop("_r116_step", None)
+                    state.pop("_r116_tries", None)
+                    _r116_recalc(self, state, data)
+                    _r116_save(self, user_id, state)
+                    print(f"[R116] {str(user_id)[:8]}... เก็บครบ 4 ข้อ — "
+                          f"คิดวงเงินใหม่ + เขียนกลับชีตแล้ว")
+                    return (["ขอบคุณมากครับ ข้อมูลครบแล้ว "
+                             "เดี๋ยวที่ปรึกษาโทรกลับพร้อมแผนวงเงินให้เลยครับ"], None)
+                state["_r116_step"] = _step
+                _r116_save(self, user_id, state)
+                return [R116_Q[_step]], None
+            except Exception as _e:
+                print(f"[R116 STEP ERROR] {_e} — ปิดชุด ไปทางเดิม")
+                state.pop("_r116_step", None)
+                state.pop("_r116_tries", None)
+
+        # ---------- ยังไม่เริ่ม: เช็คว่าเพิ่งได้เบอร์ + เกรด B ไหม ----------
+        _had_contact = bool((state.get("data") or {}).get("contact"))
+        bubbles, grade = _R116_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            _d = state.get("data") or {}
+            _g = str(grade or _d.get("grade") or "")
+            if (_g == "B" and not _had_contact and _d.get("contact")
+                    and not state.get("_r116_done")
+                    and not _d.get("cash")
+                    and not state.get("renter") and not state.get("owner")):
+                state["_r116_done"] = True
+                state["_r116_step"] = 1
+                state["_r116_tries"] = 0
+                bubbles = [b for b in (bubbles or []) if b and str(b).strip()]
+                # r114 อาจต่อคำถามยอดหนี้รวมสั้นไว้ — เอาออก ชุดนี้ละเอียดกว่า
+                bubbles = [b for b in bubbles if b != R89_DEBT_TOTAL_Q]
+                state.pop("_r114_wait", None)
+                _pre = ""
+                try:
+                    if _d.get("debt_baht"):
+                        _pre = (f"ที่แจ้งว่าผ่อนรวมเดือนละ {int(_d['debt_baht']):,} "
+                                "ขอแยกเป็นรายการนะครับ ")
+                except Exception:
+                    _pre = ""
+                bubbles.append(R116_BRIDGE)
+                bubbles.append(_pre + R116_Q[1])
+                print(f"[R116] {str(user_id)[:8]}... เกรด B + ได้เบอร์แล้ว "
+                      "— เริ่มชุดยืนยันตัวเลข 4 ข้อ")
+        except Exception as _e:
+            print(f"[R116 START ERROR] {_e} — ใช้ชุดเดิม")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r116
+    print("[R116] ชุดยืนยันตัวเลขเกรด B (หนี้ 3 รายการ + รายได้จริง) เปิดแล้ว")
+except Exception as _e:
+    print(f"[R116 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+# ---------- r116 (2) — ส่ง 12 ช่องใหม่เข้าชีตผ่านจุดรวมเดิม ----------
+try:
+    _R116_PREV_INUM = _bl9.BotEngine._income_numbers
+
+    def _income_numbers_r116(data):
+        _out = dict(_R116_PREV_INUM(data))
+        try:
+            _d = data or {}
+            for _k in ("debt_home_monthly", "debt_home_balance",
+                       "debt_loan_monthly", "debt_loan_balance",
+                       "debt_etc_monthly", "debt_etc_balance",
+                       "income_extra", "close_amount",
+                       "capacity_clear", "capacity_now"):
+                _v = _d.get(_k)
+                _out[_k] = "" if _v in (None, "") else int(_v)
+            _out["income_confirmed"] = _d.get("income_confirmed") or ""
+            _out["bcr"] = "✅" if _d.get("bcr") or _d.get("bridge_ok") else ""
+        except Exception as _e:
+            print(f"[R116 NUM ERROR] {_e}")
+        return _out
+
+    _bl9.BotEngine._income_numbers = staticmethod(_income_numbers_r116)
+    print("[R116] ส่ง 12 ช่องใหม่เข้าชีต (คอลัมน์ 37–48)")
+except Exception as _e:
+    print(f"[R116 NUM PATCH ERROR] ต่อไม่ติด: {_e}")
 
 
 if __name__ == "__main__":
