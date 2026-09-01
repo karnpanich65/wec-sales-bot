@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r113"
+BOT_REVISION = "r114"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -6142,6 +6142,103 @@ try:
     print("[R113] วินิจฉัยลีดโฆษณา: วัดอายุ event + เทียบ entry.id กับ recipient.id")
 except Exception as _e:
     print(f"[R113 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
+
+
+
+# ============================================================
+# r114 (1 ก.ย. 2569, Gift เคาะ) — ถามยอดหนี้รวม "2 จังหวะ"
+# ------------------------------------------------------------
+# เดิม (r89) ถามครั้งเดียว: ทันทีหลังลูกค้าบอกยอดผ่อน/เดือน = ก่อนขอเบอร์
+# ปัญหา: ลูกค้าที่ตอบไม่ได้/ตอบเลี่ยงตรงนั้น = ไม่มียอดหนี้รวมตลอดกาล
+#        -> เกรด B ขาดตัวเลขบริดจ์ เซลต้องโทรถามเอง
+# ใหม่: ถ้ารอบแรกไม่ได้ตัวเลข -> พอได้เบอร์แล้วถามซ้ำอีก 1 ครั้ง (ครั้งเดียว)
+#       จังหวะนี้ลูกค้าให้เบอร์แล้ว = เสียลีดยากกว่ามาก
+# ได้คำตอบแล้วเขียนกลับแถวเดิมในชีตผ่าน p4UpsertLead (หาแถวตาม PSID
+# เขียนทับเฉพาะช่องที่มีค่า · calendar=False = ไม่สร้างนัดโทรซ้ำ)
+# ห้ามทำให้บอทเงียบ: พลาดตรงไหนก็ไหลไปทางเดิมทั้งหมด
+# ============================================================
+try:
+    _R114_BASE_DECIDE = CalmBotEngine._decide
+
+    def _r114_after_total(self, state, data):
+        """ได้ยอดหนี้รวมช้า — คิดบริดจ์ใหม่ + เขียนกลับแถวเดิม"""
+        try:
+            _tot = data.get("debt_total_baht")
+            _cc = data.get("capacity_clear")
+            if _tot and _cc:
+                _gap = int(_cc) - R89_UNIT_PRICE
+                if _gap >= int(_tot):
+                    data["bridge_ok"] = 1
+                    self._add_signal(
+                        state,
+                        f"💰 ปิดหนี้แล้วกู้ได้ {int(_cc)/1e6:.2f} ล้าน · "
+                        f"ยอดหนี้รวม {int(_tot):,} บาท · ส่วนต่างวงเงิน "
+                        f"{_gap/1e6:.2f} ล้าน คลุมยอดหนี้ครบ (ถามหลังได้เบอร์)")
+                else:
+                    self._add_signal(
+                        state,
+                        f"💰 ปิดหนี้แล้วกู้ได้ {int(_cc)/1e6:.2f} ล้าน · "
+                        f"ยอดหนี้รวม {int(_tot):,} บาท · ส่วนต่างวงเงิน "
+                        f"{_gap/1e6:.2f} ล้าน ต้องเคลียร์เพิ่มอีก "
+                        f"{int(_tot) - _gap:,} บาท (ถามหลังได้เบอร์)")
+        except Exception as _e:
+            print(f"[R114 BRIDGE ERROR] {_e}")
+
+    def _decide_r114(self, msg, user_id, state, bucket, is_new):
+        data = state.get("data") or {}
+        # ---- (ก) รอบนี้คือคำตอบของคำถามยอดหนี้รวมรอบหลังเบอร์ ----
+        if state.get("_r114_wait"):
+            try:
+                state.pop("_r114_wait", None)
+                _amt = _r89_parse_total(msg)
+                if _amt is not None:
+                    data["debt_total_baht"] = int(_amt)
+                    self._add_signal(
+                        state, f"ยอดหนี้คงเหลือรวม {int(_amt):,} บาท "
+                               "(ลูกค้าบอกเอง หลังให้เบอร์)")
+                    _r114_after_total(self, state, data)
+                    try:
+                        self._send_name_update(user_id, state)
+                        print(f"[R114] {str(user_id)[:8]}... ได้ยอดหนี้รวม "
+                              f"{int(_amt):,} — เขียนกลับแถวเดิมแล้ว")
+                    except Exception as _e2:
+                        print(f"[R114 SHEET ERROR] {_e2}")
+                    return ["ขอบคุณครับ เดี๋ยวที่ปรึกษาโทรกลับพร้อมแผนให้เลยครับ"], None
+                # ไม่ใช่ตัวเลข (ถามกลับ/ตอบเลี่ยง) -> ปล่อยเทิร์นให้เอนจินเดิมจัดการ
+                data["debt_total_baht"] = None      # ถามครบ 2 รอบแล้ว ห้ามถามอีก
+                self._add_signal(
+                    state, f"ถามยอดหนี้รวมครบ 2 รอบแล้ว ลูกค้าตอบ: "
+                           f"{str(msg)[:60]} — เซลยืนยันตอนโทร")
+            except Exception as _e:
+                print(f"[R114 CONSUME ERROR] {_e} — ไปทางเดิม")
+                state.pop("_r114_wait", None)
+
+        _had_contact = bool((state.get("data") or {}).get("contact"))
+        bubbles, grade = _R114_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+        # ---- (ข) เพิ่งได้เบอร์เทิร์นนี้ แต่ยังไม่รู้ยอดหนี้รวม -> ถามต่อ 1 ข้อ ----
+        try:
+            _d = state.get("data") or {}
+            if (not _had_contact and _d.get("contact")
+                    and _d.get("debt_baht")
+                    and not _d.get("debt_total_baht")
+                    and not state.get("_r114_asked")
+                    and not _d.get("cash")
+                    and not state.get("renter") and not state.get("owner")):
+                state["_r114_asked"] = True
+                state["_r114_wait"] = True
+                bubbles = [b for b in (bubbles or []) if b and str(b).strip()]
+                bubbles.append(R89_DEBT_TOTAL_Q)
+                print(f"[R114] {str(user_id)[:8]}... ได้เบอร์แล้วแต่ยังไม่รู้ "
+                      "ยอดหนี้รวม — ถามซ้ำจังหวะที่ 2")
+        except Exception as _e:
+            print(f"[R114 ASK ERROR] {_e} — ใช้ชุดเดิม")
+        return bubbles, grade
+
+    CalmBotEngine._decide = _decide_r114
+    print("[R114] ยอดหนี้รวม: ถาม 2 จังหวะ (หลังยอดผ่อน + ซ้ำอีกครั้งหลังได้เบอร์)")
+except Exception as _e:
+    print(f"[R114 ERROR] ต่อไม่ติด — ใช้ทางเดิม: {_e}")
 
 
 if __name__ == "__main__":
