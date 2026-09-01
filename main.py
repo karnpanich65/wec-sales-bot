@@ -251,7 +251,7 @@ except Exception as _e:
 # มองจากข้างนอกไม่มีทางรู้เลยว่าที่รันอยู่คือรอบเก่าหรือใหม่
 # ดูได้ที่ log ตอนบูต หรือเปิด /health
 # ======================================================
-BOT_REVISION = "r116"
+BOT_REVISION = "r117"
 print(f"[VERSION] WEC bot รอบ {BOT_REVISION}")
 
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "wec_bot_verify_2569")
@@ -2705,6 +2705,10 @@ _R89_ORIG_GRADE = _bl9.BotEngine._grade
 
 
 def _r89_reason(self, data, state, code, txt):
+    # r117 — W1 ไม่เข้าคิวแจกเคส (Gift เคาะ 1 ก.ย. 2569) ต้องเขียนติดไปกับเหตุผล
+    # ให้ทุกคนที่เปิดชีตเห็นว่าทำไมเคสนี้ไม่มีชื่อเซล ไม่ใช่ระบบแจกพลาด
+    if code == "W1":
+        txt = txt + " · ไม่เข้าคิวแจกเคส — ดึงบูโรจริงก่อน ผ่านแล้วค่อยแจก"
     data["grade_reason"] = f"{code} {txt}"
     if state is not None:
         try:
@@ -2962,11 +2966,19 @@ try:
                             signals=None, contact_refused=False, calendar=True,
                             sale=""):
         try:
-            if grade == "C" and (data.get("income_unknown") or data.get("income_refused")
-                                 or data.get("co_borrower_none")):
+            # r117 (1 ก.ย. 2569, Gift เคาะ) — เกรด C แจกได้เฉพาะ "มีผู้กู้ร่วม"
+            # เหตุผล: C = ปิดหนี้หมดแล้ววงเงินก็ยังไม่ถึงราคาห้อง
+            #   มีผู้กู้ร่วม = เคสจริง ดันไปห้องราคาต่ำกว่าได้ -> แจก
+            #   ยื่นเดี่ยว/ยังไม่รู้ว่ามีไหม = ไม่มีทางไปต่อ -> X (ไม่แจก ไม่นัดโทร)
+            # ของเดิมตัดเฉพาะคนที่ "บอกว่าไม่มี" ชัดๆ คนที่ไม่เคยตอบยังหลุดไปแจก
+            _cob_ok = bool(data.get("co_borrower_income")
+                           or data.get("co_borrower_yes"))
+            if grade == "C" and not _cob_ok:
                 why = ("ลูกค้าไม่บอกรายได้"
                        if (data.get("income_unknown") or data.get("income_refused"))
-                       else "ไม่มีผู้กู้ร่วม ยื่นเดี่ยวไม่ผ่าน")
+                       else "ไม่มีผู้กู้ร่วม ยื่นเดี่ยวไม่ผ่าน"
+                       if data.get("co_borrower_none")
+                       else "ยังไม่มีผู้กู้ร่วมยืนยัน และยื่นเดี่ยววงเงินไม่ถึงราคาห้อง")
                 grade = "X"
                 data["grade"] = "X"
                 data["grade_reason"] = "X ไม่รับเคส — " + why
