@@ -7269,7 +7269,7 @@ try:
     _R126_CASES = [
         ("รายได้ 15,000 ไม่มีหนี้", 15000, 0, 35, "C"),
         ("รายได้ 20,000 ไม่มีหนี้", 20000, 0, 35, "C"),
-        ("รายได้ 22,600 ไม่มีหนี้ (เส้น A)", 22600, 0, 35, "A"),
+        ("รายได้ 24,600 ไม่มีหนี้ (เส้น A จริง)", 24600, 0, 35, "A"),
         ("รายได้ 25,000 ไม่มีหนี้", 25000, 0, 35, "A"),
         ("รายได้ 40,000 ไม่มีหนี้ = Suneerat 09/006", 40000, 0, 35, "A"),
         ("รายได้ 50,000 ผ่อน 35,000 (DSR 70%)", 50000, 35000, 35, "B"),
@@ -7354,6 +7354,48 @@ try:
     print("[R126] เปิด /rules — ดูเกณฑ์เกรด + ข้อสอบ (อ่านอย่างเดียว)")
 except Exception as _e126:
     print("[R126 ERROR] " + str(_e126))
+
+# ==================================================================
+# r127 — B บริดจ์ต้องปิดภาระไหวจริง  · Gift เคาะ 2 ก.ย. 2026
+#   DSR ก่อนปิด > 80%  =  ปิดเองไม่ไหว  ->  ไม่ใช่บริดจ์  ->  C
+#   ทำได้แค่ "ลดเกรด B" เท่านั้น เกรดอื่นไม่แตะ ปลอดภัยต่อของเดิม
+#   หมายเหตุ: เงื่อนไข "ต้องรู้ยอดหนี้คงเหลือ" ยังทำไม่ได้
+#   เพราะบอทไม่มีช่องเก็บยอดคงเหลือเลย (มีแต่ debt_baht = ค่างวด/เดือน)
+# ==================================================================
+try:
+    import bot_logic as _bl127
+
+    _R127_BASE_GRADE = _bl127.BotEngine._grade
+
+    def _grade_r127(self, data, state=None):
+        g = _R127_BASE_GRADE(self, data, state)
+        try:
+            if str(g).strip().upper() != "B":
+                return g
+            inc = int(data.get("income_counted") or data.get("income_total")
+                      or data.get("income_baht") or 0)
+            dm = data.get("debt_baht")
+            if not inc or dm is None:
+                return g
+            dsr = float(dm) / float(inc)
+            cap = WEC_RULES["bridge_max_dsr"]
+            if dsr > cap:
+                try:
+                    self._add_signal(state,
+                        "DSR ก่อนปิด %.0f%% เกินเพดาน %.0f%% "
+                        "— ปิดภาระเองไม่ไหวจริง ไม่นับเป็นบริดจ์ (Gift 2 ก.ย. 2026)"
+                        % (dsr * 100, cap * 100))
+                except Exception:
+                    pass
+                return "C"
+        except Exception as _e:
+            print("[R127 ERR] " + str(_e)[:80])
+        return g
+
+    _bl127.BotEngine._grade = _grade_r127
+    print("[R127] B บริดจ์ต้อง DSR ก่อนปิด <= 80%")
+except Exception as _e127:
+    print("[R127 ERROR] " + str(_e127))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
