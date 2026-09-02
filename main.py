@@ -7230,6 +7230,127 @@ try:
 except Exception as _e125:
     print(f"[R125 ERROR] {_e125}")
 
+# ==================================================================
+# r126 (ชั้น 0+1) — กล่องเลขกลาง + /rules  · Gift เคาะ 2 ก.ย. 2026
+#   อ่านอย่างเดียว ไม่ rebind อะไรทั้งสิ้น พฤติกรรมบอทเหมือนเดิมเป๊ะ
+#   เปิดให้เห็น: ค่าคงที่จริง · ตาราง DSR แบงก์ · ช่วงเกรดตามรายได้ · ข้อสอบเกรด
+# ==================================================================
+try:
+    import bot_logic as _bl126
+
+    WEC_RULES = {
+        "unit_price":      2300000,   # ราคาห้อง 1 ยูนิต
+        "bridge_min_diff":  300000,   # ส่วนต่างขั้นต่ำถึงเรียกบริดจ์
+        "bridge_max_dsr":     0.80,   # DSR ก่อนปิด เกินนี้ = ปิดไม่ไหว (Gift 2 ก.ย.)
+        "biz_margin":         0.15,   # ธุรกิจ: รายได้ = ยอดขาย x margin (Gift 2 ก.ย.)
+        "default_age":          35,
+    }
+
+    def _r126_cap(income, debt_m, age):
+        try:
+            return int(_bl126._capacity(int(income), int(debt_m), int(age)) or 0)
+        except Exception:
+            return -1
+
+    def _r126_grade(income, debt_m, age):
+        try:
+            d = {"income_total": int(income), "income_baht": int(income),
+                 "income": str(int(income)), "debt_total": int(debt_m),
+                 "debt_monthly": int(debt_m), "debt": str(int(debt_m)),
+                 "age": int(age), "own_age": int(age)}
+            return str(bot._grade(d, None) or "")
+        except Exception as _e:
+            return "ERR " + str(_e)[:40]
+
+    _R126_CASES = [
+        ("รายได้ 15,000 ไม่มีหนี้", 15000, 0, 35, "C"),
+        ("รายได้ 20,000 ไม่มีหนี้", 20000, 0, 35, "C"),
+        ("รายได้ 22,600 ไม่มีหนี้ (เส้น A)", 22600, 0, 35, "A"),
+        ("รายได้ 25,000 ไม่มีหนี้", 25000, 0, 35, "A"),
+        ("รายได้ 40,000 ไม่มีหนี้ = Suneerat 09/006", 40000, 0, 35, "A"),
+        ("รายได้ 50,000 ผ่อน 35,000 (DSR 70%)", 50000, 35000, 35, "B"),
+        ("รายได้ 50,000 ผ่อน 70,000 (DSR 140%) = FB-RS-506", 50000, 70000, 35, "C"),
+        ("รายได้ 68,000 ผ่อน 50,000 = 09/002 TNT", 68000, 50000, 35, "B"),
+        ("รายได้ 100,000 ไม่มีหนี้", 100000, 0, 35, "A"),
+        ("ธุรกิจ ยอดขาย 1 ล้าน x margin 15% = 150,000", 150000, 0, 35, "A"),
+        ("ธุรกิจ ยอดขาย 1 ล้าน x margin 50% = 500,000 (ของเดิม)", 500000, 0, 35, "A"),
+        ("แนน 09/007 ตัวเลขถูก 36,000 ผ่อน 8,481", 36000, 8481, 35, "A"),
+        ("แนน 09/007 ที่บอทอ่านได้ 15,000 ผ่อน 8,481", 15000, 8481, 35, "C"),
+        ("อายุ 25 รายได้ 40,000 ไม่มีหนี้", 40000, 0, 25, "A"),
+        ("อายุ 60 รายได้ 40,000 ไม่มีหนี้", 40000, 0, 60, "A"),
+    ]
+
+    def _r126_rules_view():
+        H = []
+        H.append("<meta charset=utf-8><title>WEC เกณฑ์เกรด</title>")
+        H.append("<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;color:#111}"
+                 "h2{margin:26px 0 8px;font-size:17px}table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}"
+                 "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f5f5f5}"
+                 ".ok{color:#0a7a2f;font-weight:600}.no{color:#b00020;font-weight:600}</style>")
+        H.append("<h1 style=font-size:20px>WEC — เกณฑ์เกรดที่ใช้อยู่จริง</h1>")
+
+        H.append("<h2>1 · ค่าคงที่ (กล่องเลขกลาง)</h2><table><tr><th>ชื่อ</th><th>ค่า</th></tr>")
+        for k in ("unit_price", "bridge_min_diff", "bridge_max_dsr", "biz_margin", "default_age"):
+            H.append("<tr><td>" + k + "</td><td>" + str(WEC_RULES[k]) + "</td></tr>")
+        try:
+            H.append("<tr><td>bot_logic.UNIT_PRICE_BAHT (ของจริงที่บอทใช้)</td><td>"
+                     + str(getattr(_bl126, "UNIT_PRICE_BAHT", "?")) + "</td></tr>")
+            H.append("<tr><td>bot_logic.FREELANCE_INCOME_PCT (margin ที่บอทใช้)</td><td>"
+                     + str(getattr(_bl126, "FREELANCE_INCOME_PCT", "?")) + "</td></tr>")
+            H.append("<tr><td>bot_logic.DEFAULT_AGE</td><td>"
+                     + str(getattr(_bl126, "DEFAULT_AGE", "?")) + "</td></tr>")
+        except Exception:
+            pass
+        H.append("</table>")
+
+        H.append("<h2>2 · ช่วงเกรดตามรายได้ (ไม่มีภาระ อายุ 35)</h2>")
+        H.append("<table><tr><th>รายได้/เดือน</th><th>วงเงินประเมิน</th><th>เกรดที่ได้</th></tr>")
+        for inc in (15000, 18000, 20000, 22000, 22600, 25000, 30000, 35000,
+                    40000, 50000, 60000, 80000, 100000, 150000, 200000):
+            c = _r126_cap(inc, 0, 35)
+            H.append("<tr><td>" + format(inc, ",") + "</td><td>"
+                     + ("%.2f ล้าน" % (c / 1000000.0) if c >= 0 else "คิดไม่ได้")
+                     + "</td><td>" + _r126_grade(inc, 0, 35) + "</td></tr>")
+        H.append("</table>")
+
+        H.append("<h2>3 · ข้อสอบเกรด</h2>")
+        H.append("<table><tr><th>เคส</th><th>วงเงินตอนนี้</th><th>ปิดหนี้แล้ว</th><th>DSR</th>"
+                 "<th>ควรได้</th><th>ได้จริง</th><th>ผล</th></tr>")
+        _pass = 0
+        for name, inc, dm, age, want in _R126_CASES:
+            c_now = _r126_cap(inc, dm, age)
+            c_clr = _r126_cap(inc, 0, age)
+            got = _r126_grade(inc, dm, age)
+            dsr = (dm * 100.0 / inc) if inc else 0
+            good = (got == want)
+            if good:
+                _pass += 1
+            H.append("<tr><td>" + name + "</td><td>"
+                     + ("%.2fM" % (c_now / 1000000.0)) + "</td><td>"
+                     + ("%.2fM" % (c_clr / 1000000.0)) + "</td><td>"
+                     + ("%.0f%%" % dsr) + "</td><td>" + want + "</td><td>" + got
+                     + "</td><td class=" + ("ok>ผ่าน" if good else "no>ตก") + "</td></tr>")
+        H.append("</table>")
+        H.insert(5, "<p>ข้อสอบเกรด <b>" + str(_pass) + " / "
+                 + str(len(_R126_CASES)) + "</b> ข้อ</p>")
+
+        H.append("<h2>4 · ตาราง DSR ของแบงก์ (ที่สูตรใช้จริง)</h2><table>"
+                 "<tr><th>แบงก์</th><th>ช่วงรายได้ -> DSR%</th></tr>")
+        try:
+            for b, tiers in (getattr(_bl126, "_BANK_DSR_TIERS", {}) or {}).items():
+                H.append("<tr><td>" + b + "</td><td>"
+                         + " · ".join([format(t[0], ",") + "+ -> " + str(t[1]) + "%" for t in tiers])
+                         + "</td></tr>")
+        except Exception:
+            pass
+        H.append("</table>")
+        return "".join(H), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+    app.add_url_rule("/rules", "r126_rules", _r126_rules_view, methods=["GET"])
+    print("[R126] เปิด /rules — ดูเกณฑ์เกรด + ข้อสอบ (อ่านอย่างเดียว)")
+except Exception as _e126:
+    print("[R126 ERROR] " + str(_e126))
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
