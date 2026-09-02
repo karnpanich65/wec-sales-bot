@@ -7080,6 +7080,156 @@ try:
 except Exception as _e124:
     print(f"[R124 ERROR] {_e124}")
 
+# ===== r125 : ซ่อมการอ่านรายได้ + กัน R100 ย้ายช่องมั่ว — 2 ก.ย. 2569 =====
+# ทำไม: ข้อสอบ r124 ตก 5 ข้อ ทุกข้อคือ "อ่านรายได้ต่ำกว่าจริง" -> เกรดต่ำ -> เคสดีไม่เข้าคิว
+# หลักการ: ห่อของเดิม ไม่แก้ของเดิม พังเมื่อไหร่ตกกลับไปใช้ของเดิมเสมอ
+try:
+    import bot_logic as _bl125
+
+    _R125_INCOME_WORDS = ("เงินเดือน", "รายได้", "รายรับ", "เงินได้", "รับเดือนละ", "ได้เดือนละ",
+                          "รับสุทธิ", "สลิป", "ฐานเงินเดือน", "เงินเข้า", "โอที", "OT", "ค่าคอม", "คอมมิช")
+    _R125_NOT_INCOME = ("งบ", "ราคา", "ซื้อ", "วงเงิน", "ยอดกู้", "ผ่อน", "หนี้", "บูโร", "ค้างชำระ", "เช่า")
+    _R125_UNIT = {"พัน": 1000, "หมื่น": 10000, "แสน": 100000, "ล้าน": 1000000}
+    _R125_DIGIT = {"หนึ่ง": 1, "เอ็ด": 1, "สอง": 2, "สาม": 3, "สี่": 4, "ห้า": 5,
+                   "หก": 6, "เจ็ด": 7, "แปด": 8, "เก้า": 9, "ครึ่ง": 5}
+    _R125_CEIL = 500000
+    def _r125_scan(msg):
+        t = str(msg or "").replace(",", "").replace("฿", " ")
+        if not t:
+            return 0
+        has_inc = any(w in t for w in _R125_INCOME_WORDS)
+        if (not has_inc) and any(w in t for w in _R125_NOT_INCOME):
+            return 0
+        best = 0.0
+        try:
+            for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:-|ถึง|~|/)\s*(\d+(?:\.\d+)?)\s*(พัน|หมื่น|แสน|ล้าน)?", t):
+                hi = float(m.group(2))
+                u = m.group(3)
+                val = hi * _R125_UNIT[u] if u else hi
+                if val > best:
+                    best = val
+        except Exception:
+            pass
+        try:
+            for m in re.finditer(r"(\d+(?:\.\d+)?)?\s*(พัน|หมื่น|แสน|ล้าน)\s*(หนึ่ง|เอ็ด|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|ครึ่ง)?", t):
+                head = m.group(1)
+                base = float(head) if head else 1.0
+                unit = _R125_UNIT[m.group(2)]
+                val = base * unit
+                tail = m.group(3)
+                if tail:
+                    val += _R125_DIGIT[tail] * (unit / 10.0)
+                if val > best:
+                    best = val
+        except Exception:
+            pass
+        try:
+            m = re.search(r"(\d{4,7})\D{0,14}(?:บวก|\+|และ|รวม|กับ)\D{0,14}(\d{3,7})", t)
+            if m:
+                val = float(m.group(1)) + float(m.group(2))
+                if val > best:
+                    best = val
+        except Exception:
+            pass
+        if best < 1000 or best > _R125_CEIL:
+            return 0
+        return int(best)
+
+    _r125_old_income = getattr(_bl125, "_parse_income", None)
+    if _r125_old_income:
+        def _r125_parse_income(msg):
+            try:
+                base = _r125_old_income(msg)
+            except Exception:
+                base = None
+            try:
+                b = int(base or 0)
+            except Exception:
+                b = 0
+            try:
+                alt = _r125_scan(msg)
+                if alt and alt > b:
+                    print(f"[R125 INC] {str(msg)[:40]} : {b} -> {alt}")
+                    return alt
+            except Exception as _e:
+                print(f"[R125 ERROR inc] {_e}")
+            return base
+        _bl125._parse_income = _r125_parse_income
+        globals()["_parse_income"] = _r125_parse_income
+
+    _r125_old_range = getattr(_bl125, "_income_range", None)
+    if _r125_old_range:
+        def _r125_income_range(msg):
+            try:
+                base = _r125_old_range(msg)
+            except Exception:
+                base = None
+            try:
+                if int(base or 0):
+                    return base
+            except Exception:
+                pass
+            try:
+                alt = _r125_scan(msg)
+                if alt:
+                    print(f"[R125 RANGE] {str(msg)[:40]} -> {alt}")
+                    return alt
+            except Exception as _e:
+                print(f"[R125 ERROR range] {_e}")
+            return base
+        _bl125._income_range = _r125_income_range
+        globals()["_income_range"] = _r125_income_range
+
+    _r125_old_r100 = globals().get("_r100_reroute")
+    if _r125_old_r100:
+        def _r125_r100_reroute(field, msg, data, state):
+            try:
+                out = _r125_old_r100(field, msg, data, state)
+            except Exception as _e:
+                print(f"[R125 ERROR r100] {_e}")
+                return False
+            try:
+                if field == "debt" and isinstance(out, (tuple, list)) and out and out[0] == "income":
+                    t = str(msg or "")
+                    if not any(w in t for w in _R125_INCOME_WORDS):
+                        print(f"[R125 HOLD] ไม่ย้าย debt->income : {t[:45]}")
+                        return False
+            except Exception as _e:
+                print(f"[R125 ERROR hold] {_e}")
+            return out
+        globals()["_r100_reroute"] = _r125_r100_reroute
+
+    def _r125_parse_view():
+        import json as _jp125
+        try:
+            body = request.get_json(force=True, silent=True) or {}
+            texts = body.get("texts") or []
+            if not isinstance(texts, list):
+                texts = []
+            texts = texts[:400]
+            f = getattr(_bl125, "_parse_income", None)
+            nums = []
+            for s in texts:
+                v = 0
+                try:
+                    v = int(f(s) or 0) if f else 0
+                except Exception:
+                    v = 0
+                if not v:
+                    try:
+                        v = _r125_scan(s)
+                    except Exception:
+                        v = 0
+                nums.append(v)
+            return _jp125.dumps({"n": len(nums), "nums": nums}, ensure_ascii=False), 200, {"Content-Type": "application/json; charset=utf-8"}
+        except Exception as _e:
+            return _jp125.dumps({"error": str(_e)[:200]}, ensure_ascii=False), 500, {"Content-Type": "application/json; charset=utf-8"}
+
+    app.add_url_rule("/parse", "r125_parse", _r125_parse_view, methods=["POST"])
+    print("[R125] ซ่อมตัวอ่านรายได้ + กัน R100 ย้ายมั่ว + เปิด /parse แล้ว")
+except Exception as _e125:
+    print(f"[R125 ERROR] {_e125}")
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
