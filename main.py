@@ -7397,6 +7397,27 @@ try:
 except Exception as _e127:
     print("[R127 ERROR] " + str(_e127))
 
+# ==================================================================
+# r128 — เบอร์ต้องมาก่อนคำถามผู้กู้ร่วม  · Gift เคาะ 3 ก.ย. 2026
+#   เดิม FIELD_ORDER วาง contact ไว้ท้ายสุด หลัง co_borrower ทั้ง 4 ข้อ
+#   พอธง high_burden ติด (ผี) บอทเดินสายผู้กู้ร่วมยาว แล้วไม่เคยได้ขอเบอร์
+#   ผล: เกรด A ที่ไม่มีเบอร์ = แจกให้เซลไม่ได้ = ไม่มีใครโทร
+#   เคสจริง: FB-AG-20260902-212 (Angel Estate 2 ก.ย. 23:44)
+# ==================================================================
+try:
+    import bot_logic as _bl128
+
+    _R128_OLD_ORDER = list(getattr(_bl128, "FIELD_ORDER", []))
+    if "contact" in _R128_OLD_ORDER and "co_borrower" in _R128_OLD_ORDER:
+        _new = [f for f in _R128_OLD_ORDER if f != "contact"]
+        _new.insert(_new.index("co_borrower"), "contact")
+        _bl128.FIELD_ORDER = _new
+        print("[R128] ลำดับคำถามใหม่: " + " -> ".join(_new))
+    else:
+        print("[R128] ข้าม — FIELD_ORDER ไม่ตรงรูปที่คาด")
+except Exception as _e128:
+    print("[R128 ERROR] " + str(_e128))
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
