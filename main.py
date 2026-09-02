@@ -7253,11 +7253,15 @@ try:
             return -1
 
     def _r126_grade(income, debt_m, age):
+        """ใช้คีย์จริงที่ bot_logic._grade อ่าน: income_baht / debt_baht / own_age
+        debt_baht = 0 คือ "ยืนยันแล้วว่าไม่มีหนี้" ไม่ใช่ "ไม่รู้" """
         try:
             d = {"income_total": int(income), "income_baht": int(income),
-                 "income": str(int(income)), "debt_total": int(debt_m),
-                 "debt_monthly": int(debt_m), "debt": str(int(debt_m)),
-                 "age": int(age), "own_age": int(age)}
+                 "income": str(int(income)),
+                 "debt_baht": int(debt_m),
+                 "debt": ("ไม่มีหนี้ค่ะ" if int(debt_m) == 0
+                          else str(int(debt_m)) + " ต่อเดือน"),
+                 "age": int(age), "own_age": int(age), "age_years": int(age)}
             return str(bot._grade(d, None) or "")
         except Exception as _e:
             return "ERR " + str(_e)[:40]
