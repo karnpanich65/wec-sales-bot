@@ -7006,6 +7006,8 @@ try:
         ("A8", "ช่องหนี้↔รายได้", "_r100_reroute", ("debt", "รายได้เดือนละ 45,000", {}, {}), ("has", "income"), "มีคำว่ารายได้ ย้ายถูก"),
         ("A9", "ช่องหนี้↔รายได้", "_r100_reroute", ("debt", "รับเดือนละ 55,000 ครับ", {}, {}), ("has", "income"), "คำว่ารับเดือนละ = รายได้"),
         ("A10", "ช่องหนี้↔รายได้", "_r100_reroute", ("debt", "งบซื้อห้องประมาณ 2 ล้าน", {}, {}), ("no", "income"), "งบซื้อห้อง ไม่ใช่รายได้ต่อเดือน"),
+        ("A11", "ช่องหนี้↔รายได้", "_r100_reroute", ("debt", "34000-35000", {"income_baht": 34000}, {}), ("falsy", ""), "ตัวเลขเท่ารายได้ที่บันทึกไว้ ห้ามเก็บเป็นภาระ (เคส FB-AG-20260902-212)"),
+        ("A12", "ช่องหนี้↔รายได้", "_r100_reroute", ("debt", "15000", {"income_baht": 50000}, {}), ("falsy", ""), "ยอดผ่อนจริงที่ไม่ใกล้รายได้ ต้องเก็บเป็นภาระตามเดิม ห้ามบล็อกเกินเหตุ"),
         ("B1", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_income", "ผ่อนสามหมื่น", {}, {}), ("no", "co_income"), "พูดเรื่องหนี้ตัวเอง ไม่ใช่รายได้ผู้กู้ร่วม (log 1 ก.ย. 13:19)"),
         ("B2", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_borrower", "0632141859", {}, {}), ("no", "co_borrower"), "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน (log 1 ก.ย. 11:21)"),
         ("B3", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_debt", "เงินเดือนได้ประมาน 80,000", {}, {}), ("has", "co_income"), "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน (log 1 ก.ย. 14:41)"),
@@ -7398,25 +7400,50 @@ except Exception as _e127:
     print("[R127 ERROR] " + str(_e127))
 
 # ==================================================================
-# r128 — เบอร์ต้องมาก่อนคำถามผู้กู้ร่วม  · Gift เคาะ 3 ก.ย. 2026
-#   เดิม FIELD_ORDER วาง contact ไว้ท้ายสุด หลัง co_borrower ทั้ง 4 ข้อ
-#   พอธง high_burden ติด (ผี) บอทเดินสายผู้กู้ร่วมยาว แล้วไม่เคยได้ขอเบอร์
-#   ผล: เกรด A ที่ไม่มีเบอร์ = แจกให้เซลไม่ได้ = ไม่มีใครโทร
-#   เคสจริง: FB-AG-20260902-212 (Angel Estate 2 ก.ย. 23:44)
+# r129 — ตัวเลขที่เท่ากับรายได้ ห้ามลงช่องภาระ · Gift เคาะ 3 ก.ย. 2026
+#   ต้นเหตุจริงของเคส FB-AG-20260902-212:
+#   บอทรอยอดผ่อน ลูกค้าตอบ "34000-35000" (ตัวเลขเปล่า ไม่มีคำบอกภาระ)
+#   r100 ย้ายไปช่องรายได้ไม่ได้ เพราะด่านเดิมบังคับว่าต้องมีคำว่ารายได้
+#   -> เก็บเป็นภาระ 34,500 -> ภาระผี -> วงเงินหด -> ถามผู้กู้ร่วม -> ไม่ได้เบอร์
+#   กฎใหม่: ภาระที่เท่ากับรายได้พอดี เป็นไปไม่ได้ในทางปฏิบัติ = ลูกค้าทวนรายได้
+#   ทำได้อย่างเดียวคือ "ไม่เก็บ" แล้วให้บอทถามภาระใหม่ให้ชัด ไม่เดาแทนลูกค้า
 # ==================================================================
 try:
-    import bot_logic as _bl128
+    import bot_logic as _bl129
 
-    _R128_OLD_ORDER = list(getattr(_bl128, "FIELD_ORDER", []))
-    if "contact" in _R128_OLD_ORDER and "co_borrower" in _R128_OLD_ORDER:
-        _new = [f for f in _R128_OLD_ORDER if f != "contact"]
-        _new.insert(_new.index("co_borrower"), "contact")
-        _bl128.FIELD_ORDER = _new
-        print("[R128] ลำดับคำถามใหม่: " + " -> ".join(_new))
-    else:
-        print("[R128] ข้าม — FIELD_ORDER ไม่ตรงรูปที่คาด")
-except Exception as _e128:
-    print("[R128 ERROR] " + str(_e128))
+    _R129_NEAR = 0.10          # ห่างจากรายได้ไม่เกิน 10% = ถือว่าเลขเดียวกัน
+    _R129_BASE = _r100_reroute
+
+    def _r129_income_of(data):
+        for k in ("income_counted", "income_total", "income_baht"):
+            try:
+                n = int(data.get(k) or 0)
+            except Exception:
+                n = 0
+            if n:
+                return n
+        return 0
+
+    def _r100_reroute_r129(field, msg, data, state):
+        try:
+            if field in ("debt", "debt_baht"):
+                s = str(msg or "")
+                if not _bl129._has_any(s, _bl129._DEBT_SAYS):
+                    n = _bl129._parse_debt_monthly(s) or 0
+                    inc = _r129_income_of(data or {})
+                    if n and inc and abs(int(n) - inc) <= inc * _R129_NEAR:
+                        print("[R129 HOLD] " + str(n) + " เท่ารายได้ " + str(inc)
+                              + " ไม่ใช่ภาระ : " + s[:40])
+                        return None      # ทิ้ง แล้วให้บอทถามภาระใหม่
+        except Exception as _e:
+            print("[R129 ERR] " + str(_e)[:70])
+        return _R129_BASE(field, msg, data, state)
+
+    _r100_reroute = _r100_reroute_r129
+    globals()["_r100_reroute"] = _r100_reroute_r129
+    print("[R129] ภาระที่เท่ารายได้ = ไม่เก็บ ถามใหม่")
+except Exception as _e129:
+    print("[R129 ERROR] " + str(_e129))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
