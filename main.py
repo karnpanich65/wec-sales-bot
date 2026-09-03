@@ -7010,6 +7010,16 @@ try:
         ("A12", "ช่องหนี้↔รายได้", "_r100_reroute", ("debt", "15000", {"income_baht": 50000}, {}), ("falsy", ""), "ยอดผ่อนจริงที่ไม่ใกล้รายได้ ต้องเก็บเป็นภาระตามเดิม ห้ามบล็อกเกินเหตุ"),
         ("J1", "รายได้อื่น", "_r130_is_only_salary", ("รับเงินเดือนอย่างเดียวครับ",), ("truthy", ""), "คำปฏิเสธ ต้องอ่านออกว่าไม่มีรายได้อื่น"),
         ("J2", "รายได้อื่น", "_r130_is_only_salary", ("มีค่าคอมอีกเดือนละ 8000",), ("falsy", ""), "มีรายได้อื่นจริง ห้ามตีเป็นคำปฏิเสธ"),
+        ("K1", "ลำดับคำถาม", "_r134_exam_order", (), ("truthy", ""), "คำขอเบอร์ต้องเป็นบับเบิลสุดท้าย ไม่งั้นลูกค้าตอบข้ออื่นแล้วเบอร์หล่น (เคสนุกูล 3 ก.ย. 69)"),
+        ("K2", "ลำดับคำถาม", "_r134_exam_order_keep", (), ("truthy", ""), "ไม่มีคำถามอื่นตามหลัง ห้ามสลับลำดับข้อความ"),
+        ("K3", "ลำดับคำถาม", "_r134_exam_no_silence", (), ("truthy", ""), "ห้ามทำให้บอทเงียบ — บับเบิลต้องครบเท่าเดิมเสมอ"),
+        ("L1", "ยืนยันรายได้/ภาระ", "_r134_bare_number", ("80000",), ("truthy", ""), "ตัวเลขเปล่าไม่มีคำบอกชนิด ต้องจับได้ว่ายังไม่แน่ใจ"),
+        ("L2", "ยืนยันรายได้/ภาระ", "_r134_bare_number", ("ผ่อนเดือนละ 80000",), ("falsy", ""), "บอกชัดว่าผ่อน ห้ามถามยืนยันซ้ำให้เสียเทิร์น"),
+        ("L3", "ยืนยันรายได้/ภาระ", "_r134_bare_number", ("รายได้ 80000",), ("falsy", ""), "บอกชัดว่ารายได้ ห้ามถามยืนยันซ้ำ"),
+        ("L4", "ยืนยันรายได้/ภาระ", "_r134_bare_number", ("0808619099",), ("falsy", ""), "เบอร์โทร ห้ามตีเป็นยอดผ่อน"),
+        ("M1", "ถามซ้ำ", "_r132_age_known", ({"data": {"age": 29}},), ("truthy", ""), "มีอายุในระบบแล้ว ต้องไม่ถามซ้ำ (เคสนุกูลถามอายุ 2 รอบ)"),
+        ("M2", "ถามซ้ำ", "_r132_age_known", ({"data": {}},), ("falsy", ""), "ยังไม่มีอายุ ต้องถามได้ตามปกติ"),
+        ("N1", "เบอร์หลังปิดเคส", "_r134_exam_contact_after_done", (), ("truthy", ""), "เบอร์ที่พิมพ์ติดคำว่าเบอไลน์ ต้องอ่านออก แต่คำขอบคุณต้องไม่ถูกตีเป็นเบอร์"),
         ("B1", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_income", "ผ่อนสามหมื่น", {}, {}), ("no", "co_income"), "พูดเรื่องหนี้ตัวเอง ไม่ใช่รายได้ผู้กู้ร่วม (log 1 ก.ย. 13:19)"),
         ("B2", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_borrower", "0632141859", {}, {}), ("no", "co_borrower"), "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน (log 1 ก.ย. 11:21)"),
         ("B3", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_debt", "เงินเดือนได้ประมาน 80,000", {}, {}), ("has", "co_income"), "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน (log 1 ก.ย. 14:41)"),
@@ -7486,6 +7496,321 @@ try:
     print("[R130] อ่านคำปฏิเสธรายได้อื่นได้กว้างขึ้น")
 except Exception as _e130:
     print("[R130 ERROR] " + str(_e130))
+
+
+# ======================================================
+# r131 — เบอร์/ไลน์ที่มาหลังปิดเคส ต้องเก็บ ไม่ใช่ปล่อยหล่น
+# ------------------------------------------------------
+# เคสจริง นุกูล ประวีณไว 3 ก.ย. 2026 (Chat_Log แถว 6822-6824)
+#   6822 ลูกค้าตอบอายุ "29"      -> บอทปิดเคสเป็น done ตรงนี้
+#   6823 บอท "ขอเบอร์ติดต่อได้ไหมครับ"   <- ขอทั้งที่ปิดไปแล้ว
+#   6824 ลูกค้า "0808619099เบอไลน์"      <- ไม่มีใครเก็บ
+# ต้นเหตุ: bot_logic บรรทัด ~3071 มี guard  not state.get('done')
+#   -> done แล้วเบอร์ที่ลูกค้าส่งมาไม่ถูกเก็บเลย ตกไปเข้าสาขา AI คุยเปล่าๆ
+# ผลจริง: เกรด A (รายได้ 40,000 · ไม่มีหนี้ · อายุ 29 · วงเงิน ~5 ล้าน)
+#   แต่ไม่มีช่องทางติดต่อ = แจกให้เซลไม่ได้ เสียลูกค้าฟรี
+#
+# แก้: done แล้วถ้าได้ช่องทางติดต่อ -> เก็บ + เรียก _finish ซ้ำ
+#      p4UpsertLead หาแถวตาม PSID (idempotent) = เขียนซ้ำได้ ไม่เกิดแถวใหม่
+# ขอบเขต: ทำงานเฉพาะตอน done + ยังไม่มี contact + ไม่ใช่เคสที่ตั้งใจปิด
+#         (ปฏิเสธให้เบอร์ / ต่ำกว่าเกณฑ์ / ติดบูโร / เจ้าของห้อง / ผู้เช่า)
+#         เส้นทางปกติที่ได้เบอร์ก่อนปิดเคส ไม่ถูกแตะเลย
+# ======================================================
+import bot_logic as _bl131
+
+R131_THANKS = ("ได้รับข้อมูลติดต่อแล้วครับ ขอบคุณมากครับ "
+               "เดี๋ยวที่ปรึกษาติดต่อกลับไปนะครับ")
+
+_R131_SKIP_FLAGS = ("contact_refused", "below_threshold", "soft_close",
+                    "owner", "renter", "bot_off")
+
+_R131_BASE_DECIDE = CalmBotEngine._decide
+
+
+def _r131_take(self, msg, user_id, state):
+    """คืน (bubbles, grade) เมื่อเก็บช่องทางติดต่อหลังปิดเคสได้ / None เมื่อไม่เข้าเงื่อนไข"""
+    _d = state.get("data") or {}
+    if _d.get("contact") or _d.get("rent_contact"):
+        return None
+    for _f in _R131_SKIP_FLAGS:
+        if state.get(_f):
+            return None
+    s = str(msg or "").strip()
+    if not s or len(s) > 60:
+        return None
+    if not self._is_valid_answer("contact", s):
+        return None
+    self._capture(state, "contact", s)
+    if not (state.get("data") or {}).get("contact"):
+        return None
+    self._add_signal(
+        state,
+        "☎️ ได้ช่องทางติดต่อหลังปิดเคส — r131 เขียนแถวซ้ำเพื่อให้เข้าคิวแจก")
+    g = self._finish(user_id, state,
+                     (state.get("data") or {}).get("contact", ""),
+                     calendar=True)
+    print(f"[R131] เก็บช่องทางติดต่อหลังปิดเคส {str(user_id)[:8]}... "
+          f"-> อัปเดตแถว เกรด {g}")
+    return [R131_THANKS], g
+
+
+def _decide_r131(self, msg, user_id, state, bucket, is_new):
+    try:
+        if state.get("done"):
+            _out = _r131_take(self, msg, user_id, state)
+            if _out:
+                return _out
+    except Exception as e:
+        print(f"[R131 ERROR] {e}")
+    return _R131_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+
+CalmBotEngine._decide = _decide_r131
+
+
+# ======================================================
+# r132 — ไม่ยิงคำถามซ้อนกันจนคำขอเบอร์หล่น + ไม่ถามซ้ำช่องที่มีค่าแล้ว
+# ------------------------------------------------------
+# เคสเดียวกัน (นุกูล) แถว 6817:
+#   บอทส่ง 2 บับเบิลในเทิร์นเดียว
+#     บับเบิล 1 "ขอเบอร์ติดต่อกลับ เพื่อให้ที่ปรึกษาโทร..."
+#     บับเบิล 2 "เดี๋ยวผมประเมินวงเงินคร่าวๆ ให้เลยครับ คุณลูกค้าอายุเท่าไหร่ครับ"
+#   ลูกค้าตอบ "29" = ตอบบับเบิลสุดท้าย -> คำขอเบอร์หล่นหายทั้งดุ้น
+# และแถว 6821 บอทถามอายุซ้ำอีกรอบ ทั้งที่ได้ 29 ไปแล้วที่ 6818
+#
+# (ก) คำขอเบอร์ต้องเป็นบับเบิล "สุดท้าย" เสมอเมื่อเทิร์นนั้นมีคำถามอื่นด้วย
+#     ย้ายลำดับอย่างเดียว ไม่ตัดข้อความทิ้ง (กติกา: ห้ามทำให้บอทเงียบ)
+# (ข) ช่องที่มีค่าแล้ว ห้ามถามซ้ำ — ตัดเฉพาะบับเบิลนั้น
+#     ถ้าตัดแล้วจะไม่เหลืออะไรเลย -> ไม่ตัด (ห้ามเงียบ)
+# ======================================================
+_R132_CONTACT_ASK = ("ขอเบอร์", "เบอร์ติดต่อ", "เบอร์หน่อย", "ขอไลน์",
+                     "ID LINE", "ไอดีไลน์", "id line")
+_R132_QUESTION = ("ไหมครับ", "ไหมคะ", "เท่าไหร่", "เท่าไร", "หรือเปล่า",
+                  "หรือครับ", "หรือคะ", "อะไรบ้าง", "กี่ปี")
+_R132_AGE_ASK = ("อายุเท่าไหร่", "อายุเท่าไร", "อายุกี่ปี", "อายุปีนี้")
+
+
+def _r132_order(text):
+    """ย้ายบับเบิลที่ขอเบอร์ไปท้ายสุด เมื่อมีคำถามอื่นตามหลังอยู่"""
+    raw = str(text or "")
+    parts = raw.split(MSG_SPLIT)
+    if len(parts) < 2:
+        return text
+    hit = [i for i, p in enumerate(parts)
+           if any(w.lower() in p.lower() for w in _R132_CONTACT_ASK)]
+    if not hit or hit[-1] == len(parts) - 1:
+        return text
+    tail = parts[hit[-1] + 1:]
+    if not any(any(q in p for q in _R132_QUESTION) for p in tail):
+        return text
+    _keep = set(hit)
+    rest = [p for i, p in enumerate(parts) if i not in _keep]
+    ask = [parts[i] for i in hit]
+    print("[R132] เทิร์นนี้มีคำขอเบอร์ + คำถามอื่น — ย้ายคำขอเบอร์ไปบับเบิลสุดท้าย")
+    return MSG_SPLIT.join(rest + ask)
+
+
+_R132_BASE_SEND_REPLY = send_reply
+
+
+def send_reply(recipient_id, text, page_id: str = "", force: bool = False):
+    try:
+        text = _r132_order(text)
+    except Exception as e:
+        print(f"[R132 ERROR] {e}")
+    return _R132_BASE_SEND_REPLY(recipient_id, text, page_id, force)
+
+
+def _r132_age_known(state):
+    d = (state or {}).get("data") or {}
+    for k in ("age", "own_age", "age_years"):
+        try:
+            if int(d.get(k) or 0) > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+_R132_BASE_DECIDE = CalmBotEngine._decide
+
+
+def _decide_r132(self, msg, user_id, state, bucket, is_new):
+    out = _R132_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+    try:
+        bubbles, grade = out
+        if bubbles and _r132_age_known(state):
+            keep = [b for b in bubbles
+                    if not any(w in str(b) for w in _R132_AGE_ASK)]
+            if keep and len(keep) != len(bubbles):
+                print("[R132] มีอายุในระบบแล้ว — ตัดบับเบิลถามอายุซ้ำออก")
+                return keep, grade
+    except Exception as e:
+        print(f"[R132 ERROR] {e}")
+    return out
+
+
+CalmBotEngine._decide = _decide_r132
+
+
+# ======================================================
+# r133 — คำถามภาระรอบสอง ต้องมีคำว่า "ผ่อน" เสมอ
+# ------------------------------------------------------
+# เคสจริง NaraRai BM Smile 3 ก.ย. 2026 (Chat_Log แถว 6793-6796)
+#   6793 บอท "ตอนนี้ลูกค้ามีผ่อนอะไรอยู่ไหมครับ เช่น บ้าน รถ หรือบัตรเครดิต"
+#   6794 ลูกค้า "คอมต่างหาก"        <- ยังพูดเรื่องรายได้อยู่
+#   6795 บอท "ขออีกนิดเดียวครับ รวมทุกอย่างแล้วเดือนละประมาณเท่าไหร่ครับ"
+#        ^^^ ไม่มีคำว่าผ่อน/ภาระเลย ต่อจากประโยคเรื่องคอม = อ่านได้ว่า "รายได้รวม"
+#   6796 ลูกค้า "80000"
+# รอบนี้บอทเดาถูก (ตีเป็นรายได้) แต่เป็นการเดา ไม่ใช่ความตั้งใจ
+# ถ้าเดาผิดอีกทาง = ภาระ 80,000 บนรายได้ 37,000 -> DSR 216% -> ทิ้งเคสทันที
+# แก้ที่ชั้นคำพูดอย่างเดียว ไม่แตะตรรกะ
+# ======================================================
+_bl131.DEBT_REASK_MSG = (
+    "ขอบคุณครับ ขออีกนิดเดียวครับ เฉพาะยอดผ่อนต่อเดือน "
+    "(บ้าน รถ บัตรเครดิต สินเชื่อ) รวมกันแล้วประมาณเท่าไหร่ครับ "
+    "ตัวเลขกลมๆ ก็พอครับ ถ้าไม่มีเลย บอกว่าไม่มีได้เลยครับ"
+)
+
+
+# ======================================================
+# r134 — ตัวเลขเปล่าที่จะทำให้เกรดร่วง ต้องถามยืนยันก่อน (Gift เคาะ 3 ก.ย. 2026)
+# ------------------------------------------------------
+# Gift: "ถามเพิ่มเพื่อคอนเฟิร์มว่าเป็นรายได้หรือภาระ เฉพาะเคสที่ไม่แน่ใจ"
+#       ขอบเขตที่เคาะ = "เฉพาะตอนเกรดจะร่วง"
+# เหตุผลที่ต้องแคบ: ทุกเทิร์นที่เสียไป = เสี่ยงเสียลูกค้า (พิสูจน์แล้วในเคสนุกูล)
+#   ถ้ายอดนั้นไม่เปลี่ยนผลลัพธ์ (เกรดยัง A/B อยู่ดี) -> ไม่ต้องถาม
+#   ถ้ายอดนั้นทำให้ A/B ร่วงเป็น C/D/N -> ถาม เพราะถ้าเดาผิด = ทิ้งเคสฟรี
+#
+# แทนพฤติกรรมเดิมของ r129 ที่ "ทิ้งตัวเลขเงียบๆ แล้วถามภาระใหม่"
+#   (ลูกค้างงว่าทำไมถามซ้ำ) -> เปลี่ยนเป็นถามให้ชัดไปเลย
+#   ด่านตรวจจับของ r129 ยังอยู่ครบ ไม่ได้ถอดออก
+#
+# โควตา 1 ครั้ง/เคส · ไม่ตอบ/ตอบไม่ชัด = ไม่นับเป็นภาระ + ติดธงให้เซลถามตอนโทร
+#   (กติกา Gift: ห้ามทิ้งเคส — เดาผิดทางบวกเสียเซล 1 สาย
+#    เดาผิดทางลบเสียลูกค้าถาวร)
+# ======================================================
+_R134_ASK = ("ขอเช็คนิดนึงครับ ยอด {n:,} บาทนี่คือ "
+             "ยอดผ่อนต่อเดือน หรือรายได้รวมต่อเดือนครับ")
+_R134_OK = ("A", "B")
+
+
+def _r134_bare_number(s):
+    """ตัวเลขที่ไม่มีคำบอกชนิดเลย -> คืนจำนวน / ไม่ใช่ -> None"""
+    t = str(s or "").strip()
+    if not t or len(t) > 40:
+        return None
+    if _bl131._has_any(t, _bl131._DEBT_SAYS):
+        return None
+    if _bl131._has_any(t, _bl131._INCOME_SAYS):
+        return None
+    if _bl131._looks_like_phone(t):
+        return None
+    try:
+        n = _bl131._parse_debt_monthly(t)
+    except Exception:
+        return None
+    return int(n) if n else None
+
+
+def _r134_grade_if(self, state, debt_n):
+    """เกรดที่จะได้ ถ้าภาระ = debt_n (ไม่แตะ state จริง ไม่เขียนสัญญาณ)"""
+    d = dict((state or {}).get("data") or {})
+    d["debt_baht"] = int(debt_n)
+    d["debt"] = ("ไม่มีหนี้ค่ะ" if not int(debt_n)
+                 else str(int(debt_n)) + " ต่อเดือน")
+    d.pop("income_unknown", None)
+    # ส่ง state เป็น dict เปล่า ไม่ใช่ None — r127 เรียก _add_signal(state, ...)
+    # ซึ่ง None.setdefault จะระเบิด (dict ทิ้ง = ไม่มีสัญญาณปลอมตกลงเคสจริง)
+    try:
+        return str(self._grade(d, {}) or "").strip().upper()[:1]
+    except Exception as e:
+        print(f"[R134 GRADE ERROR] {e}")
+        return ""
+
+
+_R134_BASE_DECIDE = CalmBotEngine._decide
+
+
+def _decide_r134(self, msg, user_id, state, bucket, is_new):
+    # ---- ก) กำลังรอคำยืนยันอยู่ -> อ่านคำตอบก่อนทุกอย่าง ----------
+    try:
+        pend = state.pop("r134_pending", None)
+        if pend:
+            s = str(msg or "")
+            if _bl131._has_any(s, _bl131._DEBT_SAYS):
+                self._capture(state, "debt", f"ผ่อนเดือนละ {int(pend)}")
+                self._add_signal(state, f"ยืนยันแล้ว {int(pend):,} = ยอดผ่อน (r134)")
+                print(f"[R134] ยืนยัน {pend} = ยอดผ่อน")
+            elif _bl131._has_any(s, _bl131._INCOME_SAYS):
+                self._capture(state, "income", f"รายได้เดือนละ {int(pend)}")
+                self._add_signal(state, f"ยืนยันแล้ว {int(pend):,} = รายได้ (r134)")
+                print(f"[R134] ยืนยัน {pend} = รายได้")
+            else:
+                self._capture(state, "debt", "ยังไม่ยืนยันยอด")
+                self._add_signal(
+                    state,
+                    f"⚠️ ยอด {int(pend):,} ยังไม่ยืนยันว่าเป็นยอดผ่อนหรือรายได้ "
+                    f"— ไม่นับเป็นภาระ ให้เซลถามตอนโทร (r134)")
+                print(f"[R134] ตอบไม่ชัด — ไม่นับ {pend} เป็นภาระ ติดธงแทน")
+            state["awaiting"] = None
+    except Exception as e:
+        print(f"[R134 ERROR resolve] {e}")
+
+    # ---- ข) ตัวเลขเปล่าที่กำลังจะฆ่าเคส -> ถามยืนยันก่อน ----------
+    try:
+        if (state.get("awaiting") == "debt"
+                and not state.get("r134_used")
+                and not state.get("done")):
+            n = _r134_bare_number(msg)
+            if n:
+                g_no = _r134_grade_if(self, state, 0)
+                g_yes = _r134_grade_if(self, state, n)
+                if g_no in _R134_OK and g_yes not in _R134_OK:
+                    state["r134_used"] = True
+                    state["r134_pending"] = n
+                    print(f"[R134] ยอด {n} จะทำให้เกรด {g_no} -> {g_yes} "
+                          f"— ถามยืนยันก่อน ({str(user_id)[:8]}...)")
+                    return [_R134_ASK.format(n=n)], None
+    except Exception as e:
+        print(f"[R134 ERROR ask] {e}")
+
+    return _R134_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+
+CalmBotEngine._decide = _decide_r134
+
+
+# ------------------------------------------------------
+# ข้อสอบล็อก r131-r134 (รายการอยู่ใน _R124_EXAM ด้านบน)
+# ------------------------------------------------------
+def _r134_exam_order():
+    """คำขอเบอร์ต้องถูกย้ายไปบับเบิลสุดท้าย เมื่อมีคำถามอื่นตามหลัง"""
+    a = "ขอเบอร์ติดต่อกลับหน่อยครับ"
+    b = "คุณลูกค้าอายุเท่าไหร่ครับ"
+    return _r132_order(a + MSG_SPLIT + b).endswith(a)
+
+
+def _r134_exam_order_keep():
+    """ไม่มีคำถามอื่นตามหลัง = ห้ามสลับลำดับ"""
+    src = "เดี๋ยวที่ปรึกษาติดต่อไปนะครับ" + MSG_SPLIT + "ขอเบอร์ติดต่อกลับหน่อยครับ"
+    return _r132_order(src) == src
+
+
+def _r134_exam_no_silence():
+    """ห้ามทำให้บอทเงียบ — จำนวนบับเบิลต้องเท่าเดิมเสมอ"""
+    src = "ขอเบอร์ติดต่อกลับหน่อยครับ" + MSG_SPLIT + "คุณลูกค้าอายุเท่าไหร่ครับ"
+    return (len(_r132_order(src).split(MSG_SPLIT))
+            == len(src.split(MSG_SPLIT)))
+
+
+def _r134_exam_contact_after_done():
+    """r131: เบอร์/ไลน์ที่มาหลังปิดเคสต้องอ่านออก แต่คำมารยาทต้องไม่ถูกตีเป็นเบอร์"""
+    ok = bot._is_valid_answer("contact", "0808619099เบอไลน์")
+    bad = bot._is_valid_answer("contact", "ขอบคุณครับ")
+    return bool(ok) and not bool(bad)
+
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
