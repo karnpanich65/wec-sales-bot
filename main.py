@@ -7069,6 +7069,8 @@ try:
         ("X4", "ยอดขายหรือกำไร", "_r140_kind", ("ยอดขายครับ",), ("eq", "sales"), "ตอบว่ายอดขาย ต้องคูณ margin 15% ก่อนเข้า DSR"),
         ("X5", "ยอดขายหรือกำไร", "_r140_kind", ("กำไรหลังหักต้นทุนแล้วครับ",), ("eq", "profit"), "ตอบว่ากำไรแล้ว ห้ามคูณซ้ำ"),
         ("X6", "ยอดขายหรือกำไร", "_r140_kind", ("ประมาณนั้นแหละครับ",), ("falsy", ""), "ตอบไม่ชัด ต้องไม่เดา ใช้ตามที่แจ้ง + ติดธง"),
+        ("X7", "ช่วงรายได้คำไทย", "_r140_range_is_pair", ("รับ 4-5 หมื่น",), ("truthy", ""), "สัญญาฟังก์ชัน ต้องคืนคู่เสมอ - r125 เคยคืนเลขเดี่ยว ทำให้ _capture ระเบิดตอน _rg[0]"),
+        ("X8", "ช่วงรายได้คำไทย", "_r140_range_is_pair", ("รายได้ 40000-80000",), ("truthy", ""), "แบบตัวเลขอารบิกก็ต้องคืนคู่เหมือนกัน"),
         ("B1", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_income", "ผ่อนสามหมื่น", {}, {}), ("no", "co_income"), "พูดเรื่องหนี้ตัวเอง ไม่ใช่รายได้ผู้กู้ร่วม (log 1 ก.ย. 13:19)"),
         ("B2", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_borrower", "0632141859", {}, {}), ("no", "co_borrower"), "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน (log 1 ก.ย. 11:21)"),
         ("B3", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_debt", "เงินเดือนได้ประมาน 80,000", {}, {}), ("has", "co_income"), "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน (log 1 ก.ย. 14:41)"),
@@ -8604,25 +8606,41 @@ def _r140_amounts_th(msg):
 _R140_BASE_RANGE = _bl131._income_range
 
 
+def _r140_range_th(msg):
+    """หาช่วงรายได้จากคำไทย — คืน (ต่ำสุด, สูงสุด) หรือ None"""
+    s = str(msg or "")
+    if not any(w in s for w in _R140_RANGE_WORDS):
+        return None
+    nums = sorted(set(_r140_amounts_th(s)))
+    if len(nums) < 2:
+        return None
+    lo, hi = nums[0], nums[-1]
+    if lo == hi or hi > lo * 20:
+        return None
+    return (lo, hi)
+
+
 def _r140_income_range(msg):
-    """ตัวจับช่วงรายได้ตัวใหม่ — ของเดิมก่อน ไม่เจอค่อยลองแบบคำไทย"""
+    """ตัวจับช่วงรายได้ — การันตีว่าคืน (ต่ำสุด, สูงสุด) หรือ None เท่านั้น
+
+    เจอตอนทำ r140: r125 เคยครอบ _income_range ไว้แล้ว (รองรับคำไทย)
+    แต่ r125 คืน "ตัวเลขเดี่ยว" ในบางเส้นทาง ทั้งที่ผู้เรียกคาดหวังคู่
+    _capture บรรทัด ~3899 ทำ _rg[0] กับค่าที่ได้ -> int ไม่มี [0] -> ระเบิด
+    (และ int(base or 0) ที่ r125 ใช้ ก็ระเบิดกับ tuple อยู่แล้ว)
+    r140 จึงทำหน้าที่ "ตัวปรับรูป" ให้สัญญาฟังก์ชันกลับมาเป็นคู่เสมอ
+    """
+    _r = None
     try:
-        _old = _R140_BASE_RANGE(msg)
-        if _old:
-            return _old
-    except Exception:
-        pass
+        _r = _R140_BASE_RANGE(msg)
+    except Exception as e:
+        print(f"[R140 base range error] {e}")
+        _r = None
     try:
-        s = str(msg or "")
-        if not any(w in s for w in _R140_RANGE_WORDS):
-            return None
-        nums = sorted(set(_r140_amounts_th(s)))
-        if len(nums) < 2:
-            return None
-        lo, hi = nums[0], nums[-1]
-        if lo == hi or hi > lo * 20:
-            return None
-        return (lo, hi)
+        if isinstance(_r, (tuple, list)) and len(_r) >= 2:
+            _lo, _hi = int(_r[0]), int(_r[1])
+            return (min(_lo, _hi), max(_lo, _hi)) if _lo != _hi else None
+        # r125 คืนเลขเดี่ยว = "ค่าที่อ่านได้" ไม่ใช่ช่วง -> หาช่วงเองจากคำไทย
+        return _r140_range_th(msg)
     except Exception as e:
         print(f"[R140 ERROR range] {e}")
         return None
@@ -8634,7 +8652,17 @@ _bl131._income_range = _r140_income_range
 def _r140_exam_range(_=None):
     _r = _r140_income_range(
         "รายได้แต่ละเดือนไม่รวมซื้อของเฉลี่ยประมาณ 4หมื่นถึง7-8 หมื่นค่ะ")
-    return "" if not _r else str(_r[0]) + "-" + str(_r[1])
+    if not isinstance(_r, (tuple, list)) or len(_r) < 2:
+        return ""
+    return str(int(_r[0])) + "-" + str(int(_r[1]))
+
+
+def _r140_range_is_pair(msg):
+    """สัญญาฟังก์ชัน: ต้องคืนคู่เสมอ ห้ามคืนตัวเลขเดี่ยว (ไม่งั้น _capture ระเบิด)"""
+    _r = _r140_income_range(msg)
+    if _r is None:
+        return True
+    return isinstance(_r, (tuple, list)) and len(_r) == 2
 
 
 # ---- (ข) ยอดขาย หรือ กำไร -------------------------------------------
