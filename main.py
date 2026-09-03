@@ -7025,6 +7025,13 @@ try:
         ("P3", "ถามอายุซ้ำ", "_r135_is_age_ask", ("แล้วรายได้เดือนละประมาณเท่าไหร่ครับ",), ("falsy", ""), "คำถามรายได้ ห้ามถูกตีเป็นคำถามอายุ"),
         ("P4", "ถามอายุซ้ำ", "_r135_age_val", ({"data": {"age": 39}},), ("truthy", ""), "มีอายุแล้ว ต้องอ่านค่าได้"),
         ("P5", "ถามอายุซ้ำ", "_r135_age_val", ({"data": {}},), ("falsy", ""), "ยังไม่มีอายุ ต้องคืน 0 เพื่อให้ถามได้ตามปกติ"),
+        ("Q1", "สรุปทวน", "_r136_recap", ({"data": {"income_baht": 40000, "income_total": 40000, "debt_baht": 0, "age": 29}},), ("has", "รายได้ 40,000"), "สรุปต้องอ่านตัวเลขจากระบบตรงๆ ไม่ให้ AI แต่ง"),
+        ("Q2", "สรุปทวน", "_r136_recap", ({"data": {"income_baht": 40000, "income_total": 40000, "debt_baht": 0, "age": 29}},), ("has", "ประมาณการเบื้องต้น"), "ห้ามฟันธงว่ากู้ผ่าน ต้องขึ้นต้นว่าประมาณการเบื้องต้น (compliance ข้อ 3)"),
+        ("Q3", "สรุปทวน", "_r136_recap", ({"data": {"income_baht": 40000}},), ("falsy", ""), "ข้อมูลไม่ถึง 2 บรรทัด ห้ามทวนขอไปที"),
+        ("Q4", "สรุปทวน", "_r136_cap_line", ({"data": {"income_baht": 25000, "age": 39}},), ("falsy", ""), "ยังไม่รู้ยอดผ่อน ห้ามโชว์วงเงิน (เคส Nunny มีผ่อนบ้านแต่ยังไม่ให้ยอด)"),
+        ("Q5", "สรุปทวน", "_r136_cap_line", ({"data": {"income_baht": 25000, "debt_baht": 12000, "age": 39}},), ("falsy", ""), "วงเงินต่ำกว่า 1 ล้าน ไม่โชว์ ไม่มีประโยชน์กับใคร"),
+        ("Q6", "แก้ข้อมูล", "_r136_is_wrong", ("ไม่ใช่ครับ",), ("truthy", ""), "ต้องรับคำว่าไม่ใช่ให้ได้ ไม่งั้นข้อมูลผิดค้างตลอดไป"),
+        ("Q7", "แก้ข้อมูล", "_r136_is_wrong", ("ครับผม ขอบคุณครับ",), ("falsy", ""), "คำขอบคุณ ห้ามตีเป็นการแจ้งว่าข้อมูลผิด"),
         ("B1", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_income", "ผ่อนสามหมื่น", {}, {}), ("no", "co_income"), "พูดเรื่องหนี้ตัวเอง ไม่ใช่รายได้ผู้กู้ร่วม (log 1 ก.ย. 13:19)"),
         ("B2", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_borrower", "0632141859", {}, {}), ("no", "co_borrower"), "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน (log 1 ก.ย. 11:21)"),
         ("B3", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_debt", "เงินเดือนได้ประมาน 80,000", {}, {}), ("has", "co_income"), "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน (log 1 ก.ย. 14:41)"),
@@ -7886,6 +7893,212 @@ def _decide_r135(self, msg, user_id, state, bucket, is_new):
 
 
 CalmBotEngine._decide = _decide_r135
+
+
+# ======================================================
+# r136 — สรุปทวนตอนปิดเคส + ระบบแก้ไขแบบไม่วน (Gift เคาะ 3 ก.ย. 2026)
+# ------------------------------------------------------
+# Gift: "สรุปสุดท้ายอีกทีว่าบอทเข้าใจไหม เป็นการทวน ถ้าเค้าตอบว่าไม่ใช่
+#        ต้องมีระบบแก้ไขแบบไม่วน ดูโปรเฟสชันเนล"
+#
+# ของเดิม: บอททวนอยู่แล้ว แต่ให้ AI แต่งเอง -> คนละฟอร์แมตทุกเคส
+#   (log 3 ก.ย. แถว 6807 "รายได้ 80,000 ไม่มีภาระผ่อน อายุ 35 ปี"
+#              แถว 6819 "ลูกค้าอายุ 29 รายได้ 40,000 ไม่มีภาระ เป็นเคสดีครับ")
+#   และไม่มีโค้ดไหนรับคำว่า "ไม่ใช่" -> ข้อมูลผิดค้างอยู่ในระบบตลอดไป
+#
+# r136 = ทวนจากข้อมูลในระบบตรงๆ ไม่ให้ AI แต่ง + รับคำแก้จริง
+#
+# กติกากันวน 3 ชั้น (Gift เคาะขอบเขต):
+#   ชั้น 1 ทวน 1 ครั้ง/เคส ตอนปิด "ไม่ตั้งธงรอคำตอบ"
+#          เคสแจกให้เซลไปแล้ว การทวนคือเปิดประตูแก้ ไม่ใช่ด่านกั้น
+#          -> ลูกค้าเงียบก็ไม่เสียอะไร
+#   ชั้น 2 ระบุชัด (มีคำบอกชนิด + ตัวเลข) -> แก้ทันที ไม่จำกัดจำนวนครั้ง
+#          เขียนแถวซ้ำ (upsert ตาม PSID) + ติดธงว่าแก้อะไร
+#   ชั้น 3 บอกแค่ "ไม่ใช่" ไม่ระบุ -> ถามกลับ "ครั้งเดียว"
+#          รอบถัดไปยังไม่ชัด -> หยุดถาม ติดธงให้เซลตรวจตอนโทร
+#          (นี่คือจุดที่กันวน: แก้ได้ไม่จำกัด แต่ถามได้ครั้งเดียว)
+#
+# ไม่ทวนในเคสที่ตั้งใจปิด (ปฏิเสธให้เบอร์ / ต่ำกว่าเกณฑ์ / ติดบูโร /
+#   เจ้าของห้อง / ผู้เช่า) เพราะการทวนตัวเลขตรงนั้นไม่มีประโยชน์กับใคร
+# ======================================================
+_R136_NL = chr(10)
+_R136_MIN_CAP = 1000000
+_R136_SKIP = ("contact_refused", "below_threshold", "soft_close",
+              "owner", "renter", "bot_off")
+_R136_WRONG = ("ไม่ใช่", "ไม่ตรง", "ไม่ถูก", "ผิดครับ", "ผิดค่ะ", "ไม่ถูกต้อง",
+               "คลาดเคลื่อน", "ขอแก้", "แก้หน่อย", "แก้ให้", "ที่ถูกคือ",
+               "เปลี่ยนเป็น", "ไม่ได้บอกว่า")
+_R136_ASK_WHICH = ("ขอโทษครับ ไม่ทราบว่าตรงไหนไม่ตรงครับ "
+                   "— รายได้ ยอดผ่อน หรืออายุครับ "
+                   "พิมพ์ตัวเลขที่ถูกมาได้เลยครับ เดี๋ยวผมแก้ให้ทันที")
+_R136_HANDOFF = ("รับทราบครับ ผมแจ้งที่ปรึกษาให้ตรวจข้อมูลอีกครั้งตอนโทรนะครับ "
+                 "ขอบคุณมากครับ")
+
+
+def _r136_int(v):
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+def _r136_lines(state):
+    """บรรทัดสรุป สร้างจาก data ตรงๆ — ไม่มีอะไรที่ระบบไม่รู้จริง"""
+    d = (state or {}).get("data") or {}
+    out = []
+    inc = _r136_int(d.get("income_total") or d.get("income_baht"))
+    if inc:
+        out.append("• รายได้ " + format(inc, ",") + " / เดือน")
+    dm = d.get("debt_baht")
+    if dm is None:
+        # ยังไม่รู้ภาระ = ต้องบอกตรงๆ ห้ามเงียบแล้วปล่อยให้ลูกค้าเข้าใจว่าครบแล้ว
+        out.append("• ยอดผ่อนต่อเดือน — ยังไม่ได้รับข้อมูล")
+    else:
+        dmi = _r136_int(dm)
+        out.append("• ไม่มีภาระผ่อน" if dmi == 0
+                   else "• ผ่อนอยู่ " + format(dmi, ",") + " / เดือน")
+    age = _r136_int(d.get("age"))
+    if age:
+        out.append("• อายุ " + str(age) + " ปี")
+    return out
+
+
+def _r136_cap_line(state):
+    """ประมาณการวงเงินเป็นช่วง — ต่ำกว่า 1 ล้าน ไม่โชว์ (ไม่มีประโยชน์กับใคร)"""
+    d = (state or {}).get("data") or {}
+    inc = _r136_int(d.get("income_total") or d.get("income_baht"))
+    if not inc:
+        return ""
+    if d.get("debt_baht") is None:
+        # ยังไม่รู้ยอดผ่อน = คิดวงเงินไม่ได้จริง
+        # โชว์ตัวเลขตอนนี้ = ฟันธงเกินจริง ผิดกฎ compliance ข้อ 3
+        return ""
+    try:
+        cap = int(_bl131._capacity(inc, _r136_int(d.get("debt_baht")),
+                                   _r136_int(d.get("age"))
+                                   or _bl131.DEFAULT_AGE) or 0)
+    except Exception as e:
+        print(f"[R136 CAP ERROR] {e}")
+        return ""
+    if cap < _R136_MIN_CAP:
+        return ""
+    return ("ประมาณการเบื้องต้น วงเงินราว "
+            + format(cap * 0.8 / 1e6, ".1f") + "-"
+            + format(cap / 1e6, ".1f") + " ล้าน "
+            + "(ตัวจริงขึ้นกับผลประเมินของธนาคารครับ)")
+
+
+def _r136_recap(state):
+    """ข้อความทวน — ข้อมูลไม่ถึง 2 บรรทัด ไม่ทวน (ทวนขอไปทีดูไม่โปร)"""
+    lines = _r136_lines(state)
+    if len(lines) < 2:
+        return ""
+    parts = ["สรุปข้อมูลที่ได้รับนะครับ"] + lines
+    cap = _r136_cap_line(state)
+    if cap:
+        parts.append(cap)
+    parts.append("")
+    parts.append("ถ้าตรงแล้วไม่ต้องตอบก็ได้ครับ เดี๋ยวที่ปรึกษาติดต่อกลับ")
+    _eg = ("ผ่อนบ้าน 8,000"
+           if ((state or {}).get("data") or {}).get("debt_baht") is None
+           else "รายได้ 45,000")
+    parts.append("ถ้ามีตรงไหนไม่ตรง หรือมีข้อมูลเพิ่ม พิมพ์บอกได้เลยครับ เช่น " + _eg)
+    return _R136_NL.join(parts)
+
+
+def _r136_is_wrong(s):
+    return _bl131._has_any(str(s or ""), _R136_WRONG)
+
+
+def _r136_apply_fix(self, msg, state):
+    """คืนรายการที่แก้ได้จริง — ลิสต์ว่าง = อ่านไม่ออกว่าจะแก้อะไร"""
+    s = str(msg or "")
+    d = state.setdefault("data", {})
+    done = []
+    if _bl131._has_any(s, _bl131._INCOME_SAYS):
+        n = _bl131._parse_income(s)
+        if n:
+            old_b = _r136_int(d.get("income_baht"))
+            old_t = _r136_int(d.get("income_total"))
+            self._capture(state, "income", s)
+            d["income_baht"] = int(n)
+            if old_t:
+                # income_total อาจรวมรายได้ผู้กู้ร่วมไว้ด้วย -> ขยับเฉพาะส่วนของลูกค้า
+                d["income_total"] = (int(n) if old_t == old_b
+                                     else max(int(n), old_t - old_b + int(n)))
+            done.append("รายได้ " + format(old_b, ",") + " -> " + format(int(n), ","))
+    if _bl131._has_any(s, _bl131._DEBT_SAYS):
+        n = _bl131._parse_debt_monthly(s)
+        if n is None and _bl131._says_no_debt(s):
+            n = 0
+        if n is not None:
+            old = d.get("debt_baht")
+            self._capture(state, "debt", s)
+            d["debt_baht"] = int(n)
+            done.append("ยอดผ่อน " + str(old) + " -> " + format(int(n), ","))
+    if "อายุ" in s:
+        a = _bl131._parse_age(s)
+        if a:
+            old = d.get("age")
+            d["age"] = int(a)
+            d["age_term"] = max(0, _bl131.AGE_CAP_MAX - int(a))
+            done.append("อายุ " + str(old) + " -> " + str(a))
+    return done
+
+
+_R136_BASE_DECIDE = CalmBotEngine._decide
+
+
+def _decide_r136(self, msg, user_id, state, bucket, is_new):
+    # ---- ก) โหมดแก้ข้อมูลหลังทวน ----------------------------------
+    try:
+        if state.get("r136_sent") and not state.get("r136_gaveup"):
+            s = str(msg or "")
+            if not self._is_question(s) and not _bl131._looks_like_phone(s):
+                fixed = _r136_apply_fix(self, s, state)
+                if fixed:
+                    self._add_signal(state, "แก้ข้อมูลหลังทวน: " + " · ".join(fixed))
+                    g = self._finish(user_id, state,
+                                     (state.get("data") or {}).get("contact", ""),
+                                     calendar=False)
+                    print("[R136] " + " · ".join(fixed) + " -> เกรด " + str(g))
+                    body = _R136_NL.join(["แก้ให้แล้วครับ"] + _r136_lines(state)
+                                         + ["ส่งข้อมูลชุดใหม่ให้ที่ปรึกษาแล้วครับ"])
+                    return [body], g
+                if _r136_is_wrong(s):
+                    if not state.get("r136_asked"):
+                        state["r136_asked"] = True
+                        print("[R136] ลูกค้าแจ้งว่าไม่ตรง — ถามกลับ 1 ครั้ง")
+                        return [_R136_ASK_WHICH], None
+                    state["r136_gaveup"] = True
+                    self._add_signal(
+                        state,
+                        "⚠️ ลูกค้าแจ้งว่าข้อมูลไม่ตรง แต่ยังไม่ระบุว่าตรงไหน "
+                        "— เซลตรวจตอนโทร (r136)")
+                    print("[R136] ยังไม่ระบุรอบสอง — หยุดถาม ติดธงให้เซล")
+                    return [_R136_HANDOFF], None
+    except Exception as e:
+        print(f"[R136 ERROR fix] {e}")
+
+    out = _R136_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+    # ---- ข) เพิ่งปิดเคส -> ต่อท้ายด้วยสรุปทวน 1 ครั้ง ----------------
+    try:
+        bubbles, grade = out
+        if (bubbles and state.get("done") and state.get("lead_sent")
+                and not state.get("r136_sent")
+                and not any(state.get(_f) for _f in _R136_SKIP)):
+            rc = _r136_recap(state)
+            if rc:
+                state["r136_sent"] = True
+                print("[R136] ส่งสรุปทวนตอนปิดเคส")
+                return list(bubbles) + [rc], grade
+    except Exception as e:
+        print(f"[R136 ERROR recap] {e}")
+    return out
+
+
+CalmBotEngine._decide = _decide_r136
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
