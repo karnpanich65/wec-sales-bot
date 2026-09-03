@@ -7989,7 +7989,17 @@ def _r136_cap_line(state):
 
 
 def _r136_recap(state):
-    """ข้อความทวน — ข้อมูลไม่ถึง 2 บรรทัด ไม่ทวน (ทวนขอไปทีดูไม่โปร)"""
+    """ข้อความทวน — ต้องมีข้อมูลจริงอย่างน้อย 2 ช่อง ไม่งั้นทวนขอไปที ดูไม่โปร
+
+    นับเฉพาะช่องที่ "รู้จริง" — บรรทัด "ยอดผ่อน ยังไม่ได้รับข้อมูล" ไม่นับ
+    (ไม่งั้นเคสที่รู้แค่รายได้อย่างเดียวก็ผ่านเกณฑ์ 2 บรรทัดไปได้)
+    """
+    _d = (state or {}).get("data") or {}
+    _real = ((1 if _r136_int(_d.get("income_total") or _d.get("income_baht")) else 0)
+             + (1 if _d.get("debt_baht") is not None else 0)
+             + (1 if _r136_int(_d.get("age")) else 0))
+    if _real < 2:
+        return ""
     lines = _r136_lines(state)
     if len(lines) < 2:
         return ""
