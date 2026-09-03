@@ -7037,6 +7037,10 @@ try:
         ("R3", "แก้ข้อมูล", "_r136_apply_fix", (bot, "มีรายได้เสริมอีก 10000 ครับ", {"data": {"income_baht": 25000, "income_total": 25000}}), ("falsy", ""), "รายได้ก้อนใหม่ที่ต่ำกว่าเดิม ห้ามทับของเดิมเงียบๆ (เกรดจะร่วง เคสหลุดคิว)"),
         ("R4", "แก้ข้อมูล", "_r136_apply_fix", (bot, "ไม่ใช่ครับ รายได้ 18000", {"data": {"income_baht": 25000, "income_total": 25000}}), ("truthy", ""), "ลูกค้าบอกชัดว่าแก้ ต้องยอมลดให้"),
         ("R5", "แก้ข้อมูล", "_r136_apply_fix", (bot, "รายได้ 45000 ครับ", {"data": {"income_baht": 25000, "income_total": 25000}}), ("truthy", ""), "แก้ขึ้น ไม่ต้องมีคำแก้ก็รับได้"),
+        ("S1", "แก้ข้อมูล", "_r136_should_handle", (bot, "0808619099"), ("falsy", ""), "เบอร์หลังปิดเคส ต้องปล่อยให้ r131 เก็บ ห้าม r136 กินไว้เอง"),
+        ("S2", "แก้ข้อมูล", "_r136_should_handle", (bot, "llamewy"), ("falsy", ""), "ไอดีไลน์ก็ต้องปล่อยผ่านเหมือนเบอร์"),
+        ("S3", "แก้ข้อมูล", "_r136_should_handle", (bot, "รายได้ 45,000 ครับ"), ("truthy", ""), "คำแก้ข้อมูลจริง r136 ต้องรับเอง"),
+        ("S4", "แก้ข้อมูล", "_r136_should_handle", (bot, "รายได้เท่าไหร่ครับ"), ("falsy", ""), "ลูกค้าถามกลับ ไม่ใช่คำแก้ ห้ามไปทับข้อมูล"),
         ("B1", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_income", "ผ่อนสามหมื่น", {}, {}), ("no", "co_income"), "พูดเรื่องหนี้ตัวเอง ไม่ใช่รายได้ผู้กู้ร่วม (log 1 ก.ย. 13:19)"),
         ("B2", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_borrower", "0632141859", {}, {}), ("no", "co_borrower"), "เป็นเบอร์โทร ไม่ใช่คำตอบเรื่องเงิน (log 1 ก.ย. 11:21)"),
         ("B3", "ช่องผู้กู้ร่วม", "_r95_reroute", ("co_debt", "เงินเดือนได้ประมาน 80,000", {}, {}), ("has", "co_income"), "เป็นรายได้ผู้กู้ร่วม ไม่ใช่ยอดผ่อน (log 1 ก.ย. 14:41)"),
@@ -8033,6 +8037,24 @@ def _r136_is_wrong(s):
     return _bl131._has_any(str(s or ""), _R136_WRONG)
 
 
+def _r136_should_handle(self, msg):
+    """ข้อความนี้ให้ r136 จัดการเองไหม
+
+    เจอตอนตรวจภาพรวม 3 ก.ย.: r136 เป็นชั้นนอกสุดของสาย _decide
+    ถ้ามันรับเองแล้ว return ข้อความจะไม่ถึง r131 (เก็บเบอร์หลังปิดเคส) เลย
+    เคสที่ปิดไปแล้วแต่ยังไม่มีเบอร์ (แบบนุกูล) ยังรอเบอร์อยู่
+    -> เบอร์/ไลน์ ต้องปล่อยผ่านให้ r131 เก็บเสมอ ห้าม r136 กินไว้เอง
+    """
+    t = str(msg or "")
+    if self._is_question(t):
+        return False
+    if _bl131._looks_like_phone(t):
+        return False
+    if self._is_valid_answer("contact", t):
+        return False
+    return True
+
+
 def _r136_apply_fix(self, msg, state):
     """คืนรายการที่แก้ได้จริง — ลิสต์ว่าง = อ่านไม่ออกว่าจะแก้อะไร"""
     s = str(msg or "")
@@ -8090,7 +8112,7 @@ def _decide_r136(self, msg, user_id, state, bucket, is_new):
     try:
         if state.get("r136_sent") and not state.get("r136_gaveup"):
             s = str(msg or "")
-            if not self._is_question(s) and not _bl131._looks_like_phone(s):
+            if _r136_should_handle(self, s):
                 fixed = _r136_apply_fix(self, s, state)
                 if fixed:
                     self._add_signal(state, "แก้ข้อมูลหลังทวน: " + " · ".join(fixed))
