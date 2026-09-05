@@ -8956,6 +8956,202 @@ except Exception as _e144:
     print('[R144 ERROR] ต่อไม่ติด — บอทตอบเหมือนเดิมทุกประการ: ' + str(_e144))
 
 
+
+
+# ===== r142 : ตัวเลขที่ลูกค้าปฏิเสธ ห้ามบันทึก + ถามกลับให้ชัด — 5 ก.ย. 2569 =====
+# Gift: ไม่ถึงแสน ประมาณเท่าไร คร่าวๆ — งงให้ถาม อย่าเดา
+# ก) ลูกค้าพูดว่า ไม่ถึง/ไม่เกิน/ต่ำกว่า/น้อยกว่า X -> ห้ามเก็บ X เป็นรายได้
+#    (เคสจริง 3 ก.ย. Maple Blazer: ไม่ถึง 100,000 -> ระบบขึ้นรายได้ 100,000)
+#    แตะเฉพาะฝั่งรายได้ ฝั่งหนี้ไม่แตะ เพราะ ผ่อนไม่เกิน 8,000 = เก็บ 8,000
+#    เป็นการประเมินแบบระวังไว้ก่อน ปลอดภัยกว่าอยู่แล้ว
+# ข) ถามกลับ 1 ครั้งเพื่อขอตัวเลขคร่าวๆ ครบโควตาแล้วปล่อยผ่าน + ติดธง
+# ค) ตอนถามยอดผ่อน ก้อนที่มีทั้งรายได้และหนี้ ให้ตัดเอาเฉพาะท่อนหนี้
+#    (กระจกของ r139 ที่ทำฝั่งรายได้ไว้แล้ว)
+try:
+    _R142_WORDS = ('ไม่ถึง', 'ไม่เกิน', 'ต่ำกว่า', 'น้อยกว่า', 'ไม่ครบ')
+    _R142_UNIT = 'ล้าน|แสน|หมื่น|พัน'
+    _R142_RE = re.compile(
+        '(' + '|'.join(_R142_WORDS) + ')[ ]*'
+        + '([0-9][0-9,. ]*)?[ ]*(' + _R142_UNIT + '|k|K)?')
+
+    def _r142_vague(msg):
+        s = str(msg or '')
+        for m in _R142_RE.finditer(s):
+            if (m.group(2) or '').strip() or (m.group(3) or '').strip():
+                return m.group(0).strip()
+        return ''
+
+    def _r142_strip(msg):
+        s = str(msg or '')
+        out = s
+        for m in _R142_RE.finditer(s):
+            if (m.group(2) or '').strip() or (m.group(3) or '').strip():
+                out = out.replace(m.group(0), ' ')
+        return out
+
+    _R142_BASE_INC = _bl131._parse_income
+
+    def _r142_parse_income(msg):
+        try:
+            if _r142_vague(msg):
+                return _R142_BASE_INC(_r142_strip(msg))
+        except Exception as e:
+            print('[R142 ERROR parse] ' + str(e))
+        return _R142_BASE_INC(msg)
+
+    _bl131._parse_income = _r142_parse_income
+
+    # คำที่แปลว่ารายได้จริงๆ — เดือนละ/ต่อเดือน เป็นคำบอกเวลา ใช้กับหนี้ก็ได้
+    _R142_INC_STRONG = ('เงินเดือน', 'รายได้', 'สลิป')
+
+    def _r142_lines(msg):
+        return [x.strip() for x in re.split('[' + chr(10) + chr(13) + ']+',
+                                            str(msg or '')) if x.strip()]
+
+    def _r142_debt_clause(msg):
+        s = str(msg or '')
+        if not (_bl131._has_any(s, _bl131._DEBT_SAYS)
+                and _bl131._has_any(s, _R142_INC_STRONG)):
+            return s
+        keep = [x for x in _r142_lines(s)
+                if _bl131._has_any(x, _bl131._DEBT_SAYS)
+                and not _bl131._has_any(x, _R142_INC_STRONG)]
+        if not keep:
+            return s
+        # ท่อนหนี้อ่านเป็นค่างวดไม่ได้ (เช่น ยอดคงเหลือ 2-3 แสน) ก็ยังคืนท่อนหนี้
+        # ปล่อยให้ค่างวดเป็นไม่รู้แล้วไปถามใหม่ ดีกว่าหยิบเลขรายได้มาเป็นค่างวด
+        return ' '.join(keep).strip()
+
+    # ก้อนที่มีคำปฏิเสธตัวเลข -> เอาเฉพาะท่อนรายได้ แล้วตัดเลขที่ถูกปฏิเสธทิ้ง
+    # กันไม่ให้เลขหนี้ในก้อนเดียวกันเลื่อนมาเป็นรายได้แทน
+    # ไม่มีคำปฏิเสธ = คืนของเดิมทั้งก้อน ไม่แตะอะไรเลย
+    def _r142_income_clean(msg):
+        s = str(msg or '')
+        if not _r142_vague(s):
+            return s
+        keep = [x for x in _r142_lines(s)
+                if _bl131._has_any(x, _R142_INC_STRONG)
+                and not _bl131._has_any(x, _bl131._DEBT_SAYS)]
+        if keep:
+            s = ' '.join(keep).strip()
+        return _r142_strip(s)
+
+    _R142_BASE_CAP = CalmBotEngine._capture
+
+    def _capture_r142(self, state, field, msg):
+        try:
+            if field == 'debt':
+                _cut = _r142_debt_clause(msg)
+                if _cut != str(msg or ''):
+                    print('[R142] ก้อนนี้มีทั้งรายได้และหนี้ — ตัดเอาเฉพาะท่อนหนี้: '
+                          + _cut[:60])
+                    msg = _cut
+            elif field in ('income', 'co_income'):
+                _cut = _r142_income_clean(msg)
+                if _cut != str(msg or ''):
+                    print('[R142] ตัวเลขถูกลูกค้าปฏิเสธ — ไม่บันทึกเลขนั้น: '
+                          + _cut[:60])
+                    msg = _cut
+        except Exception as e:
+            print('[R142 ERROR cut] ' + str(e))
+        return _R142_BASE_CAP(self, state, field, msg)
+
+    CalmBotEngine._capture = _capture_r142
+
+    _R142_ASK = ('ขอตัวเลขคร่าวๆ อีกนิดครับ {p} นี่ประมาณเท่าไหร่ครับ '
+                 'บอกกลมๆ ก็พอครับ เช่น 3 หมื่น หรือ 5 หมื่น')
+    _R142_FIELDS = ('income', 'co_income')
+    _R142_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r142(self, msg, user_id, state, bucket, is_new):
+        try:
+            if (state.get('awaiting') in _R142_FIELDS
+                    and not state.get('r142_used')
+                    and not state.get('done')):
+                _p = _r142_vague(msg)
+                if _p:
+                    state['r142_used'] = True
+                    self._add_signal(
+                        state, 'ลูกค้าบอกช่วงกว้าง (' + _p + ') — ถามตัวเลขคร่าวๆ กลับ (r142)')
+                    print('[R142] ตัวเลขไม่ชัด (' + _p + ') — ถามกลับ '
+                          + str(user_id)[:8])
+                    return [_R142_ASK.format(p=_p)], None
+        except Exception as e:
+            print('[R142 ERROR ask] ' + str(e))
+        _out = _R142_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            if state.get('r142_used') and _r142_vague(msg):
+                self._add_signal(
+                    state,
+                    '⚠️ ถามตัวเลขซ้ำแล้วลูกค้ายังบอกช่วงกว้าง — รายได้จริงยังไม่ยืนยัน '
+                    'ให้เซลถามตอนโทร (r142)')
+        except Exception as e:
+            print('[R142 ERROR flag] ' + str(e))
+        return _out
+
+    CalmBotEngine._decide = _decide_r142
+
+    def _r142_a1(_=None):
+        return _bl131._parse_income('รายได้ไม่ถึง 100,000/เดือนคะ')
+
+    def _r142_a2(_=None):
+        return _bl131._parse_income('เงินเดือน 30,000')
+
+    def _r142_a3(_=None):
+        return _bl131._parse_income('เงินเดือน 30,000 โบนัสไม่ถึง 5,000')
+
+    def _r142_a4(_=None):
+        return _r142_vague('ไม่ถึงแสนค่ะ')
+
+    def _r142_a5(_=None):
+        return _r142_vague('รายได้ 40,000 ครับ')
+
+    def _r142_a6(_=None):
+        return _r142_debt_clause('รายได้ไม่ถึง 100,000/เดือนคะ' + chr(10)
+                                 + 'ผ่อนรถเดือนละ 8,000 คะ')
+
+    def _r142_a8(_=None):
+        return _r142_income_clean('รายได้ไม่ถึง 100,000/เดือนคะ' + chr(10)
+                                  + 'เป็นหนี้บัตร ประมาณ 2-3แสนคะ')
+
+    def _r142_a9(_=None):
+        return _r142_income_clean('เงินเดือน 30,000')
+
+    def _r142_a10(_=None):
+        return _r142_debt_clause('-รายได้ไม่ถึง 100,000/เดือนคะ' + chr(10)
+                                 + '-เป็นหนี้บัตรฯ(ในระบบ) ประมาณ 2-3แสนคะ')
+
+    def _r142_a7(_=None):
+        return _R142_ASK.format(p='ไม่ถึงแสน')
+
+    _R124_EXAM.extend([
+        ('AA1', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a1', ('',), ('falsy', ''),
+         'ไม่ถึง 100,000 ห้ามอ่านเป็นรายได้ 100,000 (เคสจริง Maple Blazer 3 ก.ย.)'),
+        ('AA2', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a2', ('',), ('has', '30000'),
+         'เลขปกติต้องยังอ่านได้เหมือนเดิม ห้ามเข้มจนอ่านรายได้ไม่ออก'),
+        ('AA3', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a3', ('',), ('has', '30000'),
+         'ตัดเฉพาะเลขที่ติดคำปฏิเสธ เลขอื่นในประโยคเดียวกันต้องยังนับ'),
+        ('AA4', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a4', ('',), ('truthy', ''),
+         'ไม่ถึงแสน ไม่มีตัวเลขอารบิกก็ต้องจับได้'),
+        ('AA5', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a5', ('',), ('falsy', ''),
+         'ตัวเลขชัดเจน ห้ามตีเป็นช่วงกว้าง ไม่งั้นถามซ้ำให้เสียเทิร์น'),
+        ('AA6', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a6', ('',), ('no', '100,000'),
+         'ตอนถามยอดผ่อน เลขรายได้ห้ามกลายเป็นค่างวด (กระจกของ r139)'),
+        ('AA7', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a7', ('',), ('has', 'ประมาณเท่าไหร่'),
+         'คำถามกลับต้องขอตัวเลขคร่าวๆ จริง ไม่ใช่ถามลอยๆ'),
+        ('AA8', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a8', ('',), ('no', 'แสน'),
+         'ตัดเลขที่ถูกปฏิเสธแล้ว เลขหนี้ในก้อนเดียวกันห้ามเลื่อนมาเป็นรายได้แทน'),
+        ('AA9', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a9', ('',), ('eq', 'เงินเดือน 30,000'),
+         'ไม่มีคำปฏิเสธ ต้องคืนข้อความเดิมเป๊ะ ห้ามไปตัดอะไรของเคสปกติ'),
+        ('AA10', 'ตัวเลขที่ลูกค้าปฏิเสธ', '_r142_a10', ('',), ('no', '100,000'),
+         'เคสจริง Maple Blazer — เลขรายได้ห้ามกลายเป็นค่างวดรายเดือน'),
+    ])
+    print('[R142] เลขที่ลูกค้าปฏิเสธ ไม่บันทึก + ถามกลับ 1 ครั้ง · ข้อสอบ '
+          + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e142:
+    print('[R142 ERROR] ต่อไม่ติด — อ่านตัวเลขเหมือนเดิมทุกประการ: ' + str(_e142))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
