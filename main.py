@@ -8759,6 +8759,70 @@ def _decide_r140(self, msg, user_id, state, bucket, is_new):
 
 CalmBotEngine._decide = _decide_r140
 
+
+
+# ===== r143 : เคสจบแล้ว ห้ามทักกลับ 20 ชม. — 5 ก.ย. 2569 (Gift) =====
+# ได้เบอร์ + แจกเคส + แจกเกรด = จบ ห้ามทักไปอีก
+# ห่อ build_followup ตัวเดียว คืนค่าว่าง = ตัวกวาดข้ามเอง
+# ไม่แตะตัวกวาด ไม่แตะเกณฑ์ ลูกค้าพิมพ์มาเอง บอทยังตอบเหมือนเดิม
+try:
+    _R143_FLAGS = ('done', 'lead_sent', 'closed', 'soft_close', 'bot_off',
+                   'handover_lead_partial', 'handover_lead_done')
+
+    def _r143_why(state):
+        if not isinstance(state, dict):
+            return ''
+        d = state.get('data') or {}
+        for k in ('contact', 'rent_contact'):
+            if str(d.get(k) or '').strip():
+                return 'ได้เบอร์แล้ว'
+        if str(d.get('grade') or '').strip():
+            return 'แจกเกรดแล้ว'
+        for f in _R143_FLAGS:
+            if state.get(f):
+                return f
+        return ''
+
+    def _r143_stop(state):
+        return bool(_r143_why(state))
+
+    _R143_BASE = _bl131.BotEngine.build_followup
+
+    def _build_followup_r143(self, state):
+        try:
+            _w = _r143_why(state)
+            if _w:
+                print('[R143] ไม่ทักกลับ — ' + _w)
+                return '', ''
+        except Exception as e:
+            print('[R143 ERROR] ' + str(e))
+        return _R143_BASE(self, state)
+
+    _bl131.BotEngine.build_followup = _build_followup_r143
+
+    def _r143_x1(_=None):
+        return _r143_stop({'data': {'contact': '0808619099'}})
+
+    def _r143_x2(_=None):
+        return _r143_stop({'data': {'income_baht': 40000}})
+
+    def _r143_x3(_=None):
+        return _bl131.BotEngine.build_followup(bot, {'data': {'grade': 'A'}})[0]
+
+    _R124_EXAM.extend([
+        ('Z1', 'ทักกลับ 20 ชม.', '_r143_x1', ('',), ('truthy', ''),
+         'ได้เบอร์แล้ว ห้ามทักกลับ (Gift 5 ก.ย. 69)'),
+        ('Z2', 'ทักกลับ 20 ชม.', '_r143_x2', ('',), ('falsy', ''),
+         'ยังไม่มีเบอร์ ไม่มีเกรด ต้องทักได้ตามเดิม ห้ามปิดทั้งระบบ'),
+        ('Z3', 'ทักกลับ 20 ชม.', '_r143_x3', ('',), ('falsy', ''),
+         'มีเกรดแล้ว ตัวสร้างข้อความต้องคืนว่าง ตัวกวาดจะได้ข้าม'),
+    ])
+    print('[R143] เคสที่ได้เบอร์/มีเกรดแล้ว ไม่ทักกลับ · ข้อสอบ '
+          + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e143:
+    print('[R143 ERROR] ต่อไม่ติด — ตัวกวาดทำงานเหมือนเดิม: ' + str(_e143))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
