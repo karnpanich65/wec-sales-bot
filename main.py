@@ -8823,6 +8823,139 @@ except Exception as _e143:
     print('[R143 ERROR] ต่อไม่ติด — ตัวกวาดทำงานเหมือนเดิม: ' + str(_e143))
 
 
+
+
+# ===== r144 : เคสจบแล้ว หยุดแชทนั้น — 5 ก.ย. 2569 (Gift เคาะ) =====
+# ได้เบอร์ + แจกเคส/แจกเกรดแล้ว = จบ ปิดแชทนั้นถาวร ให้เซลโทรคุยแทน
+# ตั้งธงหลังบอทตอบจบเทิร์นนี้แล้ว ข้อความปิดเคสจึงส่งออกครบก่อนเงียบ
+# ปลดล็อกได้เหมือนเดิมด้วย #เปิดบอท จากกล่องข้อความเพจ
+# ข้อความลูกค้าที่พิมพ์มาหลังจากนี้ ยังถูกบันทึกลง log และชีตตามเดิม
+try:
+    def _r144_done_case(state):
+        if not isinstance(state, dict):
+            return False
+        d = state.get('data') or {}
+        _has = False
+        for k in ('contact', 'rent_contact'):
+            if str(d.get(k) or '').strip():
+                _has = True
+        if not _has:
+            return False
+        if str(d.get('grade') or '').strip():
+            return True
+        for f in ('lead_sent', 'handover_lead_done', 'handover_lead_partial'):
+            if state.get(f):
+                return True
+        return False
+
+    _R144_SIGNAL = ('🔇 เคสจบแล้ว (ได้เบอร์ + แจกเคส + แจกเกรด) — บอทหยุดแชทนี้ '
+                    'ลูกค้าพิมพ์มาจะไม่มีใครตอบ ต้องให้เซลเข้าไปคุย '
+                    '· ปลดล็อกด้วย #เปิดบอท')
+
+
+    # แชทกำลังจะเงียบ ห้ามทิ้งท้ายว่าถามเพิ่มได้ (บับเบิลเท่าเดิม แค่เปลี่ยนคำ)
+    _R144_SWAP = (
+        ('ระหว่างนี้ถามเพิ่มได้เลยครับ', 'เดี๋ยวโทรกลับไปหาคุณลูกค้านะครับ'),
+        ('ระหว่างนี้ถามเพิ่มได้เลยค่ะ', 'เดี๋ยวโทรกลับไปหาคุณลูกค้านะคะ'),
+    )
+
+    def _r144_last_words(bubbles):
+        out = []
+        for b in (bubbles or []):
+            s = str(b)
+            for bad, good in _R144_SWAP:
+                if bad in s:
+                    s = s.replace(bad, good)
+            out.append(s)
+        return out
+
+    _R144_BASE_DECIDE = CalmBotEngine._decide
+
+    def _decide_r144(self, msg, user_id, state, bucket, is_new):
+        out = _R144_BASE_DECIDE(self, msg, user_id, state, bucket, is_new)
+        try:
+            if not state.get('bot_off') and _r144_done_case(state):
+                state['bot_off'] = True
+                state['bot_off_at'] = _bl131._now()
+                state['done'] = True
+                state['closed'] = True
+                try:
+                    self._add_signal(state, _R144_SIGNAL)
+                except Exception:
+                    pass
+                print('[R144] เคสจบ — หยุดแชทนี้ ' + str(user_id)[:8])
+                _b, _g = out
+                return _r144_last_words(_b), _g
+        except Exception as e:
+            print('[R144 ERROR] ' + str(e))
+        return out
+
+    CalmBotEngine._decide = _decide_r144
+
+    # แชทจะเงียบทันทีหลังเทิร์นนี้ จึงห้ามชวนลูกค้าพิมพ์กลับมาแก้
+    _R144_BASE_RECAP = _r136_recap
+    _R144_TAIL = 'ถ้ามีตรงไหนไม่ตรง แจ้งที่ปรึกษาตอนโทรได้เลยครับ'
+
+    def _r144_recap(state):
+        txt = _R144_BASE_RECAP(state)
+        try:
+            if txt and _r144_done_case(state):
+                ls = txt.split(_R136_NL)
+                if ls and 'พิมพ์บอก' in ls[-1]:
+                    ls[-1] = _R144_TAIL
+                    txt = _R136_NL.join(ls)
+        except Exception as e:
+            print('[R144 RECAP] ' + str(e))
+        return txt
+
+    _r136_recap = _r144_recap
+
+    def _r144_x1(_=None):
+        return _r144_done_case({'data': {'contact': '0808619099', 'grade': 'A'}})
+
+    def _r144_x2(_=None):
+        return _r144_done_case({'data': {'contact': '0808619099'}})
+
+    def _r144_x3(_=None):
+        return _r144_done_case({'data': {'grade': 'A'}})
+
+    def _r144_x4(_=None):
+        return _r136_recap({'data': {'contact': '08x', 'grade': 'A',
+                                     'income_baht': 40000, 'debt_baht': 0,
+                                     'age': 29}})
+
+    def _r144_x5(_=None):
+        return _r136_recap({'data': {'income_baht': 40000, 'debt_baht': 0,
+                                     'age': 29}})
+
+    def _r144_x6(_=None):
+        return _r144_last_words(['ที่ปรึกษารับเรื่องไว้แล้วครับ ระหว่างนี้ถามเพิ่มได้เลยครับ'])[0]
+
+    def _r144_x7(_=None):
+        _in = ['ก', 'ข', 'ที่ปรึกษารับเรื่องไว้แล้วครับ ระหว่างนี้ถามเพิ่มได้เลยครับ']
+        return len(_r144_last_words(_in)) == len(_in)
+
+    _R124_EXAM.extend([
+        ('Y1', 'หยุดแชทเมื่อเคสจบ', '_r144_x1', ('',), ('truthy', ''),
+         'ได้เบอร์ + มีเกรด = จบ ต้องหยุดแชท (Gift 5 ก.ย. 69)'),
+        ('Y2', 'หยุดแชทเมื่อเคสจบ', '_r144_x2', ('',), ('falsy', ''),
+         'มีเบอร์แต่ยังไม่แจกเคส ห้ามหยุด เดี๋ยวเคสหาย'),
+        ('Y3', 'หยุดแชทเมื่อเคสจบ', '_r144_x3', ('',), ('falsy', ''),
+         'มีเกรดแต่ไม่มีเบอร์ ห้ามหยุด ยังต้องขอเบอร์ต่อ'),
+        ('Y4', 'หยุดแชทเมื่อเคสจบ', '_r144_x4', ('',), ('no', 'พิมพ์บอก'),
+         'เคสจบแล้วแชทจะเงียบ ห้ามชวนลูกค้าพิมพ์กลับมา'),
+        ('Y5', 'หยุดแชทเมื่อเคสจบ', '_r144_x5', ('',), ('has', 'พิมพ์บอก'),
+         'เคสยังไม่จบ ต้องชวนให้แก้ข้อมูลได้เหมือนเดิม'),
+        ('Y6', 'หยุดแชทเมื่อเคสจบ', '_r144_x6', ('',), ('no', 'ถามเพิ่ม'),
+         'ข้อความสุดท้ายก่อนเงียบ ห้ามบอกลูกค้าว่าถามเพิ่มได้'),
+        ('Y7', 'หยุดแชทเมื่อเคสจบ', '_r144_x7', ('',), ('truthy', ''),
+         'ห้ามทำให้บอทเงียบ — บับเบิลต้องครบเท่าเดิม แค่เปลี่ยนคำ'),
+    ])
+    print('[R144] เคสจบแล้วหยุดแชทถาวร · ข้อสอบ ' + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e144:
+    print('[R144 ERROR] ต่อไม่ติด — บอทตอบเหมือนเดิมทุกประการ: ' + str(_e144))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
