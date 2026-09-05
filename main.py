@@ -9257,6 +9257,155 @@ except Exception as _e145:
     print('[R145 ERROR] ต่อไม่ติด — ข้อความเหมือนเดิมทุกประการ: ' + str(_e145))
 
 
+
+
+# ===== r146 : รุ่นฉลาดตอบแล้วคำตอบหาย — 5 ก.ย. 2569 (เดิมเรียก r141) =====
+# อาการจริงจาก log 3-4 ก.ย.: เรียกรุ่นฉลาด 11 ครั้ง พัง 9 ครั้ง
+#   [CLAUDE $] claude-sonnet-5 smart=1 ... out=400
+#   [CLAUDE EXCEPTION] 'text'
+# แปลว่า API ตอบสำเร็จ เก็บเงินแล้ว แต่โค้ดอ่านคำตอบไม่ออก ลูกค้าได้ข้อความสำรอง
+# ต้นเหตุ: r98 อ่าน data[content][0][text] คือหยิบบล็อกแรกดื้อๆ
+#          ถ้าบล็อกแรกไม่ใช่ข้อความ (เช่น thinking) -> KeyError text
+# แก้ 3 ชั้น ไม่แตะโค้ด r98 เลย ห่อที่ชั้น requests ของไฟล์นี้ตัวเดียว
+#   1) ไล่หาบล็อกที่เป็นข้อความจริงทุกอัน เอามาต่อกัน แล้วยัดกลับเป็นบล็อกแรก
+#   2) รุ่นฉลาดขยายเพดานคำตอบ 400 -> 1500 เผื่อบล็อกอื่นกินโควตาจนไม่เหลือข้อความ
+#      (รุ่นประหยัดไม่แตะ คุมค่าใช้จ่ายเหมือนเดิม)
+#   3) ถ้าไม่มีบล็อกข้อความเลย พิมพ์ชนิดบล็อกที่ได้จริงลง log จะได้รู้สาเหตุแน่ๆ
+try:
+    R146_SMART_MAX = int(os.environ.get('CLAUDE_SMART_MAX_TOKENS', '1500'))
+    _R146_URL = _bl131.ANTHROPIC_URL
+    _R146_STAT = {'fixed': 0, 'empty': 0, 'bumped': 0}
+
+    def _r146_types(blocks):
+        out = []
+        for b in (blocks or []):
+            if isinstance(b, dict):
+                out.append(str(b.get('type') or '?'))
+            else:
+                out.append(type(b).__name__)
+        return ','.join(out) or '(ว่าง)'
+
+    def _r146_norm(data):
+        if not isinstance(data, dict):
+            return data
+        c = data.get('content')
+        if not isinstance(c, list) or not c:
+            return data
+        if isinstance(c[0], dict) and 'text' in c[0]:
+            return data
+        texts = [str(b.get('text') or '') for b in c
+                 if isinstance(b, dict) and b.get('type') == 'text' and b.get('text')]
+        kinds = _r146_types(c)
+        if texts:
+            nd = dict(data)
+            nd['content'] = [{'type': 'text',
+                              'text': (chr(10).join(texts)).strip()}]
+            _R146_STAT['fixed'] += 1
+            print('[R146] บล็อกแรกไม่ใช่ข้อความ (' + kinds
+                  + ') — หยิบเฉพาะข้อความมาใช้ · แก้แล้ว '
+                  + str(_R146_STAT['fixed']) + ' ครั้ง')
+            return nd
+        _R146_STAT['empty'] += 1
+        print('[R146] คำตอบไม่มีบล็อกข้อความเลย (' + kinds
+              + ') stop=' + str(data.get('stop_reason'))
+              + ' — ใช้ข้อความสำรอง · เจอ ' + str(_R146_STAT['empty']) + ' ครั้ง')
+        return data
+
+    def _r146_bump(body):
+        # รุ่นฉลาดเท่านั้น ขยายเพดานคำตอบ กันบล็อกอื่นกินโควตาจนไม่เหลือข้อความ
+        if not isinstance(body, dict):
+            return body
+        try:
+            _m = str(body.get('model') or '')
+            if _m and _m == str(getattr(_bl131, 'CLAUDE_MODEL_SMART', '')):
+                if int(body.get('max_tokens') or 0) < R146_SMART_MAX:
+                    body['max_tokens'] = R146_SMART_MAX
+                    _R146_STAT['bumped'] += 1
+        except Exception as e:
+            print('[R146 BUMP] ' + str(e))
+        return body
+
+    class _R146Resp(object):
+        def __init__(self, r):
+            self._r = r
+
+        def __getattr__(self, k):
+            return getattr(self._r, k)
+
+        def json(self, **kw):
+            try:
+                return _r146_norm(self._r.json(**kw))
+            except Exception as e:
+                print('[R146 JSON] ' + str(e))
+                return self._r.json(**kw)
+
+    class _R146Requests(object):
+        def __init__(self, base):
+            self._base = base
+
+        def __getattr__(self, k):
+            return getattr(self._base, k)
+
+        def post(self, url, *a, **kw):
+            _is = False
+            try:
+                _is = str(url or '').startswith(_R146_URL)
+                if _is and isinstance(kw.get('json'), dict):
+                    kw['json'] = _r146_bump(kw['json'])
+            except Exception as e:
+                print('[R146 PRE] ' + str(e))
+            r = self._base.post(url, *a, **kw)
+            if _is:
+                try:
+                    return _R146Resp(r)
+                except Exception as e:
+                    print('[R146 WRAP] ' + str(e))
+            return r
+
+    requests = _R146Requests(requests)
+
+    def _r146_x1(_=None):
+        return _r146_norm({'content': [{'type': 'thinking', 'thinking': 'ก'},
+                                       {'type': 'text', 'text': 'สวัสดีครับ'}]}
+                          )['content'][0]['text']
+
+    def _r146_x2(_=None):
+        return _r146_norm({'content': [{'type': 'text', 'text': 'ปกติครับ'}]}
+                          )['content'][0]['text']
+
+    def _r146_x3(_=None):
+        _d = _r146_norm({'content': [{'type': 'thinking', 'thinking': 'ก'}],
+                         'stop_reason': 'max_tokens'})
+        return 'text' in (_d.get('content') or [{}])[0]
+
+    def _r146_x4(_=None):
+        _b = _r146_bump({'model': str(getattr(_bl131, 'CLAUDE_MODEL_SMART', '')),
+                         'max_tokens': 400})
+        return str(_b.get('max_tokens'))
+
+    def _r146_x5(_=None):
+        _b = _r146_bump({'model': str(getattr(_bl131, 'CLAUDE_MODEL', '')) + '-x',
+                         'max_tokens': 400})
+        return str(_b.get('max_tokens'))
+
+    _R124_EXAM.extend([
+        ('AC1', 'รุ่นฉลาดคำตอบหาย', '_r146_x1', ('',), ('has', 'สวัสดีครับ'),
+         'บล็อก thinking มาก่อน ต้องยังได้ข้อความจริง (log 3-4 ก.ย. พัง 9/11 ครั้ง)'),
+        ('AC2', 'รุ่นฉลาดคำตอบหาย', '_r146_x2', ('',), ('eq', 'ปกติครับ'),
+         'คำตอบรูปแบบปกติ ต้องไม่ถูกแตะเลย'),
+        ('AC3', 'รุ่นฉลาดคำตอบหาย', '_r146_x3', ('',), ('falsy', ''),
+         'มีแต่ thinking ต้องไม่ระเบิด ปล่อยให้ตกไปข้อความสำรองตามเดิม'),
+        ('AC4', 'รุ่นฉลาดคำตอบหาย', '_r146_x4', ('',), ('eq', '1500'),
+         'รุ่นฉลาดต้องขยายเพดานคำตอบ ไม่งั้นบล็อกอื่นกินโควตาจนไม่เหลือข้อความ'),
+        ('AC5', 'รุ่นฉลาดคำตอบหาย', '_r146_x5', ('',), ('eq', '400'),
+         'รุ่นประหยัดห้ามขยาย ค่าใช้จ่ายต้องเท่าเดิม'),
+    ])
+    print('[R146] รุ่นฉลาด: อ่านคำตอบให้ทน + เพดาน ' + str(R146_SMART_MAX)
+          + ' · ข้อสอบ ' + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e146:
+    print('[R146 ERROR] ต่อไม่ติด — ยิง API เหมือนเดิมทุกประการ: ' + str(_e146))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
