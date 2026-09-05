@@ -9152,6 +9152,111 @@ except Exception as _e142:
     print('[R142 ERROR] ต่อไม่ติด — อ่านตัวเลขเหมือนเดิมทุกประการ: ' + str(_e142))
 
 
+
+
+# ===== r145 : ชื่อแบรนด์หลุดข้ามเพจ — 5 ก.ย. 2569 (Gift เจอที่ Angel Estate) =====
+# อาการ: เพจ Angel Estate ทักลูกค้าว่า ยินดีต้อนรับเข้าสู่ ... อสังหาคุ้มค่า
+# ต้นเหตุ: system prompt ที่ส่งให้ AI เป็นก้อนเดียวใช้ร่วมกันทุกเพจ และในนั้น
+#          เขียนชื่อ Wealth Estate : อสังหาคุ้มค่า ไว้ตายตัว (ก้อนนี้ถูก cache
+#          จึงแก้รายเพจไม่ได้) ส่วน WELCOME_MSG เปลี่ยนชื่อตามเพจอยู่แล้ว
+# วิธีแก้: กวาดคำตอบของ AI อีกชั้น ถ้าเพจนี้มีแบรนด์ของตัวเอง ให้แทนชื่อเริ่มต้น
+#          ด้วยชื่อเพจนั้น เพจ Wealth Estate เองไม่เปลี่ยนอะไรเลย
+try:
+    _R145_DEF = _bl131.DEFAULT_BRAND
+    # เรียงยาว -> สั้น ตัวยาวต้องชนะก่อน ไม่งั้นเหลือคำห้อยแบบ เราAngel Estate
+    _R145_PARTS = ('เราคือ Wealth Estate : อสังหาคุ้มค่า',
+                   'เราอสังหาคุ้มค่า',
+                   'เรา อสังหาคุ้มค่า',
+                   'Wealth Estate : อสังหาคุ้มค่า',
+                   'Wealth Estate: อสังหาคุ้มค่า',
+                   'Wealth Estate อสังหาคุ้มค่า',
+                   'อสังหาคุ้มค่า',
+                   'Wealth Estate')
+
+    def _r145_brand(state):
+        return str((state or {}).get('brand') or '').strip()
+
+    def _r145_fix(text, state):
+        b = _r145_brand(state)
+        if not b or b == _R145_DEF:
+            return text
+        s = str(text or '')
+        for p in _R145_PARTS:
+            if p in b:
+                continue
+            if p in s:
+                s = s.replace(p, b)
+        while '  ' in s:
+            s = s.replace('  ', ' ')
+        return s
+
+    _R145_BASE_ASK = _bl131.BotEngine._ask_claude
+
+    def _ask_claude_r145(self, user_message, user_id, gender='',
+                         done=False, state=None):
+        out = _R145_BASE_ASK(self, user_message, user_id, gender, done, state)
+        try:
+            fixed = _r145_fix(out, state)
+            if fixed != out:
+                print('[R145] AI เอ่ยชื่อแบรนด์ผิดเพจ — แก้เป็น '
+                      + _r145_brand(state))
+            return fixed
+        except Exception as e:
+            print('[R145 ERROR] ' + str(e))
+        return out
+
+    _bl131.BotEngine._ask_claude = _ask_claude_r145
+
+    # พิมพ์ผังแบรนด์รายเพจตอนบูต จะได้เห็นทันทีว่าเพจไหนยังไม่ได้ตั้งชื่อ
+    try:
+        for _pid, _cfg in (PAGES or {}).items():
+            _b = str((_cfg or {}).get('brand') or '').strip()
+            print('[R145] เพจ ' + str(_pid) + ' -> '
+                  + (_b if _b else '(ยังไม่ได้ตั้งแบรนด์ — ใช้ชื่อเริ่มต้น)'))
+        if not PAGES:
+            print('[R145] ไม่มี WEC_PAGES — ทุกเพจใช้ชื่อเริ่มต้น')
+    except Exception as _e145p:
+        print('[R145 PAGES] ' + str(_e145p))
+
+    def _r145_b1(_=None):
+        return _r145_fix('ยินดีต้อนรับเข้าสู่ อสังหาคุ้มค่า ค่ะ',
+                         {'brand': 'Angel Estate'})
+
+    def _r145_b2(_=None):
+        return _r145_fix('ยินดีต้อนรับเข้าสู่ อสังหาคุ้มค่า ค่ะ',
+                         {'brand': _R145_DEF})
+
+    def _r145_b3(_=None):
+        return _r145_fix('ยินดีต้อนรับเข้าสู่ อสังหาคุ้มค่า ค่ะ', {})
+
+    def _r145_b5(_=None):
+        return _r145_fix('ยินดีต้อนรับเข้าสู่ เราอสังหาคุ้มค่า เราช่วยพิจารณาค่ะ',
+                         {'brand': 'Angel Estate'})
+
+    def _r145_b4(_=None):
+        return _r145_fix('ทีมงาน Wealth Estate ยินดีให้ข้อมูลค่ะ',
+                         {'brand': 'New Chapter'})
+
+    _R124_EXAM.extend([
+        ('AB1', 'ชื่อแบรนด์รายเพจ', '_r145_b1', ('',), ('no', 'คุ้มค่า'),
+         'เพจอื่นห้ามเอ่ยชื่อ อสังหาคุ้มค่า (เคสจริง Angel Estate 5 ก.ย. 69)'),
+        ('AB2', 'ชื่อแบรนด์รายเพจ', '_r145_b2', ('',),
+         ('has', 'อสังหาคุ้มค่า'),
+         'เพจ Wealth Estate เอง ต้องไม่เปลี่ยนอะไรเลย'),
+        ('AB3', 'ชื่อแบรนด์รายเพจ', '_r145_b3', ('',),
+         ('has', 'อสังหาคุ้มค่า'),
+         'ไม่รู้แบรนด์เพจ ห้ามเดา ปล่อยข้อความเดิม'),
+        ('AB4', 'ชื่อแบรนด์รายเพจ', '_r145_b4', ('',), ('has', 'New Chapter'),
+         'ชื่อภาษาอังกฤษก็ต้องเปลี่ยนตามเพจ'),
+        ('AB5', 'ชื่อแบรนด์รายเพจ', '_r145_b5', ('',),
+         ('has', 'เข้าสู่ Angel Estate'),
+         'ประโยคจริงจากหน้างาน ต้องไม่เหลือคำห้อยแบบ เราAngel Estate'),
+    ])
+    print('[R145] กันชื่อแบรนด์หลุดข้ามเพจ · ข้อสอบ ' + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e145:
+    print('[R145 ERROR] ต่อไม่ติด — ข้อความเหมือนเดิมทุกประการ: ' + str(_e145))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
