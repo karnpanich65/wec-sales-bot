@@ -9406,6 +9406,180 @@ except Exception as _e146:
     print('[R146 ERROR] ต่อไม่ติด — ยิง API เหมือนเดิมทุกประการ: ' + str(_e146))
 
 
+# ======================================================================
+# r147 — เกรด N รอบใหม่ (Gift เคาะ 8 ก.ย. 2569)
+# ----------------------------------------------------------------------
+# กติกาที่ Gift สั่ง:
+#   1. N1 = ยังไม่รู้รายได้ -> ไม่แจกให้ใครทั้งนั้น บอท verify เอง
+#   2. N2 = รู้รายได้ และรายได้ต้อง "เกิน 30,000" เท่านั้น -> แจกได้ตามปกติ
+#   3. รู้รายได้แต่ไม่เกิน 30,000 -> ต้องถามภาระผ่อนให้ได้ พร้อมบอกเหตุผล
+#      ระหว่างที่ยังไม่รู้ภาระ = ถือเป็น N1 ไม่แจก (ข้อมูลไม่พอตัดสิน)
+#   4. N1 ที่ถามจนสุดแล้วยังไม่ได้ = ค้างในระบบ ไม่แจก (Gift ยอมรับความเสี่ยงนี้เอง)
+#
+# เลข 30,000 ใช้เฉพาะเกรด N เท่านั้น
+# LOW_INCOME_BAHT = 25,000 ของทั้งระบบไม่แตะ (คอลัมน์ผ่านเกณฑ์25k / รายงาน CEO /
+# เงื่อนไขถามผู้กู้ร่วม / เส้นเกรด A ที่ 24,600 ยังเหมือนเดิมทุกอย่าง)
+#
+# วิธีทำ: ไม่แก้ _grade_r89 เลย ห่อไว้ข้างนอกแล้ว "ติดธง" อย่างเดียว
+#   เกรดยังเป็น N เหมือนเดิม -> dSalesOk_ / ตัวนับในรายงาน CEO ไม่พัง
+#   ฝั่งแจกเคส (p90 ใน รหัส.gs) อ่านธงนี้แล้วข้ามแถวนั้น
+# ======================================================================
+try:
+    import bot_logic as _bl147
+
+    R147_N2_INCOME_BAR = 30000
+    R147_FLAG = 'N รอ verify — ยังไม่แจก'
+
+    R147_DEBT_Q = ('อีกข้อเดียวครับ ตอนนี้ผ่อนอะไรอยู่บ้างไหมครับ บ้าน รถ บัตรเครดิต '
+                   'รวมเดือนละประมาณเท่าไหร่ครับ ยอดผ่อนมีผลกับวงเงินโดยตรง '
+                   'รู้แล้วที่ปรึกษาจะประเมินวงเงินคร่าวๆ ให้ได้เลยครับ')
+    R147_DEBT_Q_F = ('อีกข้อเดียวนะคะ ตอนนี้ผ่อนอะไรอยู่บ้างไหมคะ บ้าน รถ บัตรเครดิต '
+                     'รวมเดือนละประมาณเท่าไหร่คะ ยอดผ่อนมีผลกับวงเงินโดยตรง '
+                     'รู้แล้วที่ปรึกษาจะประเมินวงเงินคร่าวๆ ให้ได้เลยค่ะ')
+
+    def _r147_income(data):
+        # รายได้ที่ใช้ตัดสิน — นับรวมผู้กู้ร่วมตามเกณฑ์เดิม (Gift เคาะ 19 ส.ค.)
+        try:
+            if not isinstance(data, dict):
+                return None
+            if data.get('income_unknown') or data.get('income_refused'):
+                return None
+            v = data.get('income_total') or data.get('income_baht')
+            if not v:
+                v = _bl147._parse_income(str(data.get('income', '')))
+            v = int(v or 0)
+            return v if v > 0 else None
+        except Exception as _e:
+            print('[R147 INCOME] ' + str(_e))
+            return None
+
+    def _r147_kind(data):
+        # ใช้ตอนเกรดออกมาเป็น N เท่านั้น — คืน N1 (ไม่แจก) หรือ N2 (แจกได้)
+        inc = _r147_income(data)
+        if not inc:
+            return 'N1'
+        if inc <= R147_N2_INCOME_BAR:
+            return 'N1'
+        return 'N2'
+
+    _R147_BASE_GRADE = _bl147.BotEngine._grade
+
+    def _grade_r147(self, data, state=None):
+        g = _R147_BASE_GRADE(self, data, state)
+        try:
+            st = state if isinstance(state, dict) else None
+            # ล้างธงเก่าทุกครั้ง — เคสที่ตอบเพิ่มแล้วต้องหลุดจากสถานะไม่แจกเอง
+            if st is not None:
+                _sig = st.get('signals') or []
+                st['signals'] = [x for x in _sig if R147_FLAG not in str(x)]
+            if g == 'N':
+                _k = _r147_kind(data)
+                if isinstance(data, dict):
+                    data['n_kind'] = _k
+                if _k == 'N1':
+                    if st is not None:
+                        self._add_signal(st, R147_FLAG)
+                    print('[R147] N1 — ยังไม่แจก (รายได้ '
+                          + str(_r147_income(data) or 'ไม่รู้') + ')')
+                else:
+                    print('[R147] N2 รายได้ ' + str(_r147_income(data))
+                          + ' เกิน ' + str(R147_N2_INCOME_BAR) + ' — แจกได้ตามปกติ')
+        except Exception as _e:
+            print('[R147 GRADE ERROR] ' + str(_e))
+        return g
+
+    _bl147.BotEngine._grade = _grade_r147
+
+    # ---- คำถามภาระผ่อนตัวใหม่ ใช้เฉพาะเคสรายได้ไม่เกิน 30,000 ----
+    # ของเดิมถามลอยๆ ไม่บอกเหตุผล เคสกลุ่มนี้ต้องได้ตัวเลขภาระให้ได้
+    # จึงเติมเหตุผลที่เป็นประโยชน์กับลูกค้าเข้าไป (Gift สั่ง 8 ก.ย.)
+    # ห้ามบอกตัวเลขวงเงินเอง -> ชี้ไปที่ที่ปรึกษา ตามกฎ r136
+    _R147_BASE_NEXT = _bl147.BotEngine._next_missing
+
+    def _next_missing_r147(self, data, state=None, skip=None):
+        _out = _R147_BASE_NEXT(self, data, state, skip)
+        try:
+            _f, _q = _out
+            if _f == 'debt' and _q:
+                _inc = _r147_income(data)
+                if _inc and _inc <= R147_N2_INCOME_BAR:
+                    return _f, R147_DEBT_Q
+        except Exception as _e:
+            print('[R147 NEXT ERROR] ' + str(_e))
+        return _out
+
+    _bl147.BotEngine._next_missing = _next_missing_r147
+    _bl147._FEMALE_EXACT[R147_DEBT_Q] = R147_DEBT_Q_F
+
+    print('[R147] เกรด N: N1 ไม่แจก · N2 ต้องรายได้เกิน '
+          + str(R147_N2_INCOME_BAR) + ' — เปิดแล้ว')
+    print('[R147] ธงที่ฝั่งแจกเคสอ่าน: ' + R147_FLAG)
+except Exception as _e:
+    print('[R147 ERROR] ต่อไม่ติด — ใช้ทางเดิม: ' + str(_e))
+
+
+# ---------- ข้อสอบล็อก r147 ----------
+try:
+    def _r147_exam_noincome(_=None):
+        return _r147_kind({})
+
+    def _r147_exam_low(_=None):
+        return _r147_kind({'income_baht': 28000})
+
+    def _r147_exam_bar(_=None):
+        return _r147_kind({'income_baht': 30000})
+
+    def _r147_exam_pass(_=None):
+        return _r147_kind({'income_baht': 35000})
+
+    def _r147_exam_refused(_=None):
+        return _r147_kind({'income': '50000', 'income_refused': True})
+
+    def _r147_exam_cob(_=None):
+        return _r147_kind({'income_baht': 20000, 'income_total': 45000})
+
+    def _r147_exam_q(_=None):
+        return R147_DEBT_Q
+
+    def _r147_exam_q_female(_=None):
+        return _bl147.to_female(R147_DEBT_Q)
+
+    def _r147_exam_flag_on(_=None):
+        # เกรด N + รายได้ต่ำ ต้องติดธงไม่แจก
+        _st = {'data': {}, 'signals': []}
+        try:
+            _grade_r147(_bl147.BotEngine, {'income_baht': 28000}, _st)
+        except Exception:
+            pass
+        return ' | '.join(_st.get('signals') or [])
+
+    _R124_EXAM.extend([
+        ('NA1', 'เกรด N รอบใหม่ (r147)', '_r147_exam_noincome', ('',), ('eq', 'N1'),
+         'ไม่รู้รายได้เลย = N1 ห้ามแจกให้ใคร'),
+        ('NA2', 'เกรด N รอบใหม่ (r147)', '_r147_exam_low', ('',), ('eq', 'N1'),
+         'รายได้ 28,000 ยังไม่เกิน 30,000 = ยังไม่ใช่ N2'),
+        ('NA3', 'เกรด N รอบใหม่ (r147)', '_r147_exam_bar', ('',), ('eq', 'N1'),
+         '30,000 พอดี ไม่นับว่าเกิน — เส้นคือ "มากกว่า 30,000"'),
+        ('NA4', 'เกรด N รอบใหม่ (r147)', '_r147_exam_pass', ('',), ('eq', 'N2'),
+         'รายได้ 35,000 = N2 แจกได้ตามปกติ'),
+        ('NA5', 'เกรด N รอบใหม่ (r147)', '_r147_exam_refused', ('',), ('eq', 'N1'),
+         'ปฏิเสธบอกรายได้ = N1 ถึงจะมีเลขค้างอยู่ในช่องก็ห้ามนับ'),
+        ('NA6', 'เกรด N รอบใหม่ (r147)', '_r147_exam_cob', ('',), ('eq', 'N2'),
+         'รายได้รวมผู้กู้ร่วมต้องนับด้วย (เกณฑ์เดิม 19 ส.ค.)'),
+        ('NA7', 'เกรด N รอบใหม่ (r147)', '_r147_exam_q', ('',), ('has', 'วงเงินคร่าวๆ'),
+         'คำถามภาระผ่อนต้องบอกเหตุผลที่เป็นประโยชน์กับลูกค้า'),
+        ('NA8', 'เกรด N รอบใหม่ (r147)', '_r147_exam_q', ('',), ('has', 'ที่ปรึกษา'),
+         'ต้องชี้ว่าที่ปรึกษาเป็นคนประเมิน — บอทห้ามบอกตัวเลขวงเงินเอง (r136)'),
+        ('NA9', 'เกรด N รอบใหม่ (r147)', '_r147_exam_q_female', ('',), ('no', 'ครับ'),
+         'เสียงหญิงต้องแก้คู่กันเสมอ (บทเรียน r45)'),
+        ('NB1', 'เกรด N รอบใหม่ (r147)', '_r147_exam_flag_on', ('',), ('has', 'รอ verify'),
+         'เกรด N ที่รายได้ยังไม่ถึงเกณฑ์ ต้องติดธงให้ฝั่งแจกเคสข้าม'),
+    ])
+    print('[R147] ข้อสอบรวมเป็น ' + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e:
+    print('[R147 EXAM ERROR] ' + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
