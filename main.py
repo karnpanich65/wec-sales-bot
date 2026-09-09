@@ -9580,6 +9580,154 @@ except Exception as _e:
     print('[R147 EXAM ERROR] ' + str(_e))
 
 
+# ======================================================================
+# r148 — ลูกค้าบอกเป็น "รายปี" ต้องหาร 12 (Gift 9 ก.ย. 2569)
+# ----------------------------------------------------------------------
+# เคสจริง: ลูกค้าตอบ "ปีละ9-10ล้านครับ"
+#   ของเดิมอ่านได้ 10,000,000 แล้วเอาไปคิดเป็น "รายได้ต่อเดือน" ตรงๆ
+#   -> วงเงินหลายร้อยล้าน -> เกรด A ปลอม + ตัวเลขในชีตผิดมหาศาล
+#   (ตระกูลเดียวกับ r139 ยอดหนี้กลายเป็นเงินเดือน)
+# ลูกค้าคนเดียวกันพิมพ์ต่อว่า "ต่อเดือนเฉลี่ยแสนกว่าๆ ถึงสองแสน"
+#   = สองประโยคนี้คนละหน่วย ระบบต้องแยกให้ออก
+#
+# ทำ 3 ชั้น ห่อของเดิมทั้งหมด ไม่แก้สูตรเกรด ไม่แตะเกณฑ์:
+#   1. _parse_income        เจอคำบอกรายปี -> หาร 12
+#   2. _parse_debt_monthly   เจอคำบอกรายปี -> หาร 12 (ผ่อนปีละ X ก็เจอได้)
+#   3. _r93_parse_sales      ยอดขายธุรกิจ ปีละ X -> หาร 12 ก่อนเทียบเกณฑ์ 500,000
+# + ติดธงให้เซลเห็นว่าเลขถูกแปลงมา จะได้ยืนยันตอนโทร
+#
+# คำที่นับว่า "รายปี" ต้องเจาะจง ห้ามจับ "ทำงานมา 3 ปี" (อายุงาน ไม่ใช่หน่วยเงิน)
+# ======================================================================
+try:
+    import bot_logic as _bl148
+
+    _R148_WORDS = ('ปีละ', 'ต่อปี', 'ปีนึง', 'ปีหนึ่ง', 'รายปี', 'ทั้งปี',
+                   'ต่อ 1 ปี', 'ต่อหนึ่งปี', '/ปี', 'per year', 'peryear',
+                   'ปี ๆ ละ', 'ปีๆละ')
+
+    def _r148_yearly(msg):
+        # ข้อความนี้บอกเป็นยอด "ต่อปี" หรือเปล่า
+        try:
+            m = str(msg or '').lower().replace(' ', '')
+            for w in _R148_WORDS:
+                if w.replace(' ', '') in m:
+                    return True
+        except Exception as _e:
+            print('[R148 WORD] ' + str(_e))
+        return False
+
+    def _r148_div(val):
+        # หาร 12 แบบปัดลง ค่าเพี้ยน/ว่าง คืนของเดิม
+        try:
+            if val is None:
+                return None
+            v = int(val)
+            if v <= 0:
+                return val
+            return int(round(v / 12.0))
+        except Exception as _e:
+            print('[R148 DIV] ' + str(_e))
+            return val
+
+    def _r148_wrap(fn, tag):
+        def _inner(msg, *a, **k):
+            out = fn(msg, *a, **k)
+            try:
+                if out and _r148_yearly(msg):
+                    new = _r148_div(out)
+                    print('[R148] ' + tag + ' ลูกค้าบอกเป็นรายปี '
+                          + str(out) + ' -> ต่อเดือน ' + str(new))
+                    return new
+            except Exception as _e:
+                print('[R148 WRAP ERROR] ' + str(_e))
+            return out
+        return _inner
+
+    _bl148._parse_income = _r148_wrap(_bl148._parse_income, 'รายได้')
+    _bl148._parse_debt_monthly = _r148_wrap(_bl148._parse_debt_monthly, 'ยอดผ่อน')
+    try:
+        _r93_parse_sales = _r148_wrap(_r93_parse_sales, 'ยอดขายธุรกิจ')
+    except Exception as _e93:
+        print('[R148] ต่อกับตัวอ่านยอดขาย r93 ไม่ได้: ' + str(_e93))
+
+    # ---- ติดธงให้เซลเห็นว่าเลขถูกแปลงหน่วยมา ----
+    _R148_FIELDS = ('income', 'co_income', 'debt', 'co_debt', 'coop')
+    _R148_BASE_CAPTURE = _bl148.BotEngine._capture
+
+    def _capture_r148(self, state, field, msg):
+        _out = _R148_BASE_CAPTURE(self, state, field, msg)
+        try:
+            if field in _R148_FIELDS and _r148_yearly(msg) and isinstance(state, dict):
+                self._add_signal(
+                    state,
+                    'ลูกค้าบอกยอดเป็น "รายปี" — ระบบหาร 12 ให้เป็นต่อเดือนแล้ว '
+                    'เซลยืนยันตอนโทรอีกครั้ง')
+        except Exception as _e:
+            print('[R148 CAPTURE] ' + str(_e))
+        return _out
+
+    _bl148.BotEngine._capture = _capture_r148
+
+    print('[R148] ยอดที่ลูกค้าบอกเป็นรายปี -> หาร 12 อัตโนมัติ (รายได้/ยอดผ่อน/ยอดขาย) เปิดแล้ว')
+except Exception as _e:
+    print('[R148 ERROR] ต่อไม่ติด — ใช้ทางเดิม: ' + str(_e))
+
+
+# ---------- ข้อสอบล็อก r148 ----------
+try:
+    def _r148_exam_year(_=None):
+        return _bl148._parse_income('ปีละ9-10ล้านครับ')
+
+    def _r148_exam_month(_=None):
+        return _bl148._parse_income('ต่อเดือนเฉลี่ยอยู่ที่แสนกว่าๆถึงสองเเสนครับ')
+
+    def _r148_exam_peryear(_=None):
+        return _bl148._parse_income('ต่อปี 2.4 ล้านครับ')
+
+    def _r148_exam_workyears(_=None):
+        # อายุงาน ไม่ใช่หน่วยเงิน ห้ามหาร
+        return _bl148._parse_income('เงินเดือน 60000 ทำงานมา 3 ปี')
+
+    def _r148_exam_plain(_=None):
+        return _bl148._parse_income('เดือนละ 50,000')
+
+    def _r148_exam_debt(_=None):
+        return _bl148._parse_debt_monthly('ผ่อนปีละ 120,000')
+
+    def _r148_exam_sales(_=None):
+        return _r93_parse_sales('ยอดขายปีละ 9-10 ล้าน')
+
+    def _r148_exam_flag(_=None):
+        return '1' if _r148_yearly('ปีละ9-10ล้านครับ') else '0'
+
+    def _r148_exam_noflag(_=None):
+        return '1' if _r148_yearly('ทำงานมา 3 ปีครับ') else '0'
+
+    _R124_EXAM.extend([
+        ('YR1', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_year', ('',), ('eq', '833333'),
+         'ปีละ 9-10 ล้าน = ต่อเดือน 833,333 ไม่ใช่ 10,000,000'),
+        ('YR2', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_month', ('',), ('eq', '100000'),
+         'ประโยคที่บอกต่อเดือนอยู่แล้ว ห้ามหารซ้ำ'),
+        ('YR3', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_peryear', ('',), ('eq', '200000'),
+         '"ต่อปี 2.4 ล้าน" = 200,000 ต่อเดือน'),
+        ('YR4', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_workyears', ('',), ('eq', '60000'),
+         'อายุงาน "ทำงานมา 3 ปี" ไม่ใช่หน่วยเงิน ห้ามหาร'),
+        ('YR5', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_plain', ('',), ('eq', '50000'),
+         'ประโยคปกติต้องไม่ถูกแตะ'),
+        ('YR6', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_debt', ('',), ('eq', '10000'),
+         'ยอดผ่อนรายปีก็ต้องหาร 12 เหมือนกัน'),
+        ('YR7', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_sales', ('',), ('eq', '833333'),
+         'ยอดขายธุรกิจรายปี ต้องหารก่อนเทียบเกณฑ์ 500,000'),
+        ('YR8', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_flag', ('',), ('eq', '1'),
+         'ต้องจับคำว่ารายปีได้'),
+        ('YR9', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_noflag', ('',), ('eq', '0'),
+         'ต้องไม่จับอายุงานเป็นหน่วยรายปี'),
+    ])
+    print('[R148] ข้อสอบรวมเป็น ' + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e:
+    print('[R148 EXAM ERROR] ' + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
