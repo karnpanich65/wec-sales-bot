@@ -9698,10 +9698,11 @@ try:
         return _r93_parse_sales('ยอดขายปีละ 9-10 ล้าน')
 
     def _r148_exam_flag(_=None):
-        return '1' if _r148_yearly('ปีละ9-10ล้านครับ') else '0'
+        # r149 มาแทนตัวเช็คของ r148 แล้ว — วัดที่ตัวใหม่
+        return '1' if _r149_near('ปีละ9-10ล้านครับ') else '0'
 
     def _r148_exam_noflag(_=None):
-        return '1' if _r148_yearly('ทำงานมา 3 ปีครับ') else '0'
+        return '1' if _r149_near('ทำงานมา 3 ปีครับ') else '0'
 
     _R124_EXAM.extend([
         ('YR1', 'ยอดรายปีต้องหาร 12 (r148)', '_r148_exam_year', ('',), ('eq', '833333'),
@@ -9726,6 +9727,195 @@ try:
     print('[R148] ข้อสอบรวมเป็น ' + str(len(_R124_EXAM)) + ' ข้อ')
 except Exception as _e:
     print('[R148 EXAM ERROR] ' + str(_e))
+
+
+# ======================================================================
+# r149 — ซ่อม r148: หาร 12 มั่ว (Gift เจอจาก log 11 ก.ย. 2569)
+# ----------------------------------------------------------------------
+# r148 เช็คแค่ว่า "ในข้อความมีคำว่ารายปีไหม" แล้วหารเลขที่ตัวอ่านคืนมาเลย
+# ผลจริงใน log 2 วัน: ถูก 1 ผิด 3
+#   ok  : 1,500,000 -> 125,000   (รายได้ต่อปีจริง)
+#   ผิด : 14,000    -> 1,167     (เงินเดือนต่อเดือน โดนหาร)
+#   ผิด : 34,000    -> 2,833     (เงินเดือนต่อเดือน โดนหาร)
+# เคสแบบนี้อันตรายกว่าบั๊กเดิม เพราะทำให้ "เคสดีกลายเป็นเคสตก" เงียบๆ
+#
+# ต้นเหตุ: ประโยคอย่าง "เงินเดือน 14,000 โบนัสปีละ 3 เดือน"
+#   มีคำว่า "ปีละ" จริง แต่เลขที่ติดกับคำนั้นคือ 3 ไม่ใช่ 14,000
+#
+# กติกาใหม่ — หารก็ต่อเมื่อ "เลขที่ติดกับคำว่ารายปี" คือเลขเดียวกับที่อ่านได้:
+#   1. หาเลขที่อยู่ติดคำรายปี (มองหน้า-หลัง 22 ตัวอักษร รองรับ ล้าน/แสน/หมื่น/พัน + ช่วง 9-10)
+#   2. ตรงกับค่าที่ตัวอ่านคืนมา (คลาด <=1%) จึงหาร
+#   3. ฝั่งรายได้ ถ้าหารแล้วเหลือ < 5,000 = ไม่สมเหตุผล ไม่หาร
+# พังเมื่อไหร่ = ไม่หาร = กลับไปพฤติกรรมก่อน r148 ไม่ทำเคสเพี้ยนลง
+# ======================================================================
+try:
+    import bot_logic as _bl149
+
+    # ปิดตัวเช็คของ r148 (ตัวห่อเดิมกลายเป็นทางผ่าน) แล้วให้ r149 ทำแทน
+    def _r148_yearly(msg):
+        return False
+
+    R149_FLOOR = 5000
+    _R149_YEAR = ('ปีละ', 'ต่อปี', 'รายปี', 'ทั้งปี', 'ปีนึง', 'ปีหนึ่ง',
+                  '/ปี', 'ต่อ1ปี', 'ต่อหนึ่งปี', 'peryear')
+    _R149_UNIT = {'ล้าน': 1000000, 'แสน': 100000, 'หมื่น': 10000, 'พัน': 1000,
+                  'k': 1000, 'm': 1000000}
+    _R149_NUM = re.compile(
+        '([0-9]+(?:\\.[0-9]+)?)(?:[ ]*[-–][ ]*([0-9]+(?:\\.[0-9]+)?))?'
+        '[ ]*(ล้าน|แสน|หมื่น|พัน|k|m)?')
+
+    def _r149_seg_values(seg):
+        out = []
+        try:
+            for _m in _R149_NUM.finditer(seg):
+                _u = _R149_UNIT.get((_m.group(3) or '').lower(), 1)
+                for _g in (_m.group(1), _m.group(2)):
+                    if _g:
+                        out.append(int(round(float(_g) * _u)))
+        except Exception as _e:
+            print('[R149 SEG] ' + str(_e))
+        return out
+
+    def _r149_near(msg):
+        # เลขที่อยู่ติดกับคำว่ารายปี — ไม่มีคืนลิสต์ว่าง
+        vals = []
+        try:
+            s = str(msg or '').replace(',', '').replace(' ', '').lower()
+            for w in _R149_YEAR:
+                w2 = w.replace(' ', '').lower()
+                i = 0
+                while True:
+                    j = s.find(w2, i)
+                    if j < 0:
+                        break
+                    i = j + len(w2)
+                    vals += _r149_seg_values(s[i:i + 22])
+                    vals += _r149_seg_values(s[max(0, j - 10):j])
+        except Exception as _e:
+            print('[R149 NEAR] ' + str(_e))
+        return vals
+
+    def _r149_is_yearly_value(msg, val):
+        # ค่าที่อ่านได้ เป็นยอด "ต่อปี" จริงไหม
+        try:
+            if not val:
+                return False
+            v = int(val)
+            for c in _r149_near(msg):
+                if c <= 0:
+                    continue
+                if abs(c - v) <= max(1, v * 0.01):
+                    return True
+        except Exception as _e:
+            print('[R149 CHECK] ' + str(_e))
+        return False
+
+    def _r149_wrap(fn, tag, floor):
+        def _inner(msg, *a, **k):
+            out = fn(msg, *a, **k)
+            try:
+                if out and _r149_is_yearly_value(msg, out):
+                    new = int(round(int(out) / 12.0))
+                    if floor and new < floor:
+                        print('[R149] ' + tag + ' ' + str(out)
+                              + ' ติดคำรายปี แต่หารแล้วเหลือ ' + str(new)
+                              + ' ไม่สมเหตุผล — ไม่หาร')
+                        return out
+                    print('[R149] ' + tag + ' รายปี ' + str(out)
+                          + ' -> ต่อเดือน ' + str(new))
+                    return new
+            except Exception as _e:
+                print('[R149 WRAP] ' + str(_e))
+            return out
+        return _inner
+
+    _bl149._parse_income = _r149_wrap(_bl149._parse_income, 'รายได้', R149_FLOOR)
+    _bl149._parse_debt_monthly = _r149_wrap(_bl149._parse_debt_monthly, 'ยอดผ่อน', 0)
+    try:
+        _r93_parse_sales = _r149_wrap(_r93_parse_sales, 'ยอดขายธุรกิจ', 0)
+    except Exception as _e93:
+        print('[R149] ต่อกับตัวอ่านยอดขายไม่ได้: ' + str(_e93))
+
+    # ธงให้เซล — ใช้เกณฑ์ใหม่ ไม่ใช่แค่ "มีคำว่าปี"
+    _R149_FIELDS = ('income', 'co_income', 'debt', 'co_debt', 'coop')
+    _R149_BASE_CAPTURE = _bl149.BotEngine._capture
+
+    def _capture_r149(self, state, field, msg):
+        _out = _R149_BASE_CAPTURE(self, state, field, msg)
+        try:
+            if field in _R149_FIELDS and isinstance(state, dict) and _r149_near(msg):
+                self._add_signal(
+                    state,
+                    'ลูกค้าเอ่ยยอดแบบ "รายปี" ในประโยคนี้ — เซลยืนยันหน่วยตอนโทรด้วย')
+        except Exception as _e:
+            print('[R149 CAPTURE] ' + str(_e))
+        return _out
+
+    _bl149.BotEngine._capture = _capture_r149
+
+    print('[R149] ซ่อมตัวหาร 12 — หารเฉพาะเลขที่ติดกับคำว่ารายปีจริง '
+          '· พื้นรายได้ ' + str(R149_FLOOR))
+except Exception as _e:
+    print('[R149 ERROR] ต่อไม่ติด — ใช้ทางเดิม: ' + str(_e))
+
+
+# ---------- ข้อสอบล็อก r149 ----------
+try:
+    def _r149_x_year(_=None):
+        return _bl149._parse_income('ปีละ9-10ล้านครับ')
+
+    def _r149_x_bonus(_=None):
+        return _bl149._parse_income('เงินเดือน 14,000 มีโบนัสปีละ 3 เดือนครับ')
+
+    def _r149_x_raise(_=None):
+        return _bl149._parse_income('เงินเดือน 34,000 ขึ้นเงินเดือนปีละครั้งค่ะ')
+
+    def _r149_x_real(_=None):
+        return _bl149._parse_income('รายได้ปีละ 1,500,000 ครับ')
+
+    def _r149_x_small(_=None):
+        return _bl149._parse_income('รายได้ปีละ 14,000 ครับ')
+
+    def _r149_x_debt(_=None):
+        return _bl149._parse_debt_monthly('ผ่อนปีละ 120,000')
+
+    def _r149_x_plain(_=None):
+        return _bl149._parse_income('เดือนละ 50,000')
+
+    def _r149_x_work(_=None):
+        return _bl149._parse_income('เงินเดือน 60000 ทำงานมา 3 ปี')
+
+    def _r149_x_sales(_=None):
+        return _r93_parse_sales('ยอดขายปีละ 9-10 ล้าน')
+
+    def _r149_x_bigbonus(_=None):
+        return _bl149._parse_income('เงินเดือน 120,000 มีโบนัสปีละ 3 เดือนครับ')
+
+    _R124_EXAM.extend([
+        ('YZ1', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_year', ('',), ('eq', '833333'),
+         'ยอดรายปีจริง ยังต้องหารเหมือนเดิม'),
+        ('YZ2', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_bonus', ('',), ('eq', '14000'),
+         'เคสจริงที่ r148 พัง — โบนัสปีละ 3 เดือน ห้ามลากเงินเดือนไปหาร'),
+        ('YZ3', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_raise', ('',), ('eq', '34000'),
+         'เคสจริงที่ r148 พัง — ขึ้นเงินเดือนปีละครั้ง ไม่ใช่หน่วยเงิน'),
+        ('YZ4', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_real', ('',), ('eq', '125000'),
+         'รายได้ปีละ 1.5 ล้าน = 125,000 ต่อเดือน'),
+        ('YZ5', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_small', ('',), ('eq', '14000'),
+         'ต่อให้ติดคำรายปี ถ้าหารแล้วเหลือ 1,167 = ไม่สมเหตุผล ห้ามหาร'),
+        ('YZ6', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_debt', ('',), ('eq', '10000'),
+         'ยอดผ่อนรายปี ยังหารได้ตามเดิม'),
+        ('YZ7', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_plain', ('',), ('eq', '50000'),
+         'ประโยคปกติห้ามแตะ'),
+        ('YZ8', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_work', ('',), ('eq', '60000'),
+         'อายุงานไม่ใช่หน่วยเงิน'),
+        ('YZ9', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_sales', ('',), ('eq', '833333'),
+         'ยอดขายธุรกิจรายปี ยังหารได้ตามเดิม'),
+        ('YZ10', 'ซ่อมตัวหาร 12 (r149)', '_r149_x_bigbonus', ('',), ('eq', '120000'),
+         'เงินเดือนสูง + โบนัสปีละ 3 เดือน — พื้น 5,000 ช่วยไม่ได้ ต้องกันด้วยความใกล้คำ'),
+    ])
+    print('[R149] ข้อสอบรวมเป็น ' + str(len(_R124_EXAM)) + ' ข้อ')
+except Exception as _e:
+    print('[R149 EXAM ERROR] ' + str(_e))
 
 
 if __name__ == "__main__":
