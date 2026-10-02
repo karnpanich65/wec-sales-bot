@@ -11011,6 +11011,56 @@ def _r154_route(eng, state, msg):
     return ""
 
 
+# ---------- ช) ข้อที่รู้แล้ว ห้ามถามซ้ำ (ไม่ว่าคำถามจะมาจาก AI หรือ patch ไหน) ----------
+# เคสจริง psid 28508834 (2 ต.ค. 12:17 หลัง r154 ขึ้น 30 วิ): ลูกค้าตอบ "ไม่มีหนี้"
+# ระบบเก็บแล้ว แต่ข้อความที่ AI แต่งยังถามเรื่องผ่อน -> ลูกค้าต้องตอบ "ไม่มีผ่อนค่ะ" ซ้ำ
+def _r154_topic_known(topic, state):
+    d = (state or {}).get("data") or {}
+    if topic == "income":
+        return bool(_bl154._income_known(d))
+    if topic == "debt":
+        return d.get("debt_baht") is not None
+    if topic == "age":
+        return d.get("age") is not None
+    if topic == "objective":
+        return bool(d.get("objective"))
+    if topic == "coborrow":
+        return bool(d.get("co_borrower")) or d.get("co_borrower_yes") is not None
+    if topic == "contact":
+        return bool(d.get("contact"))
+    return False
+
+
+def _r154_bubble_any_topic(b):
+    tp = _r152_bubble_topic(b)
+    if tp:
+        return tp
+    nb = _norm_msg(b)
+    try:
+        for src in (R151_SOFT_M, R151_SOFT_F):
+            for k, v in src.items():
+                if v and _norm_msg(v) and _norm_msg(v) in nb:
+                    return k
+    except Exception:
+        pass
+    return ""
+
+
+def _r154_drop_known(reply, state):
+    """ตัดบับเบิลที่ถามข้อที่รู้แล้วทิ้ง — ต้องเหลือบับเบิลอื่นอย่างน้อย 1 อัน (ห้ามเงียบ)"""
+    parts = [x for x in str(reply or "").split(_R152_SPLIT)]
+    keep, dropped = [], []
+    for b in parts:
+        tp = _r154_bubble_any_topic(b) if b.strip() else ""
+        if tp and _r154_topic_known(tp, state):
+            dropped.append(tp)
+            continue
+        keep.append(b)
+    if not dropped or not any(x.strip() for x in keep):
+        return reply, []
+    return _R152_SPLIT.join(keep), dropped
+
+
 # ---------- จ) เบอร์มาหลังส่งเคสแล้ว ----------
 R154_LATEPHONE_M = "ได้รับเบอร์แล้วครับ เดี๋ยวที่ปรึกษาโทรกลับไปคุยรายละเอียดให้ครับ"
 R154_LATEPHONE_F = "ได้รับเบอร์แล้วค่ะ เดี๋ยวที่ปรึกษาโทรกลับไปคุยรายละเอียดให้ค่ะ"
@@ -11098,6 +11148,12 @@ try:
                             _st["awaiting"] = None
                         print("[R154 PHANTOM] " + str(user_id)[:8] + "... engine นับถาม "
                               + _f + " แต่ลูกค้าไม่เห็นคำถาม -> คืนตัวนับ")
+                # ข้อที่รู้แล้ว ห้ามถามซ้ำ
+                _nr, _dr = _r154_drop_known(reply, _st)
+                if _dr:
+                    print("[R154 KNOWN] " + str(user_id)[:8] + "... ตัดคำถามข้อที่รู้แล้ว: "
+                          + ",".join(_dr))
+                    reply = _nr
                 # จำว่าส่งตัวเลือกช่วงหัวข้อไหนไว้ — จำไว้จนกว่าจะได้คำตอบ
                 # หรือ engine เลิกรอข้อนั้น (ลูกค้าคั่นด้วยคำถามอื่นก่อนได้)
                 _bt2 = _r154_bucket_topic(reply)
@@ -11183,6 +11239,29 @@ def _r154_selftest(which):
             return (bool(out) and st["data"].get("contact") == "0812345678"
                     and st["contact_refused"] is False
                     and _sent.get("k", {}).get("contact_refused") is False)
+        if which == "drop_known":
+            st = {"data": {"debt": "ไม่มีหนี้", "debt_baht": 0, "income": "50000",
+                           "income_baht": 50000}}
+            r = ("ขอบคุณค่ะ" + _R152_SPLIT
+                 + "ตอนนี้ลูกค้ามีผ่อนอะไรอยู่ไหมคะ เช่น บ้าน รถ หรือบัตรเครดิต" + _R152_SPLIT
+                 + "ขอเบอร์ติดต่อกลับหน่อยค่ะ")
+            out, dr = _r154_drop_known(r, st)
+            return dr == ["debt"] and "ผ่อนอะไร" not in out and "ขอเบอร์" in out
+        if which == "drop_known_soft":
+            st = {"data": {"debt_baht": 0}}
+            r = "รับทราบค่ะ" + _R152_SPLIT + R154_SOFT_F["debt"]
+            out, dr = _r154_drop_known(r, st)
+            return dr == ["debt"] and out.strip() == "รับทราบค่ะ"
+        if which == "drop_known_never_silent":
+            st = {"data": {"debt_baht": 0}}
+            r = "ตอนนี้ลูกค้ามีผ่อนอะไรอยู่ไหมคะ เช่น บ้าน รถ หรือบัตรเครดิต"
+            out, dr = _r154_drop_known(r, st)
+            return out == r and dr == []
+        if which == "drop_unknown_kept":
+            st = {"data": {"debt": "บัตรเครดิต"}}          # มีหนี้แต่ยังไม่ได้ยอด = ยังถามได้
+            r = "ขอบคุณค่ะ" + _R152_SPLIT + "ยอดผ่อนต่อเดือนประมาณเท่าไหร่คะ"
+            out, dr = _r154_drop_known(r, st)
+            return dr == [] and out == r
         if which.startswith("route_"):
             st = {"data": {}, "asked": {}, "signals": [], "awaiting": "income"}
             if which == "route_nodebt":
@@ -11234,9 +11313,13 @@ try:
         ("RU16", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_income",), ("truthy", ""), "เคสจริง 2918024900 — ตอบรายได้ตอนบอทถามผู้กู้ร่วม ต้องเก็บเป็นรายได้"),
         ("RU17", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_income_not_budget",), ("truthy", ""), "ประโยคที่มีคำว่างบ ห้ามเก็บเป็นรายได้"),
         ("RU18", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_keep_awaited",), ("truthy", ""), "ข้อที่ engine รออยู่ ให้ engine เก็บเอง ห้ามแย่ง"),
+        ("RU19", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("drop_known",), ("truthy", ""), "เคสจริง 28508834 — ตอบไม่มีหนี้แล้ว ห้ามถามผ่อนซ้ำ"),
+        ("RU20", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("drop_known_soft",), ("truthy", ""), "ตัวเลือกช่วงของข้อที่รู้แล้วก็ต้องตัด"),
+        ("RU21", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("drop_known_never_silent",), ("truthy", ""), "ถ้าตัดแล้วไม่เหลืออะไร ห้ามตัด (ห้ามเงียบ)"),
+        ("RU22", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("drop_unknown_kept",), ("truthy", ""), "มีหนี้แต่ยังไม่ได้ยอด = ยังถามยอดได้ ห้ามตัด"),
         ("RU11", "เก็บคำตอบได้ (r154)", "_r152_pick", ("income", 1, False, 0), ("no", "ต่ำกว่า"), "ตัวเลือกรายได้ห้ามใช้คำว่าต่ำกว่า (ชนกติกา r142)"),
     ])
-    print("[R154] ข้อสอบเก็บคำตอบ 18 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+    print("[R154] ข้อสอบเก็บคำตอบ 22 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
     print("[R154 EXAM ERROR] " + str(_e))
 
