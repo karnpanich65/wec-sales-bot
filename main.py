@@ -11163,6 +11163,9 @@ try:
                         _after[_f] = int(_before.get(_f) or 0)
                         if _st.get("awaiting") == _f:
                             _st["awaiting"] = None
+                        # r156: ลูกค้าไม่เห็นคำถามนี้ -> ห้ามจำเป็น "คำถามล่าสุด"
+                        # ไม่งั้นเทิร์นหน้า engine คิดว่าถามซ้ำ ข้ามทิ้ง -> ตกข้อความสำรอง "สนใจโซนไหน"
+                        _st["last_q"] = ""
                         print("[R154 PHANTOM] " + str(user_id)[:8] + "... engine นับถาม "
                               + _f + " แต่ลูกค้าไม่เห็นคำถาม -> คืนตัวนับ")
                 # ข้อที่รู้แล้ว ห้ามถามซ้ำ
@@ -11528,6 +11531,568 @@ try:
     print("[R155] ข้อสอบ N1 รอกลับมา 9 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
     print("[R155 EXAM ERROR] " + str(_e))
+
+
+# =====================================================================
+# r156 (2 ต.ค. 2569 · Gift: "อย่าลืม tone voice" / "เชคเวอร์ชั่นเก่าๆ คำพูดดีกว่านี้")
+# เคสจริง Nuttayaporn (psid 28611036) — 4 จุดที่ผิด:
+#  1) r142 ถามกลับ "ต่ำกว่า3หมื่น ... เช่น 3 หมื่น หรือ 5 หมื่น" = ตัวอย่างเกินกรอบที่ลูกค้าบอก
+#     -> ตัวอย่างต้องอยู่ "ใต้" ตัวเลขที่ลูกค้าบอก + บอกเหตุผล (กฎ 16 ส.ค. ถามซ้ำต้องบอกเหตุผล)
+#  2) ลูกค้าตอบ "ไม่มีคะ" (กู้ร่วม) เก็บได้แล้ว แต่ประโยคปิดสุภาพของ engine ที่ลงท้าย "นะคะ"
+#     ถูกนับเป็นคำถาม -> โดนเขียนทับเป็น "ตอบว่ามีหรือไม่มีก็พอค่ะ"
+#     -> "นะคะ" = บอกเล่า ไม่ใช่คำถาม · หัวข้อที่เก็บได้แล้วห้ามเขียนทับเป็นคำถามซ้ำ
+#  3) ได้เบอร์หลังปิดเคส X แล้วบอท "เดี๋ยวที่ปรึกษาโทรกลับ" = สัญญาที่ไม่มีใครทำ (X ไม่แจก)
+#     -> ข้อความรับเบอร์ตามเกรด: แจก = สัญญาโทร · X/W1 = รับไว้ ไม่สัญญา · N1 = ถามรายได้ต่อ
+#  4) ข้อความถามรอบ 2 / ข้ามข้อ ห้วนไป ไม่บอกเหตุผล -> ใช้น้ำเสียงเดิมของ engine
+#     (INCOME_REASK_MSGS / DEBT_REASK_MSG / AGE_Q / คำถามกู้ร่วม) — สุภาพ บอกเหตุผล ไม่บี้
+# ห้ามทำให้บอทเงียบ: ทุกจุด try/except แล้วกลับไปทางเดิม
+# =====================================================================
+
+# ---------- 4) น้ำเสียง: ถามรอบ 2 (ชาย / หญิง) ----------
+R156_SOFT_M = {
+    "income":   ("ขอโทษที่ถามซ้ำนะครับ รายได้เป็นตัวเลขเดียวที่ใช้คิดวงเงินให้ได้ครับ "
+                 "ไม่ต้องเป๊ะ เลือกเป็นช่วงได้เลยครับ "
+                 "1) 15,000-24,000  2) 25,000-40,000  3) 40,000-60,000  4) 60,000 ขึ้นไป  "
+                 "ใกล้ข้อไหนที่สุดครับ พิมพ์แค่เลขข้อก็ได้ครับ"),
+    "debt":     ("ขออีกนิดเดียวนะครับ ยอดผ่อนรวมต่อเดือน (บ้าน รถ บัตรเครดิต สินเชื่อ) "
+                 "มีผลกับวงเงินโดยตรงครับ ไม่ต้องเป๊ะ "
+                 "1) ไม่มีเลย  2) ไม่เกิน 5,000  3) 5,000-15,000  4) 15,000 ขึ้นไป  "
+                 "ใกล้ข้อไหนที่สุดครับ พิมพ์แค่เลขข้อก็ได้ครับ"),
+    "age":      ("ขออีกนิดนะครับ อายุมีผลกับจำนวนปีที่กู้ได้ เลยกระทบค่างวดต่อเดือนตรงๆ ครับ "
+                 "บอกเป็นช่วงก็ได้ "
+                 "1) 20-39  2) 40-50  3) 51-60  4) 61 ขึ้นไป  "
+                 "ใกล้ข้อไหนที่สุดครับ"),
+    "objective":("ขอถามสั้นๆ นะครับ ที่สนใจนี่ซื้อไว้ปล่อยเช่า หรือซื้อไว้อยู่เองครับ "
+                 "จะได้แนะนำห้องให้ตรงกับที่ใช้จริงครับ"),
+    "coborrow": ("ขออีกข้อนะครับ ตามเกณฑ์ธนาคาร เคสนี้ยื่นกู้คนเดียวมักยังไม่พอครับ "
+                 "ต้องมีผู้กู้ร่วมช่วยอีกแรง พอจะมีใครกู้ร่วมได้ไหมครับ เช่น แฟน พ่อแม่ หรือพี่น้อง "
+                 "ตอบว่ามีหรือไม่มีก็พอครับ"),
+    "credit":   ("ขออนุญาตถามสั้นๆ นะครับ เคยชำระล่าช้าเกิน 30 วันไหมครับ "
+                 "ข้อนี้ช่วยให้เลือกธนาคารที่ผ่านง่ายได้ถูกครับ ตอบว่าเคยหรือไม่เคยก็พอครับ"),
+    "contact":  ("เรื่องวงเงินคุยทางโทรสั้นๆ จะอธิบายได้ครบกว่าในแชทครับ "
+                 "ถ้าไม่สะดวกให้เบอร์ ให้ไอดีไลน์ก็ได้ครับ "
+                 "หรือจะทักมาทางไลน์เราเองก็ได้ครับ"),
+}
+R156_SOFT_F = {
+    "income":   ("ขอโทษที่ถามซ้ำนะคะ รายได้เป็นตัวเลขเดียวที่ใช้คิดวงเงินให้ได้ค่ะ "
+                 "ไม่ต้องเป๊ะ เลือกเป็นช่วงได้เลยค่ะ "
+                 "1) 15,000-24,000  2) 25,000-40,000  3) 40,000-60,000  4) 60,000 ขึ้นไป  "
+                 "ใกล้ข้อไหนที่สุดคะ พิมพ์แค่เลขข้อก็ได้ค่ะ"),
+    "debt":     ("ขออีกนิดเดียวนะคะ ยอดผ่อนรวมต่อเดือน (บ้าน รถ บัตรเครดิต สินเชื่อ) "
+                 "มีผลกับวงเงินโดยตรงค่ะ ไม่ต้องเป๊ะ "
+                 "1) ไม่มีเลย  2) ไม่เกิน 5,000  3) 5,000-15,000  4) 15,000 ขึ้นไป  "
+                 "ใกล้ข้อไหนที่สุดคะ พิมพ์แค่เลขข้อก็ได้ค่ะ"),
+    "age":      ("ขออีกนิดนะคะ อายุมีผลกับจำนวนปีที่กู้ได้ เลยกระทบค่างวดต่อเดือนตรงๆ ค่ะ "
+                 "บอกเป็นช่วงก็ได้ "
+                 "1) 20-39  2) 40-50  3) 51-60  4) 61 ขึ้นไป  "
+                 "ใกล้ข้อไหนที่สุดคะ"),
+    "objective":("ขอถามสั้นๆ นะคะ ที่สนใจนี่ซื้อไว้ปล่อยเช่า หรือซื้อไว้อยู่เองคะ "
+                 "จะได้แนะนำห้องให้ตรงกับที่ใช้จริงค่ะ"),
+    "coborrow": ("ขออีกข้อนะคะ ตามเกณฑ์ธนาคาร เคสนี้ยื่นกู้คนเดียวมักยังไม่พอค่ะ "
+                 "ต้องมีผู้กู้ร่วมช่วยอีกแรง พอจะมีใครกู้ร่วมได้ไหมคะ เช่น แฟน พ่อแม่ หรือพี่น้อง "
+                 "ตอบว่ามีหรือไม่มีก็พอค่ะ"),
+    "credit":   ("ขออนุญาตถามสั้นๆ นะคะ เคยชำระล่าช้าเกิน 30 วันไหมคะ "
+                 "ข้อนี้ช่วยให้เลือกธนาคารที่ผ่านง่ายได้ถูกค่ะ ตอบว่าเคยหรือไม่เคยก็พอค่ะ"),
+    "contact":  ("เรื่องวงเงินคุยทางโทรสั้นๆ จะอธิบายได้ครบกว่าในแชทค่ะ "
+                 "ถ้าไม่สะดวกให้เบอร์ ให้ไอดีไลน์ก็ได้ค่ะ "
+                 "หรือจะทักมาทางไลน์เราเองก็ได้ค่ะ"),
+}
+R156_MOVEON_M = ("ไม่เป็นไรครับ ข้อนี้ข้ามไปก่อนได้เลยครับ เดี๋ยวที่ปรึกษาถามตอนโทรทีเดียว "
+                 "ขอเบอร์ติดต่อกลับไว้หน่อยนะครับ คุยทางโทรสั้นๆ เข้าใจง่ายกว่าครับ")
+R156_MOVEON_F = ("ไม่เป็นไรค่ะ ข้อนี้ข้ามไปก่อนได้เลยค่ะ เดี๋ยวที่ปรึกษาถามตอนโทรทีเดียว "
+                 "ขอเบอร์ติดต่อกลับไว้หน่อยนะคะ คุยทางโทรสั้นๆ เข้าใจง่ายกว่าค่ะ")
+try:
+    for _k, _v in R156_SOFT_M.items():
+        R151_SOFT_M[_k] = _v
+        if _k in R154_SOFT_M:
+            R154_SOFT_M[_k] = _v
+    for _k, _v in R156_SOFT_F.items():
+        R151_SOFT_F[_k] = _v
+        if _k in R154_SOFT_F:
+            R154_SOFT_F[_k] = _v
+    R151_MOVEON_M = R156_MOVEON_M
+    R151_MOVEON_F = R156_MOVEON_F
+    print("[R156] ข้อความถามรอบ 2 / ข้ามข้อ ใช้น้ำเสียงเดิม (บอกเหตุผลทุกครั้ง)")
+except Exception as _e:
+    print("[R156 TEXT ERROR] " + str(_e) + " — ใช้ข้อความเดิม")
+
+# ---------- 2) "นะคะ" = บอกเล่า ไม่ใช่คำถาม ----------
+_R156_NOT_Q = ("นะคะ", "น่ะคะ", "จ้าคะ")
+
+
+def _r152_is_question(text):
+    t = str(text or "")
+    if any(w in t for w in _R152_Q_WORDS):
+        return True
+    # เพจผู้หญิง: "คะ" = คำถาม · "ค่ะ" = บอกเล่า · "นะคะ" = บอกเล่า (ทักกลับมาได้เลยนะคะ)
+    for w in _R156_NOT_Q:
+        t = t.replace(w, "")
+    return "คะ" in t
+
+
+# ---------- 2b) หัวข้อที่เก็บคำตอบได้แล้ว ห้ามเขียนทับเป็นคำถามซ้ำ ----------
+_R156_BASE_REWRITE = _r152_rewrite
+
+
+def _r156_state(skey, user_id):
+    try:
+        return _lead_states.get(skey) or _lead_states.get(str(user_id)) or {}
+    except Exception:
+        return {}
+
+
+def _r152_rewrite(reply, user_id, skey, female, seen):
+    try:
+        st = _r156_state(skey, user_id)
+        if st:
+            parts = str(reply or "").split(_R152_SPLIT)
+            hold = {}
+            for i, b in enumerate(parts):
+                tp = _r152_bubble_topic(b)
+                if tp and _r154_topic_known(tp, st):
+                    # บับเบิลนี้ไม่ใช่การถามซ้ำ (ลูกค้าตอบข้อนี้แล้ว) -> ห้ามแตะ
+                    hold[i] = b
+                    parts[i] = "⁣R156HOLD" + str(i) + "⁣"
+            if hold:
+                print("[R156] ข้อที่ตอบแล้ว ไม่เขียนทับ: "
+                      + ",".join(sorted(set(_r152_bubble_topic(v) for v in hold.values()))))
+                new, ev = _R156_BASE_REWRITE(_R152_SPLIT.join(parts), user_id, skey,
+                                             female, seen)
+                for i, b in hold.items():
+                    new = new.replace("⁣R156HOLD" + str(i) + "⁣", b)
+                if "⁣R156HOLD" in new:
+                    return reply, []
+                return new, ev
+    except Exception as _e:
+        print("[R156 REWRITE ERROR] " + str(_e) + " — ใช้ทางเดิม")
+    return _R156_BASE_REWRITE(reply, user_id, skey, female, seen)
+
+
+# ---------- 1) r142 ถามกลับ: ตัวอย่างต้องอยู่ใต้ตัวเลขที่ลูกค้าบอก ----------
+_R156_TH_DIGIT = {"หนึ่ง": 1, "สอง": 2, "สาม": 3, "สี่": 4, "ห้า": 5, "หก": 6,
+                  "เจ็ด": 7, "แปด": 8, "เก้า": 9, "สิบ": 10, "ครึ่ง": 0.5}
+_R156_UNIT = {"ล้าน": 1000000, "แสน": 100000, "หมื่น": 10000, "พัน": 1000,
+              "k": 1000, "K": 1000}
+
+
+def _r156_bound(p):
+    """'ต่ำกว่า3หมื่น' -> 30000 · 'ไม่ถึงแสน' -> 100000 · 'ไม่ถึง 100,000' -> 100000"""
+    s = str(p or "")
+    m_ = re.search(r"([0-9][0-9,.]*)\s*(ล้าน|แสน|หมื่น|พัน|k|K)?", s)
+    if m_:
+        try:
+            n = float(m_.group(1).replace(",", ""))
+        except Exception:
+            n = 0
+        if n and m_.group(2):
+            n = n * _R156_UNIT[m_.group(2)]
+        if n:
+            return int(n)
+    for u, uv in (("ล้าน", 1000000), ("แสน", 100000), ("หมื่น", 10000), ("พัน", 1000)):
+        if u in s:
+            k = 1
+            for w, wv in _R156_TH_DIGIT.items():
+                if w + u in s:
+                    k = wv
+                    break
+            return int(k * uv)
+    return 0
+
+
+def _r156_examples(p):
+    b = _r156_bound(p)
+    if b < 5000 or b > 2000000:
+        return "", ""
+    lo = int(round(b * 0.5 / 1000.0)) * 1000
+    hi = int(round(b * 0.8 / 1000.0)) * 1000
+    if hi >= b:
+        hi = b - 1000
+    if lo >= hi:
+        lo = max(1000, hi - 5000)
+    return "{:,}".format(lo), "{:,}".format(hi)
+
+
+class _R156Ask(object):
+    """ใช้แทน _R142_ASK เดิม (ยังเรียก .format(p=...) ได้เหมือนเดิม)"""
+
+    def format(self, p="", **kw):
+        a, b = _r156_examples(p)
+        if a and b:
+            ex = "เช่น " + a + " หรือ " + b + " "
+        else:
+            ex = ""
+        return ("ขอบคุณครับ ขอตัวเลขใกล้เคียงอีกนิดนะครับ ที่บอกว่า " + str(p)
+                + " นี่ประมาณเท่าไหร่ครับ " + ex
+                + "ไม่ต้องเป๊ะครับ ตัวเลขนี้ใช้คิดวงเงินให้ตรงกับลูกค้าครับ")
+
+
+try:
+    _R142_ASK = _R156Ask()
+    print("[R156] r142 ถามกลับ ยกตัวอย่างใต้ตัวเลขที่ลูกค้าบอก + บอกเหตุผล")
+except Exception as _e:
+    print("[R156 R142 ERROR] " + str(_e))
+
+
+# ---------- 3) รับเบอร์หลังปิดเคส: พูดตามเกรด ห้ามสัญญาสิ่งที่ไม่มีใครทำ ----------
+R156_PHONE_NOCALL_M = ("ได้รับเบอร์แล้วครับ ขอบคุณครับ ผมบันทึกไว้ในเคสให้แล้ว "
+                       "ถ้าวันไหนมีคนกู้ร่วมได้ หรือรายได้เปลี่ยน ทักกลับมาได้เลยนะครับ "
+                       "ยินดีช่วยดูให้ใหม่เสมอครับ")
+R156_PHONE_NOCALL_F = ("ได้รับเบอร์แล้วค่ะ ขอบคุณค่ะ บันทึกไว้ในเคสให้แล้วนะคะ "
+                       "ถ้าวันไหนมีคนกู้ร่วมได้ หรือรายได้เปลี่ยน ทักกลับมาได้เลยนะคะ "
+                       "ยินดีช่วยดูให้ใหม่เสมอค่ะ")
+R156_PHONE_N1_M = ("ได้รับเบอร์แล้วครับ ขอบคุณครับ ขออีกข้อเดียวนะครับ "
+                   "รายได้ต่อเดือนประมาณเท่าไหร่ครับ ไม่ต้องเป๊ะ ยอดก่อนหักก็ได้ "
+                   "ตัวเลขนี้ใช้คิดวงเงิน ที่ปรึกษาจะได้โทรไปพร้อมคำตอบเลยครับ")
+R156_PHONE_N1_F = ("ได้รับเบอร์แล้วค่ะ ขอบคุณค่ะ ขออีกข้อเดียวนะคะ "
+                   "รายได้ต่อเดือนประมาณเท่าไหร่คะ ไม่ต้องเป๊ะ ยอดก่อนหักก็ได้ "
+                   "ตัวเลขนี้ใช้คิดวงเงิน ที่ปรึกษาจะได้โทรไปพร้อมคำตอบเลยค่ะ")
+
+
+def _r156_will_call(state):
+    """เคสนี้จะมีเซลโทรจริงไหม (ตามตัวแจก: X / W1 / N1 ไม่แจก · C ไม่มีผู้กู้ร่วม = X)"""
+    d = (state or {}).get("data") or {}
+    g = str(d.get("grade") or "").strip()
+    if g in ("X", "W1"):
+        return False
+    if g == "C" and not (d.get("co_borrower_income") or d.get("co_borrower_yes")):
+        return False
+    if _r155_is_n1(state):
+        return False
+    return True
+
+
+_R156_BASE_LATE = _r154_late_phone
+
+
+def _r154_late_phone(eng, state, user_id, msg, female):
+    out = _R156_BASE_LATE(eng, state, user_id, msg, female)
+    if not out:
+        return out
+    try:
+        if _r155_is_n1(state):
+            state["r156_inc_wait"] = True
+            print("[R156] เบอร์มาทีหลัง แต่ยังไม่รู้รายได้ (N1) -> ถามรายได้ต่อ ไม่สัญญาโทร")
+            return R156_PHONE_N1_F if female else R156_PHONE_N1_M
+        if not _r156_will_call(state):
+            print("[R156] เบอร์มาทีหลัง เกรด " + str((state.get("data") or {}).get("grade"))
+                  + " ไม่แจก -> รับเบอร์ ไม่สัญญาโทร")
+            return R156_PHONE_NOCALL_F if female else R156_PHONE_NOCALL_M
+    except Exception as _e:
+        print("[R156 LATE ERROR] " + str(_e) + " — ใช้ข้อความเดิม")
+    return out
+
+
+# N1 ที่เพิ่งถามรายได้ตอนรับเบอร์ -> ตอบตัวเลขกลับมา (แม้ไม่มีคำว่า "เงินเดือน") = เปิดเคสต่อ
+_R156_BASE_REOPEN_OK = _r155_reopen_ok
+
+
+def _r155_reopen_ok(state, msg, now=None):
+    if _R156_BASE_REOPEN_OK(state, msg, now):
+        return True
+    try:
+        if (isinstance(state, dict) and state.get("r156_inc_wait")
+                and state.get("done") and _r155_is_n1(state)
+                and not state.get("handover")
+                and _bl154._parse_income(str(msg or ""))):
+            return True
+    except Exception as _e:
+        print("[R156 REOPEN ERROR] " + str(_e))
+    return False
+
+
+_R156_BASE_REOPEN = _r155_reopen
+
+
+def _r155_reopen(state, user_id):
+    _w = bool(state.get("r156_inc_wait"))
+    _R156_BASE_REOPEN(state, user_id)
+    if _w:
+        state["r156_inc_wait"] = False
+        state["awaiting"] = "income"    # ข้อความนี้คือคำตอบรายได้ที่เพิ่งถาม
+
+
+
+# ---------- 5) "ไม่บอกครับ" ตอนถามรายได้ = คำตอบ (ปฏิเสธ) ไม่ใช่ข้อความมั่ว ----------
+# เทสต์ r156: ถามรายได้ -> "ไม่บอกครับ" -> ตัวเช็คคำตอบรับเฉพาะ ตัวเลข/คำว่ารายได้
+# คำปฏิเสธเลยไม่ถูกเก็บ -> INCOME GATE รอคำตอบเดิม -> ตอบข้อความสำรอง "สนใจโซนไหน" วนซ้ำ
+# กติกา 16 ส.ค.: ปฏิเสธชัดต้องหยุดถาม -> ต้องเข้า _capture ให้ตั้ง income_refused
+try:
+    _R156_ORIG_VALID = _bl9.BotEngine._is_valid_answer
+
+    def _is_valid_answer_r156(field, m):
+        try:
+            if (field in ("income", "co_income")
+                    and _bl9._refuses_income(str(m or ""))
+                    and not any(c.isdigit() for c in str(m or ""))):
+                return True
+        except Exception:
+            pass
+        return _R156_ORIG_VALID(field, m)
+
+    _bl9.BotEngine._is_valid_answer = staticmethod(_is_valid_answer_r156)
+    if "_is_valid_answer" in CalmBotEngine.__dict__:
+        CalmBotEngine._is_valid_answer = staticmethod(_is_valid_answer_r156)
+    print("[R156] 'ไม่บอก/ไม่สะดวกบอก' ตอนถามรายได้ = คำตอบปฏิเสธ หยุดถาม ไม่วนข้อความสำรอง")
+except Exception as _e:
+    print("[R156 VALID ERROR] " + str(_e))
+
+
+# ---------- 6) คำถามอายุ: ห้ามสัญญา "ประเมินวงเงินให้เลย" (Gift 3 ก.ย. ห้ามโชว์วงเงินในแชท) ----------
+# ใช้ AGE_Q ของ engine เดิม — บอกเหตุผลว่าทำไมถาม ไม่สัญญาสิ่งที่บอทไม่ทำ
+try:
+    R107_AGE_Q = ("ขอถามอีกนิดนะครับ ลูกค้าอายุประมาณเท่าไหร่ครับ "
+                  "ที่ถามเพราะธนาคารคิดปีที่ผ่อนได้จากอายุ มีผลกับค่างวดต่อเดือนตรงๆ ครับ")
+    print("[R156] คำถามอายุ ใช้ AGE_Q เดิม (ไม่สัญญาประเมินวงเงินในแชท)")
+except Exception as _e:
+    print("[R156 AGE ERROR] " + str(_e))
+
+
+# ---------- 8) คำถามผู้กู้ร่วม: บอกว่า "จำเป็น" ไม่ใช่ "ของแถม" ----------
+# Gift 2 ต.ค.: "รายได้ 13,000 ไม่เข้าเกณฑ์ ต้องขอผู้กู้ร่วมดิ"
+# ตรรกะ engine ถูกอยู่แล้ว (ถามเฉพาะ low_income < 25,000 / high_burden / อาชีพอิสระไม่ถึงเกณฑ์)
+# แต่ประโยคเดิม "ถ้ามีคนกู้ร่วมจะได้วงเงินสูงขึ้นเยอะเลย" ฟังเหมือนเป็นทางเลือก
+# ลูกค้าเลยตอบ "ไม่มี" ง่ายๆ -> บอกเหตุผลตรงๆ ว่าเกณฑ์ธนาคารยื่นคนเดียวมักยังไม่พอ
+# (ไม่ฟันธงว่ากู้ไม่ผ่าน · ประวัติแชทยังเก็บข้อความ engine เดิม ตัวนับหัวข้อไม่เพี้ยน)
+_R156_COB_OLD = (("ถ้ามีคนกู้ร่วมจะได้วงเงินสูงขึ้นเยอะเลยครับ",
+                  "ตามเกณฑ์ธนาคาร เคสนี้ยื่นกู้คนเดียวมักยังไม่พอครับ ต้องมีผู้กู้ร่วมช่วยอีกแรง"),
+                 ("ถ้ามีคนกู้ร่วมจะได้วงเงินสูงขึ้นเยอะเลยค่ะ",
+                  "ตามเกณฑ์ธนาคาร เคสนี้ยื่นกู้คนเดียวมักยังไม่พอค่ะ ต้องมีผู้กู้ร่วมช่วยอีกแรง"))
+
+
+def _r156_cob_reason(reply, state):
+    d = (state or {}).get("data") or {}
+    if not (d.get("low_income") or d.get("high_burden")
+            or state.get("awaiting") == "co_borrower"):
+        return reply
+    out = str(reply or "")
+    for a, b in _R156_COB_OLD:
+        out = out.replace(a, b)
+    return out
+
+# ---------- 7) ชั้นนอกสุด: รับปฏิเสธอย่างสุภาพ + ปิดเคสไม่สัญญาโทรถ้าไม่แจก ----------
+R156_INC_REFUSED_ACK_M = "ไม่เป็นไรครับ ไม่สะดวกบอกก็ข้ามไปก่อนได้ครับ"
+R156_INC_REFUSED_ACK_F = "ไม่เป็นไรค่ะ ไม่สะดวกบอกก็ข้ามไปก่อนได้ค่ะ"
+R156_N1_INVITE_M = ("ได้รับเบอร์แล้วครับ ขอบคุณครับ ผมบันทึกไว้ในเคสให้แล้ว "
+                    "ถ้าสะดวกบอกรายได้คร่าวๆ เมื่อไหร่ ทักมาได้เลยนะครับ "
+                    "จะได้คิดวงเงินให้ตรงกับลูกค้าครับ")
+R156_N1_INVITE_F = ("ได้รับเบอร์แล้วค่ะ ขอบคุณค่ะ บันทึกไว้ในเคสให้แล้วนะคะ "
+                    "ถ้าสะดวกบอกรายได้คร่าวๆ เมื่อไหร่ ทักมาได้เลยนะคะ "
+                    "จะได้คิดวงเงินให้ตรงกับลูกค้าค่ะ")
+R156_ASKNAME_NOCALL_M = "ขอชื่อเล่นไว้ด้วยนะครับ เวลาทักกลับมาจะได้คุยต่อได้ทันทีครับ 🙏"
+R156_ASKNAME_NOCALL_F = "ขอชื่อเล่นไว้ด้วยนะคะ เวลาทักกลับมาจะได้คุยต่อได้ทันทีค่ะ 🙏"
+_R156_PROMISE = ("ทีมงานจะติดต่อกลับ", "ที่ปรึกษาจะโทร", "ที่ปรึกษาโทรกลับ",
+                 "เดี๋ยวที่ปรึกษาโทร", "ที่ปรึกษาจะติดต่อกลับ")
+_R156_ASKNAME_MARK = "ขอชื่อที่ให้ที่ปรึกษาเรียก"
+
+
+def _r156_income_closed(state):
+    """ลูกค้าปฏิเสธรายได้ชัด หรือถามครบ 3 รอบแล้ว = ห้ามถามรายได้ซ้ำทันที"""
+    d = (state or {}).get("data") or {}
+    if d.get("income_refused"):
+        return True
+    if "บอทถาม 3 ครั้ง" in str(d.get("income") or d.get("income_note") or ""):
+        return True
+    try:
+        return int(state.get("income_reask") or 0) >= int(getattr(_bl9, "INCOME_REASK_MAX", 2))
+    except Exception:
+        return False
+
+
+def _r156_fix_close(reply, state, female):
+    """เคสปิดแล้วแต่ไม่แจก (X / W1 / N1 / C ยื่นเดี่ยว) -> ห้ามสัญญาว่าจะมีคนโทร"""
+    parts = str(reply or "").split(_R152_SPLIT)
+    changed = False
+    n1 = _r155_is_n1(state)
+    for i, b in enumerate(parts):
+        if any(w in b for w in _R156_PROMISE):
+            if n1 and not _r156_income_closed(state):
+                parts[i] = R156_PHONE_N1_F if female else R156_PHONE_N1_M
+                state["r156_inc_wait"] = True
+            elif n1:
+                parts[i] = R156_N1_INVITE_F if female else R156_N1_INVITE_M
+            else:
+                parts[i] = R156_PHONE_NOCALL_F if female else R156_PHONE_NOCALL_M
+            changed = True
+        elif "เดี๋ยวที่ปรึกษาติดต่อไป" in b:
+            parts[i] = re.sub("เดี๋ยวที่ปรึกษาติดต่อไป(นะ)?(ครับ|ค่ะ)",
+                              ("มีอะไรสงสัยทักมาได้ตลอดนะคะ" if female
+                               else "มีอะไรสงสัยทักมาได้ตลอดนะครับ"), b)
+            changed = True
+        elif _R156_ASKNAME_MARK in b:
+            parts[i] = R156_ASKNAME_NOCALL_F if female else R156_ASKNAME_NOCALL_M
+            changed = True
+    if not changed:
+        return reply
+    out, seen = [], set()
+    for b in parts:
+        k = _norm_msg(b)
+        if k and k in seen:
+            continue
+        seen.add(k)
+        out.append(b)
+    return _R152_SPLIT.join(out)
+
+
+try:
+    _R156_BASE_PROCESS = CalmBotEngine.process
+
+    def _process_r156(self, user_message, user_id, referral=None,
+                      platform="facebook", page_id="", brand="",
+                      sheet_tab="", gender=""):
+        _skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+        _female = str(gender or "").lower().startswith("f")
+        _ref0 = False
+        try:
+            _st0 = _lead_states.get(_skey) or {}
+            _ref0 = bool((_st0.get("data") or {}).get("income_refused"))
+        except Exception:
+            pass
+        out = _R156_BASE_PROCESS(
+            self, user_message, user_id, referral=referral, platform=platform,
+            page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+        try:
+            reply, grade = out
+            st = _lead_states.get(_skey) or {}
+            d = st.get("data") or {}
+            if reply and st:
+                # ก) เพิ่งปฏิเสธบอกรายได้ -> รับคำก่อน ค่อยถามข้อถัดไป (ไม่ข้ามหน้าไปเฉยๆ)
+                if d.get("income_refused") and not _ref0:
+                    _ack = R156_INC_REFUSED_ACK_F if _female else R156_INC_REFUSED_ACK_M
+                    if not str(reply).lstrip().startswith("ไม่เป็นไร"):
+                        reply = _ack + " " + str(reply).lstrip()
+                        print("[R156] ลูกค้าไม่สะดวกบอกรายได้ -> รับคำสุภาพ แล้วไปข้อถัดไป")
+                # ง) ข้อความสำรอง "สนใจโซนไหน" ห้ามพ่วงกับคำถามคัดกรองจริง (1 เทิร์น 1 คำถาม)
+                _ps = str(reply).split(_R152_SPLIT)
+                if len(_ps) > 1 and any("สนใจโซนไหนเป็นพิเศษ" in x for x in _ps):
+                    _rest = [x for x in _ps if "สนใจโซนไหนเป็นพิเศษ" not in x]
+                    if any(_r152_is_question(x) for x in _rest if x.strip()):
+                        reply = _R152_SPLIT.join(_rest)
+                        print("[R156] ตัดข้อความสำรอง 'สนใจโซนไหน' ที่พ่วงคำถามจริง")
+                # ค) ถามผู้กู้ร่วม = บอกเหตุผลว่าจำเป็น
+                _cb = _r156_cob_reason(reply, st)
+                if _cb != reply:
+                    print("[R156] ถามผู้กู้ร่วมพร้อมเหตุผล (ยื่นคนเดียวมักยังไม่พอ)")
+                    reply = _cb
+                # ข) ปิดเคสแล้วแต่ไม่แจก -> ห้ามสัญญาโทร
+                if st.get("done") and not _r156_will_call(st):
+                    _new = _r156_fix_close(reply, st, _female)
+                    if _new != reply:
+                        print("[R156] ปิดเคสเกรด " + str(d.get("grade")) + " (ไม่แจก) "
+                              "-> เอาคำสัญญาโทรออก")
+                        reply = _new
+                if str(reply).strip():
+                    return reply, grade
+        except Exception as _e:
+            print("[R156 POST ERROR] " + str(_e) + " — ใช้คำตอบเดิม")
+        return out
+
+    CalmBotEngine.process = _process_r156
+    print("[R156] ชั้นนอกสุด: รับปฏิเสธสุภาพ · ไม่แจก = ไม่สัญญาโทร")
+except Exception as _e:
+    print("[R156 PATCH ERROR] ต่อไม่ติด — ใช้ทางเดิม: " + str(_e))
+
+# ---------- ข้อสอบ r156 ----------
+def _r156_selftest(which):
+    try:
+        if which == "ask_below":
+            t = _R142_ASK.format(p="ต่ำกว่า3หมื่น")
+            return ("15,000" in t and "24,000" in t and "5 หมื่น" not in t
+                    and "ประมาณเท่าไหร่" in t)
+        if which == "ask_thai_word":
+            t = _R142_ASK.format(p="ไม่ถึงสามหมื่น")
+            return "24,000" in t
+        if which == "ask_lakh":
+            t = _R142_ASK.format(p="ไม่ถึงแสน")
+            return "80,000" in t and "100,000" not in t
+        if which == "ask_unknown":
+            t = _R142_ASK.format(p="ไม่ถึง")
+            return "เช่น" not in t and "ประมาณเท่าไหร่" in t
+        if which == "naka_statement":
+            return not _r152_is_question("ทักกลับมาได้เลยนะคะ ยินดีช่วยดูให้ใหม่เสมอค่ะ")
+        if which == "naka_question_kept":
+            return _r152_is_question("อายุเท่าไหร่นะคะ") and _r152_is_question("มีไหมคะ")
+        if which == "known_not_rewritten":
+            sk = "__R156_T__"
+            _lead_states[sk] = {"data": {"co_borrower": "ไม่มีคะ", "co_borrower_none": True}}
+            q = ("ถ้ามีคนกู้ร่วมจะได้วงเงินสูงขึ้นเยอะเลยค่ะ ลูกค้าพอมีใครกู้ร่วมได้ไหมคะ "
+                 "เช่น แฟน พ่อแม่ หรือพี่น้องคะ")
+            _conversations[sk] = [{"role": "assistant", "content": q},
+                                  {"role": "user", "content": "ไม่มีคะ"},
+                                  {"role": "assistant", "content": q}]
+            out, ev = _r152_rewrite(q, sk, sk, True, {})
+            _lead_states.pop(sk, None)
+            _conversations.pop(sk, None)
+            return out == q and not ev
+        if which == "unknown_still_rewritten":
+            sk = "__R156_U__"
+            _lead_states[sk] = {"data": {}}
+            q = ("ถ้ามีคนกู้ร่วมจะได้วงเงินสูงขึ้นเยอะเลยค่ะ ลูกค้าพอมีใครกู้ร่วมได้ไหมคะ "
+                 "เช่น แฟน พ่อแม่ หรือพี่น้องคะ")
+            _conversations[sk] = [{"role": "assistant", "content": q},
+                                  {"role": "user", "content": "อะไรนะ"},
+                                  {"role": "assistant", "content": q}]
+            out, ev = _r152_rewrite(q, sk, sk, True, {})
+            _lead_states.pop(sk, None)
+            _conversations.pop(sk, None)
+            return out != q and bool(ev)
+        if which == "x_no_call":
+            return not _r156_will_call({"data": {"grade": "X"}})
+        if which == "c_alone_no_call":
+            return not _r156_will_call({"data": {"grade": "C", "co_borrower_none": True}})
+        if which == "a_call":
+            return _r156_will_call({"data": {"grade": "A"}})
+        if which == "soft_reason":
+            return all(("วงเงิน" in R151_SOFT_M[k] or "ค่างวด" in R151_SOFT_M[k]
+                        or "ธนาคาร" in R151_SOFT_M[k] or "แนะนำ" in R151_SOFT_M[k]
+                        or "โทร" in R151_SOFT_M[k])
+                       for k in ("income", "debt", "age", "objective", "coborrow",
+                                 "credit", "contact"))
+        if which == "female_clean":
+            allf = list(R151_SOFT_F.values()) + [R151_MOVEON_F, R156_PHONE_NOCALL_F,
+                                                 R156_PHONE_N1_F]
+            return all("ครับ" not in x and "ผม" not in x for x in allf)
+        if which == "cob_reason":
+            q = "ถ้ามีคนกู้ร่วมจะได้วงเงินสูงขึ้นเยอะเลยค่ะ ลูกค้าพอมีใครกู้ร่วมได้ไหมคะ"
+            t = _r156_cob_reason(q, {"data": {"low_income": True}})
+            t2 = _r156_cob_reason(q, {"data": {}})
+            return "ยื่นกู้คนเดียวมักยังไม่พอ" in t and "กู้ร่วมได้ไหมคะ" in t and t2 == q
+        if which == "refuse_valid":
+            return (_bl9.BotEngine._is_valid_answer("income", "ไม่บอกครับ")
+                    and _bl9.BotEngine._is_valid_answer("income", "ไม่สะดวกบอกค่ะ")
+                    and not _bl9.BotEngine._is_valid_answer("income", "ครับ"))
+        if which == "age_no_promise":
+            return "ประเมินวงเงิน" not in R107_AGE_Q and "อายุ" in R107_AGE_Q
+        if which == "moveon_particle":
+            return R151_MOVEON_F.endswith("ค่ะ") and R151_MOVEON_M.endswith("ครับ")
+        return False
+    except Exception as _e:
+        print("[R156 SELFTEST ERROR] " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RW1", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("ask_below",), ("truthy", ""), "Nuttayaporn: ลูกค้าบอกต่ำกว่า 3 หมื่น ตัวอย่างต้องอยู่ใต้ 3 หมื่น ไม่ใช่ 3-5 หมื่น"),
+        ("RW2", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("ask_thai_word",), ("truthy", ""), "ไม่ถึงสามหมื่น (ตัวหนังสือ) ก็ต้องยกตัวอย่างใต้กรอบ"),
+        ("RW3", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("ask_lakh",), ("truthy", ""), "ไม่ถึงแสน -> ตัวอย่างต่ำกว่าแสน"),
+        ("RW4", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("ask_unknown",), ("truthy", ""), "อ่านกรอบไม่ออก ห้ามเดาตัวอย่าง ถามตัวเลขเฉยๆ"),
+        ("RW5", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("naka_statement",), ("truthy", ""), "ประโยคปิดลงท้าย 'นะคะ' = บอกเล่า ห้ามนับเป็นคำถาม"),
+        ("RW6", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("naka_question_kept",), ("truthy", ""), "คำถามจริงที่ลงท้ายนะคะ/ไหมคะ ยังนับเป็นคำถาม"),
+        ("RW7", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("known_not_rewritten",), ("truthy", ""), "ลูกค้าตอบกู้ร่วมแล้ว ห้ามเขียนทับเป็น 'ตอบว่ามีหรือไม่มีก็พอ'"),
+        ("RW8", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("unknown_still_rewritten",), ("truthy", ""), "ยังไม่ได้คำตอบ ถามรอบ 2 แบบง่ายยังทำงาน"),
+        ("RW9", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("x_no_call",), ("truthy", ""), "เกรด X ไม่แจก ห้ามสัญญาว่าที่ปรึกษาจะโทร"),
+        ("RW10", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("c_alone_no_call",), ("truthy", ""), "C ยื่นเดี่ยว = X ห้ามสัญญาโทร"),
+        ("RW11", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("a_call",), ("truthy", ""), "A แจกจริง ยังบอกว่าที่ปรึกษาโทรกลับ"),
+        ("RW12", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("soft_reason",), ("truthy", ""), "กฎ 16 ส.ค.: ถามซ้ำต้องบอกเหตุผลทุกรอบ"),
+        ("RW13", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("female_clean",), ("truthy", ""), "เพจผู้หญิง ห้ามมี ครับ/ผม"),
+        ("RW14", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("moveon_particle",), ("truthy", ""), "ประโยคข้ามข้อต้องมีหางเสียงปิดท้าย"),
+        ("RW15", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("cob_reason",), ("truthy", ""), "Gift: รายได้ 13,000 ไม่ถึงเกณฑ์ ต้องบอกว่าผู้กู้ร่วมจำเป็น ไม่ใช่ของแถม"),
+        ("RW16", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("refuse_valid",), ("truthy", ""), "ไม่บอกรายได้ = คำตอบ (หยุดถาม) ไม่ใช่ข้อความมั่ว -> ไม่วน 'สนใจโซนไหน'"),
+        ("RW17", "น้ำเสียง+ตีความ (r156)", "_r156_selftest", ("age_no_promise",), ("truthy", ""), "Gift 3 ก.ย. ห้ามโชว์วงเงินในแชท -> คำถามอายุห้ามสัญญาประเมินวงเงิน"),
+    ])
+    print("[R156] ข้อสอบน้ำเสียง+ตีความ 17 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R156 EXAM ERROR] " + str(_e))
 
 
 if __name__ == "__main__":
