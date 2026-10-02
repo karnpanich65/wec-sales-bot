@@ -1058,7 +1058,9 @@ class CalmBotEngine(BotEngine):
         # ถ้าจะกันจริง ต้องกันเฉพาะ STATUS_MSG/FALLBACK และนับ >= 3 ครั้งขึ้นไป
         if reply and reply.strip() and not (lvl or stop):
             _n = _norm_msg(reply)
-            if _n and any(_norm_msg(p) == _n for p in _recent_bot_msgs(user_id)):
+            # r152: ประวัติมีข้อความของรอบนี้อยู่แล้ว (bot_logic เขียน log ก่อน return)
+            # ของเดิมใช้ any() จึงเตือนแทบทุกข้อความ -> ต้องเจอ >= 2 ครั้งถึงจะซ้ำจริง
+            if _n and sum(1 for p in _recent_bot_msgs(user_id) if _norm_msg(p) == _n) >= 2:
                 print(f"[DUP SEEN] {_mask(user_id)} ข้อความซ้ำ (ส่งตามปกติ) "
                       f"| {reply[:50]!r}")
 
@@ -10238,6 +10240,374 @@ try:
     print("[R151] ข้อสอบถามซ้ำ 16 ข้อ เพิ่มแล้ว")
 except Exception as _e:
     print("[R151 EXAM ERROR] " + str(_e))
+
+
+
+# ======================================================================
+# r152 (2 ต.ค. 2569) — ซ่อม off-by-one ของ r151 + กันประโยค "ข้ามไปก่อน" ซ้ำ
+# ----------------------------------------------------------------------
+# อาการที่ Gift เจอ (เคส Ajin Noi A 2 ต.ค.):
+#   ลูกค้าเพิ่งทัก -> บอทถามภาระผ่อนครั้งแรก แต่ส่ง "ตอบคร่าวๆ ก็ได้ค่ะ
+#   ไม่มีเลย / ไม่เกินหมื่น / เกินหมื่น" ออกไปเลย ลูกค้าไม่เคยเห็นคำถามเต็ม
+#   ที่อธิบายว่าหมายถึงบ้าน/รถ/บัตรเครดิต -> ตอบไม่ตรง
+#
+# สาเหตุจริง (พิสูจน์แล้วด้วยการรันโค้ดจริง):
+#   bot_logic.BotEngine.process เขียน reply ลง _conversations ด้วย self._log()
+#   ที่บรรทัด 2597 "ก่อน" return ออกมา  ดังนั้นตอน r151 เรียก _r151_count()
+#   ประวัติมีคำถามของรอบปัจจุบันอยู่แล้ว 1 ข้อความ
+#   -> ถามจริงครั้งที่ 1 แต่ _r151_count คืน 1 -> เข้าเงื่อนไข "รอบสอง"
+#   -> ส่งข้อความง่ายทันทีตั้งแต่ครั้งแรก ทุกเคส ทุกหัวข้อ
+#
+#   ข้อสอบ RQ8-RQ16 ไม่จับเพราะเรียก _r151_pick ตรงๆ ด้วยเลขที่เราป้อนเอง
+#   = สอบเฉพาะ "ชิ้นส่วน" ไม่ได้สอบ "สายไฟ" ที่ต่อชิ้นส่วนเข้ากับของจริง
+#   r152 เพิ่มข้อสอบที่ล็อกสายไฟ (RS7/RS8) ไว้ด้วย
+#
+# อาการที่สอง (เห็นใน log 1-2 ต.ค.): ประโยค "ข้ามไปก่อน" ถูกส่งซ้ำไม่จบ
+#   เพราะ engine ตัวล่างยังถามหัวข้อเดิมทุกเทิร์น (ช่องข้อมูลยังว่าง)
+#   -> _r151_count โตขึ้นเรื่อยๆ 3,4,5,6 -> _r151_pick คืน MOVEON ตัวเดิมทุกรอบ
+#   ตัวอย่างจริง: 29022051 income ถึง 6 ครั้ง · 39976196 income ถึง 5 ครั้ง
+#   r152 กันไว้: ประโยค "ข้ามไปก่อน" ส่งได้หัวข้อละ 1 ครั้ง หลังจากนั้น
+#   สลับประโยคปิดท้าย 2 แบบ ไม่ให้ซ้ำประโยคเดิมติดกัน
+#   *** ยังไม่ใช่การแก้ที่ราก *** รากคือ engine ไม่เลิกถามเพราะช่องยังว่าง
+#   การไปเติมช่องว่า "ไม่ตอบ" กระทบเกรด -> รอ Gift เคาะ ยังไม่ทำ
+#
+# ถอนอะไรออก: ถอน _process_r151 ออกจาก CalmBotEngine.process
+#              แล้วใส่ _process_r152 แทน (ครอบ _R151_BASE_PROCESS ตัวเดิม)
+#              ข้อความ R151_SOFT_*/R151_MOVEON_*/ข้อสอบ RQ1-RQ16 ยังอยู่ครบ
+#              ไม่แตะเกณฑ์ สูตร เกรด การแจกเคส หรือ bot_logic.py แม้แต่บรรทัดเดียว
+# ======================================================================
+R152_MAX_MOVEON = 1          # ประโยค "ข้ามไปก่อน" ส่งได้หัวข้อละกี่ครั้ง
+_R152_SEEN = {}              # (skey, topic) -> ส่ง moveon ไปแล้วกี่ครั้ง (RAM เท่านั้น)
+_R152_FLAGGED = set()        # (skey, topic) ที่ติดธงให้เซลแล้ว ไม่ติดซ้ำ
+
+R152_HANDOFF_M = ("ข้อนี้ไม่ต้องตอบก็ได้ครับ เดี๋ยวที่ปรึกษาโทรไปคุยให้ครบในสายเดียวครับ "
+                  "ระหว่างนี้มีอะไรอยากถามเพิ่ม ถามได้เลยครับ")
+R152_HANDOFF_F = ("ข้อนี้ไม่ต้องตอบก็ได้ค่ะ เดี๋ยวที่ปรึกษาโทรไปคุยให้ครบในสายเดียวค่ะ "
+                  "ระหว่างนี้มีอะไรอยากถามเพิ่ม ถามได้เลยค่ะ")
+R152_HOLD_M = ("ไม่ต้องรีบตอบนะครับ ว่างแล้วทักมาได้ตลอดครับ "
+               "ถ้าอยากให้ส่งข้อมูลโครงการให้ดูก่อน บอกได้เลยครับ")
+R152_HOLD_F = ("ไม่ต้องรีบตอบนะคะ ว่างแล้วทักมาได้ตลอดค่ะ "
+               "ถ้าอยากให้ส่งข้อมูลโครงการให้ดูก่อน บอกได้เลยค่ะ")
+
+R152_FLAG = "⚠️ ลูกค้าไม่ตอบ{t} หลังถาม 2 ครั้ง — บอทข้ามให้แล้ว เซลถามตอนโทร"
+
+
+def _r152_asked_before(user_id, topic):
+    """ถามหัวข้อนี้ไปแล้วกี่ครั้ง 'ก่อน' รอบปัจจุบัน
+    _r151_count นับรวมคำถามของรอบปัจจุบันด้วย (self._log เขียนก่อน return)
+    จึงต้องลบ 1 ออกเสมอ — นี่คือบั๊กที่ทำให้ข้อความง่ายโผล่ตั้งแต่ครั้งแรก"""
+    n = _r152_count(user_id, topic)
+    return n - 1 if n > 0 else 0
+
+
+R152_GOTPHONE_M = ("ไม่เป็นไรครับ ข้อนี้ข้ามไปก่อนก็ได้ครับ ได้เบอร์กับเวลาที่สะดวกแล้ว "
+                   "เดี๋ยวที่ปรึกษาโทรไปอธิบายให้ครบในสายเดียวครับ")
+R152_GOTPHONE_F = ("ไม่เป็นไรค่ะ ข้อนี้ข้ามไปก่อนก็ได้ค่ะ ได้เบอร์กับเวลาที่สะดวกแล้ว "
+                   "เดี๋ยวที่ปรึกษาโทรไปอธิบายให้ครบในสายเดียวค่ะ")
+R152_ACKPHONE_M = ("รับเบอร์เรียบร้อยแล้วครับ เดี๋ยวที่ปรึกษาโทรกลับตามเวลาที่แจ้งไว้ครับ "
+                   "ระหว่างนี้มีอะไรอยากถามเพิ่ม ถามได้เลยครับ")
+R152_ACKPHONE_F = ("รับเบอร์เรียบร้อยแล้วค่ะ เดี๋ยวที่ปรึกษาโทรกลับตามเวลาที่แจ้งไว้ค่ะ "
+                   "ระหว่างนี้มีอะไรอยากถามเพิ่ม ถามได้เลยค่ะ")
+
+_R152_PHONE_RE = re.compile(r"(?<!\d)0\d{8,9}(?!\d)")
+_R152_LINE_HINT = ("line", "ไลน์", "ไอดี", "แอดมา", "แอดไป", "id:", "id ")
+
+
+def _r152_has_contact(skey, user_id):
+    """ลูกค้าให้ช่องทางติดต่อไปแล้วหรือยัง
+    เช็ค 2 ชั้น: ช่อง contact ใน state ก่อน ถ้าไม่มีค่อยไล่ดูข้อความลูกค้าย้อนหลัง
+    (เคสจริง Ajin Noi A 2 ต.ค. 11:15 — ลูกค้าพิมพ์ '0890544074 เวลา 11.00-17.00'
+     แล้วบอทยังส่งประโยคขอเบอร์ซ้ำ ลูกค้าเลยพิมพ์เบอร์ให้ใหม่อีกรอบ)"""
+    try:
+        _st = _lead_states.get(skey) or {}
+        if (_st.get("data") or {}).get("contact"):
+            return True
+    except Exception:
+        pass
+    try:
+        h = _conversations.get(user_id) or []
+    except Exception:
+        return False
+    for turn in list(reversed(h))[:16]:
+        if turn.get("role") != "user":
+            continue
+        _m = str(turn.get("content") or "")
+        if _R152_PHONE_RE.search(re.sub(r"[\-\s\.]", "", _m)):
+            return True
+        _low = _m.lower()
+        if any(w in _low for w in _R152_LINE_HINT):
+            return True
+    return False
+
+
+def _r152_pick(topic, asked_before, female, moveon_sent, has_contact=False):
+    """คืนข้อความที่ควรส่งแทน หรือ None = ใช้ข้อความเดิมของ engine
+       asked_before = 0 -> ถามจริงครั้งแรก ต้องปล่อยคำถามเต็มผ่านไป
+       asked_before = 1 -> ครั้งที่สอง ถามง่ายลง เลือกเป็นช่วง
+       asked_before >= 2 -> เลิกถาม เดินหน้าต่อ (ส่ง moveon ได้ครั้งเดียว)"""
+    if not topic:
+        return None
+    if asked_before < 1:
+        return None
+    if asked_before == 1:
+        return (R151_SOFT_F if female else R151_SOFT_M).get(topic)
+    if moveon_sent >= R152_MAX_MOVEON:
+        # เคยส่ง "ข้ามไปก่อน" แล้ว ห้ามส่งประโยคเดิมซ้ำ — สลับ 2 แบบ
+        if moveon_sent % 2 == 1:
+            return R152_HANDOFF_F if female else R152_HANDOFF_M
+        return R152_HOLD_F if female else R152_HOLD_M
+    if topic == "contact":
+        # ได้เบอร์แล้วแต่ engine ยังขออีก -> ตอบรับ ห้ามขอซ้ำ
+        if has_contact:
+            return R152_ACKPHONE_F if female else R152_ACKPHONE_M
+        return R151_MOVEON_CONTACT_F if female else R151_MOVEON_CONTACT_M
+    if has_contact:
+        # ประโยค "ข้ามไปก่อน" ตัวเดิมลงท้ายด้วยการขอเบอร์ -> ห้ามใช้เมื่อได้เบอร์แล้ว
+        return R152_GOTPHONE_F if female else R152_GOTPHONE_M
+    return R151_MOVEON_F if female else R151_MOVEON_M
+
+
+# ---- r152 ชั้น 3 (2 ต.ค. 11:18 เคส Angel Estate psid 28136992) ----
+# r151 อ่าน "คำตอบทั้งก้อน" แล้วเปลี่ยน "ทั้งก้อน" -> ถ้าบับเบิลให้ข้อมูลมีคำว่า
+# "ภาระผ่อน" (เช่น FAQ "วงเงินกู้ขึ้นกับรายได้ ภาระผ่อนปัจจุบัน ...") ทั้งก้อนถูกจัดเป็น
+# คำถามภาระผ่อน แล้วบับเบิลคำถามวัตถุประสงค์ที่ถูกต้องโดนลบทิ้งไปด้วย
+# ลูกค้าพิมพ์ "สอบถามรายละเอียด" เลยได้คำถามผ่อนแบบย่อโผล่มาเป็นคำถามแรก
+# แก้: แยกบับเบิล -> จัดหัวข้อเฉพาะบับเบิลที่ "เป็นคำถาม" -> เปลี่ยนเฉพาะบับเบิลนั้น
+#      บับเบิลอื่นคงไว้ทุกตัวอักษร  ประวัติแชทก็นับทีละบรรทัดแบบเดียวกัน
+from faq_data import MSG_SPLIT as _R152_SPLIT
+
+_R152_Q_WORDS = ("ไหม", "มั้ย", "เท่าไหร่", "เท่าไร", "หรือเปล่า", "หรือไม่", "อันไหน",
+                 "?", "ขอเบอร์", "ขอทราบ", "หรืออยู่เอง", "หรือเพื่อ", "หรือซื้อ")
+
+
+# r151 รู้จักคำขอเบอร์แค่ "ขอเบอร์ติดต่อกลับ/เบอร์ติดต่อกลับ/ขอเบอร์โทร"
+# แต่คำถามหลักของ engine คือ "ขอเบอร์หน่อยครับ เดี๋ยวที่ปรึกษาโทรไป..." (QUALIFY_QUESTIONS[3])
+# และ "แอดมินรบกวนขอเบอร์ติดต่อ" (เคส Ajin) -> สองแบบนี้ไม่เคยถูกนับเลย ขยายให้ครอบ
+_R152_CONTACT_KEYS = ("ขอเบอร์", "เบอร์ติดต่อ", "เบอร์โทร", "ไอดีไลน์", "ไลน์ไอดี")
+# คำถามผ่อนที่ AI พิมพ์เอง เช่น "ลูกค้าผ่อนอะไรอยู่หรือเปล่าคะ" (log 2 ต.ค.) ไม่ติดคำเดิม
+_R152_DEBT_KEYS = ("ผ่อนอะไรอยู่",)
+try:
+    _R151_TOPIC = tuple(
+        (name, tuple(keys) + tuple(k for k in _R152_CONTACT_KEYS if k not in keys))
+        if name == "contact" else
+        ((name, tuple(keys) + tuple(k for k in _R152_DEBT_KEYS if k not in keys))
+         if name == "debt" else (name, keys))
+        for name, keys in _R151_TOPIC)
+except Exception as _e:
+    print("[R152 TOPIC ERROR] " + str(_e))
+
+
+def _r152_is_question(text):
+    t = str(text or "")
+    if any(w in t for w in _R152_Q_WORDS):
+        return True
+    # เพจผู้หญิง: "คะ" = คำถาม · "ค่ะ" = บอกเล่า (คนละสตริงกัน ไม่ทับกัน)
+    return "คะ" in t
+
+
+def _r152_bubble_topic(text):
+    """หัวข้อของบับเบิลนี้ เฉพาะเมื่อเป็นประโยคคำถามเท่านั้น"""
+    if not _r152_is_question(text):
+        return ""
+    return _r151_topic(text)
+
+
+def _r152_count(user_id, topic):
+    """นับข้อความบอทย้อนหลังที่มีบรรทัด 'คำถาม' หัวข้อนี้ (รวมรอบปัจจุบันด้วย)
+    ประวัติใน _conversations ต่อบับเบิลด้วย \n จึงแยกทีละบรรทัด"""
+    n = 0
+    try:
+        for msg in _recent_bot_msgs(user_id, R151_LOOKBACK):
+            for line in str(msg or "").split("\n"):
+                if _r152_bubble_topic(line) == topic:
+                    n += 1
+                    break
+    except Exception as _e:
+        print("[R152 COUNT ERROR] " + str(_e))
+    return n
+
+
+def _r152_rewrite(reply, user_id, skey, female, seen):
+    """เปลี่ยนเฉพาะบับเบิลคำถามคัดกรองที่ถามซ้ำ  คืน (reply ใหม่, รายการเหตุการณ์)
+    seen = dict นับ moveon ต่อ (skey, topic) — ส่งมาจากข้างนอกให้เทสต์ได้"""
+    parts = str(reply or "").split(_R152_SPLIT)
+    events = []
+    done_topics = set()
+    _hc = None
+    for i, b in enumerate(parts):
+        topic = _r152_bubble_topic(b)
+        if not topic or topic in done_topics:
+            continue
+        done_topics.add(topic)
+        n = _r152_count(user_id, topic)
+        ab = n - 1 if n > 0 else 0
+        if ab < 1:
+            continue
+        if _hc is None:
+            _hc = _r152_has_contact(skey, user_id)
+        key = (skey, topic)
+        mv = seen.get(key, 0)
+        new = _r152_pick(topic, ab, female, mv, _hc)
+        if new and str(new).strip():
+            parts[i] = new
+            if ab >= 2:
+                seen[key] = mv + 1
+            events.append((topic, ab, mv))
+    # กันบับเบิลซ้ำกันเองหลังเปลี่ยน (เช่น 2 หัวข้อได้ประโยคปิดท้ายเดียวกัน)
+    out, _seen_txt = [], set()
+    for b in parts:
+        k = _norm_msg(b)
+        if k and k in _seen_txt:
+            continue
+        _seen_txt.add(k)
+        out.append(b)
+    new_reply = _R152_SPLIT.join(out)
+    if not new_reply.strip():
+        return reply, []          # ห้ามเงียบ
+    return new_reply, events
+
+
+def _r152_selftest(which):
+    """ข้อสอบ 'สายไฟ' — จำลองประวัติจริงแล้วเช็กว่านับถูกไหม
+    ต้องเป็นฟังก์ชันเพราะข้อสอบ r124 เรียกฟังก์ชันเดียวต่อข้อ"""
+    try:
+        _uid = "__R152_SELFTEST__"
+        _hard = "ขอถามหน่อยนะครับ ลูกค้าทำงานประจำอยู่หรือเปล่าครับ แล้วรายได้เดือนละประมาณเท่าไหร่ครับ"
+        if which == "first_ask":
+            # สถานะหลัง engine ถามครั้งแรก + เขียน log แล้ว
+            _conversations[_uid] = [{"role": "user", "content": "สนใจคอนโดปล่อยเช่า"},
+                                    {"role": "assistant", "content": _hard}]
+            _ab = _r152_asked_before(_uid, "income")
+            _out = _r152_pick("income", _ab, False, 0)
+            _conversations.pop(_uid, None)
+            return (_ab == 0) and (_out is None)
+        if which == "second_ask":
+            _conversations[_uid] = [{"role": "assistant", "content": _hard},
+                                    {"role": "user", "content": "สนใจ"},
+                                    {"role": "assistant", "content": _hard}]
+            _ab = _r152_asked_before(_uid, "income")
+            _out = _r152_pick("income", _ab, False, 0)
+            _conversations.pop(_uid, None)
+            return (_ab == 1) and bool(_out) and ("เลือกเป็นช่วง" in _out)
+        if which == "got_phone":
+            # ลูกค้าให้เบอร์แล้ว -> ประโยคที่ส่งต้องไม่ขอเบอร์ซ้ำ
+            _conversations[_uid] = [{"role": "assistant", "content": "ขอเบอร์ติดต่อกลับหน่อยครับ"},
+                                    {"role": "user", "content": "0890544074 เวลา 11.00-17.00"},
+                                    {"role": "assistant", "content": _hard}]
+            _hc = _r152_has_contact("__NO_SUCH_KEY__", _uid)
+            _a = _r152_pick("income", 2, True, 0, _hc)
+            _b = _r152_pick("contact", 2, True, 0, _hc)
+            _conversations.pop(_uid, None)
+            return (_hc is True) and bool(_a) and bool(_b) \
+                and ("ขอเบอร์" not in _a) and ("ขอเบอร์" not in _b)
+        if which == "info_bubble_kept":
+            # เคสจริง Angel Estate 28136992: บับเบิลข้อมูลมีคำว่าภาระผ่อน + คำถามวัตถุประสงค์
+            _info = ("วงเงินกู้ขึ้นกับรายได้ ภาระผ่อนปัจจุบัน และเกณฑ์ของแต่ละธนาคารค่ะ "
+                     "แต่ละแบงก์ให้ไม่เท่ากันค่ะ")
+            _obj = "ลูกค้ามองไว้ซื้อปล่อยเช่า หรืออยู่เองคะ"
+            _rep = _info + _R152_SPLIT + _obj
+            _conversations[_uid] = [{"role": "user", "content": "สอบถามรายละเอียด"},
+                                    {"role": "assistant", "content": _info + "\n" + _obj}]
+            _out, _ev = _r152_rewrite(_rep, _uid, "__NO_SUCH_KEY__", True, {})
+            _conversations.pop(_uid, None)
+            return (_out == _rep) and (_ev == [])
+        if which == "only_question_bubble":
+            # ถามรายได้ครั้งที่สอง พร้อมบับเบิลข้อมูล -> เปลี่ยนเฉพาะบับเบิลคำถาม
+            _info = "โครงการนี้ใกล้รถไฟฟ้า เดินไม่กี่นาทีครับ"
+            _rep = _info + _R152_SPLIT + _hard
+            _conversations[_uid] = [{"role": "assistant", "content": _hard},
+                                    {"role": "user", "content": "สนใจครับ"},
+                                    {"role": "assistant", "content": _info + "\n" + _hard}]
+            _out, _ev = _r152_rewrite(_rep, _uid, "__NO_SUCH_KEY__", False, {})
+            _conversations.pop(_uid, None)
+            _p = _out.split(_R152_SPLIT)
+            return (len(_p) == 2) and (_p[0] == _info) and ("เลือกเป็นช่วง" in _p[1])
+        if which == "no_repeat":
+            _a = _r152_pick("income", 2, False, 0)
+            _b = _r152_pick("income", 3, False, 1)
+            _c = _r152_pick("income", 4, False, 2)
+            return bool(_a) and bool(_b) and bool(_c) and (_a != _b) and (_b != _c)
+        return False
+    except Exception as _e:
+        print("[R152 SELFTEST ERROR] " + str(_e))
+        return False
+
+
+try:
+    def _process_r152(self, user_message, user_id, referral=None,
+                      platform="facebook", page_id="", brand="",
+                      sheet_tab="", gender=""):
+        reply, grade = _R151_BASE_PROCESS(
+            self, user_message, user_id, referral=referral, platform=platform,
+            page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+        try:
+            if reply and str(reply).strip():
+                _skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+                if len(_R152_SEEN) > 5000:
+                    _R152_SEEN.clear()
+                    _R152_FLAGGED.clear()
+                    print("[R152] ล้างตัวนับ (เกิน 5000 คู่)")
+                _new, _ev = _r152_rewrite(reply, user_id, _skey,
+                                          str(gender or "").lower().startswith("f"),
+                                          _R152_SEEN)
+                for _topic, _ab, _mv in _ev:
+                    print("[R152] " + str(user_id)[:8] + "... หัวข้อ " + _topic
+                          + " ถามไปก่อนหน้านี้ " + str(_ab) + " ครั้ง -> "
+                          + ("ถามใหม่แบบง่าย" if _ab == 1
+                             else ("เลิกถาม เดินหน้าต่อ" if _mv < R152_MAX_MOVEON
+                                   else "ปิดท้าย ไม่ถามซ้ำ")))
+                    if _ab >= 2 and (_skey, _topic) not in _R152_FLAGGED:
+                        try:
+                            _st = _lead_states.get(_skey)
+                            if _st is not None:
+                                self._add_signal(
+                                    _st, R152_FLAG.format(t=_R151_TH.get(_topic, _topic)))
+                                _R152_FLAGGED.add((_skey, _topic))
+                        except Exception as _e2:
+                            print("[R152 FLAG ERROR] " + str(_e2))
+                if _ev:
+                    reply = _new
+        except Exception as _e:
+            print("[R152 ERROR] " + str(_e) + " — ใช้คำตอบเดิม")
+        return reply, grade
+
+    CalmBotEngine.process = _process_r152
+    print("[R152] ซ่อมการนับถามซ้ำแล้ว — ครั้งแรกถามเต็ม ครั้งสองถามง่าย ครั้งสามเลิกถาม")
+except Exception as _e:
+    print("[R152 PATCH ERROR] ต่อไม่ติด — ใช้ทางเดิม: " + str(_e))
+
+try:
+    _R124_EXAM.extend([
+        ("RS1", "ถามซ้ำ (r152)", "_r152_pick", ("income", 0, False, 0), ("falsy", ""), "ถามจริงครั้งแรก ต้องปล่อยคำถามเต็มผ่าน ห้ามส่งข้อความง่าย (บั๊ก Ajin Noi A)"),
+        ("RS2", "ถามซ้ำ (r152)", "_r152_pick", ("debt", 0, True, 0), ("falsy", ""), "ภาระผ่อนครั้งแรก ต้องได้คำถามที่อธิบายว่าบ้าน/รถ/บัตรเครดิต"),
+        ("RS3", "ถามซ้ำ (r152)", "_r152_pick", ("income", 1, False, 0), ("has", "เลือกเป็นช่วง"), "ครั้งที่สองถามง่ายลง"),
+        ("RS4", "ถามซ้ำ (r152)", "_r152_pick", ("income", 2, False, 0), ("has", "ข้ามไปก่อน"), "ครั้งที่สามเลิกถาม เดินหน้าขอเบอร์"),
+        ("RS5", "ถามซ้ำ (r152)", "_r152_pick", ("income", 3, False, 1), ("no", "ข้ามไปก่อน"), "ส่งประโยคข้ามไปแล้ว ห้ามส่งประโยคเดิมซ้ำ (log 29022051 income 6 ครั้ง)"),
+        ("RS6", "ถามซ้ำ (r152)", "_r152_pick", ("income", 6, False, 3), ("truthy", ""), "ถามไปเยอะแล้วก็ยังต้องมีข้อความ ห้ามเงียบ"),
+        ("RS7", "ถามซ้ำ (r152)", "_r152_selftest", ("first_ask",), ("truthy", ""), "ข้อสอบสายไฟ: ประวัติมีคำถาม 1 ข้อความ = ถามจริงครั้งแรก ต้องไม่เปลี่ยนข้อความ"),
+        ("RS8", "ถามซ้ำ (r152)", "_r152_selftest", ("second_ask",), ("truthy", ""), "ข้อสอบสายไฟ: ประวัติมีคำถาม 2 ข้อความ = ครั้งที่สอง ต้องถามง่ายลง"),
+        ("RS9", "ถามซ้ำ (r152)", "_r152_selftest", ("no_repeat",), ("truthy", ""), "สามรอบติดกันต้องไม่ใช่ประโยคเดียวกัน"),
+        ("RS10", "ถามซ้ำ (r152)", "_r152_pick", ("", 5, False, 0), ("falsy", ""), "ไม่ใช่คำถามคัดกรอง ห้ามแตะ"),
+        ("RS15", "ถามซ้ำ (r152)", "_r152_selftest", ("got_phone",), ("truthy", ""), "เคสจริง Ajin Noi A 2 ต.ค. 11:15 — ลูกค้าให้เบอร์แล้ว ห้ามขอเบอร์ซ้ำ"),
+        ("RS16", "ถามซ้ำ (r152)", "_r152_pick", ("income", 2, False, 0, True), ("no", "ขอเบอร์"), "ได้เบอร์แล้ว ประโยคข้ามไปก่อนต้องไม่ขอเบอร์"),
+        ("RS17", "ถามซ้ำ (r152)", "_r152_pick", ("contact", 2, True, 0, True), ("has", "รับเบอร์เรียบร้อย"), "ได้เบอร์แล้วแต่ engine ยังขอ -> ต้องตอบรับ"),
+        ("RS19", "ถามซ้ำ (r152)", "_r152_selftest", ("info_bubble_kept",), ("truthy", ""), "เคสจริง Angel Estate 2 ต.ค. — บับเบิลข้อมูลที่มีคำว่าภาระผ่อน ห้ามถูกนับเป็นคำถาม ห้ามลบคำถามวัตถุประสงค์"),
+        ("RS20", "ถามซ้ำ (r152)", "_r152_selftest", ("only_question_bubble",), ("truthy", ""), "เปลี่ยนเฉพาะบับเบิลคำถาม บับเบิลข้อมูลต้องอยู่ครบ"),
+        ("RS21", "ถามซ้ำ (r152)", "_r152_bubble_topic", ("วงเงินกู้ขึ้นกับรายได้ ภาระผ่อนปัจจุบัน และเกณฑ์ของแต่ละธนาคารค่ะ",), ("falsy", ""), "ประโยคบอกข้อมูลที่มีคำว่าภาระผ่อน ไม่ใช่คำถาม"),
+        ("RS22", "ถามซ้ำ (r152)", "_r152_bubble_topic", ("ลูกค้ามองไว้ซื้อปล่อยเช่า หรืออยู่เองครับ",), ("eq", "objective"), "คำถามวัตถุประสงค์ต้องจับได้"),
+        ("RS23", "ถามซ้ำ (r152)", "_r152_bubble_topic", ("ขอเบอร์หน่อยครับ เดี๋ยวที่ปรึกษาโทรไปบอกห้องที่ตรงงบพร้อมตารางผ่อนให้",), ("eq", "contact"), "คำถามขอเบอร์ของ engine ต้องจับได้"),
+        ("RS24", "ถามซ้ำ (r152)", "_r152_bubble_topic", ("แอดมินรบกวนขอเบอร์ติดต่อ พร้อมแจ้งเวลาที่สะดวกได้เลยค่ะ",), ("eq", "contact"), "เคส Ajin — คำขอเบอร์แบบนี้ต้องนับเป็นการขอเบอร์ (r151 ไม่เคยรู้จัก)"),
+        ("RS25", "ถามซ้ำ (r152)", "_r152_bubble_topic", ("ลูกค้าผ่อนอะไรอยู่หรือเปล่าคะ เช่น ผ่อนรถ ผ่อนบ้าน",), ("eq", "debt"), "คำถามผ่อนที่ AI พิมพ์เอง (log 2 ต.ค.)"),
+        ("RS26", "ถามซ้ำ (r152)", "_r152_bubble_topic", ("หมายถึงภาระผ่อนทั้งหมดที่ลูกค้าต้องจ่ายต่อเดือนค่ะ",), ("falsy", ""), "ประโยคอธิบาย ไม่ใช่คำถาม ห้ามนับ"),
+        ("RS18", "ถามซ้ำ (r152)", "_r152_pick", ("income", 2, False, 0, False), ("has", "ขอเบอร์"), "ยังไม่ได้เบอร์ ต้องขอเบอร์ตามเดิม ห้ามเสียโอกาส"),
+        ("RS11", "ถามซ้ำ (r152)", "_r152_pick", ("contact", 2, False, 0), ("no", "ขอเบอร์"), "ถ้าข้อที่วนคือขอเบอร์ ห้ามวนขอเบอร์ซ้ำ"),
+        ("RS12", "ถามซ้ำ (r152)", "_r152_pick", ("income", 1, True, 0), ("no", "ครับ"), "เสียงหญิงห้ามมีคำว่าครับ"),
+        ("RS13", "ถามซ้ำ (r152)", "_r152_pick", ("debt", 3, True, 1), ("no", "ครับ"), "เสียงหญิงประโยคปิดท้ายห้ามมีคำว่าครับ"),
+        ("RS14", "ถามซ้ำ (r152)", "_r152_pick", ("age", 2, True, 0), ("truthy", ""), "เสียงหญิงรอบสามต้องมีข้อความ"),
+    ])
+    print("[R152] ข้อสอบถามซ้ำรอบสอง 26 ข้อ เพิ่มแล้ว · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R152 EXAM ERROR] " + str(_e))
 
 
 if __name__ == "__main__":
