@@ -10563,6 +10563,12 @@ try:
                                 self._add_signal(
                                     _st, R152_FLAG.format(t=_R151_TH.get(_topic, _topic)))
                                 _R152_FLAGGED.add((_skey, _topic))
+                                # r153 — Gift เคาะ A (2 ต.ค.): เติมช่องว่า "ไม่ตอบ"
+                                # ให้ engine เลิกถามข้อนี้แล้วเดินไปข้อถัดไปจริง
+                                try:
+                                    _r153_mark_unanswered(_st, _topic)
+                                except Exception as _e3:
+                                    print("[R153 ERROR] " + str(_e3) + " — ไม่เติมช่อง ถามต่อแบบเดิม")
                         except Exception as _e2:
                             print("[R152 FLAG ERROR] " + str(_e2))
                 if _ev:
@@ -10608,6 +10614,159 @@ try:
     print("[R152] ข้อสอบถามซ้ำรอบสอง 26 ข้อ เพิ่มแล้ว · รวม " + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
     print("[R152 EXAM ERROR] " + str(_e))
+
+
+
+# ======================================================================
+# r153 (2 ต.ค. 2569) — ลูกค้าไม่ตอบข้อเดิมครบ 3 ครั้ง -> เติมช่องว่า "ไม่ตอบ"
+# ----------------------------------------------------------------------
+# Gift เคาะทาง A: "เติมช่องว่าไม่ตอบ ให้ engine เดินไปข้อถัดไป (กระทบเกรด)"
+#
+# ทำไมต้องมี: r152 เปลี่ยนแค่คำพูด engine ยังถามข้อเดิมทุกเทิร์นเพราะช่องว่าง
+#   log 1-2 ต.ค.: psid 29022051 รายได้ 6 ครั้ง · 39976196 รายได้ 5 ครั้ง
+#
+# หลัก: ใช้กลไก "ถามครบแล้ว" ของ engine เอง ไม่สร้างเกณฑ์ใหม่
+#   income  -> เหมือนทาง "ถามครบ INCOME_REASK_MAX รอบ" ของ bot_logic ~4008
+#              data[income] = โน้ต (ไม่มีตัวเลข) -> เกรด N เท่ากับวันนี้
+#   debt    -> เหมือนทาง "ถามครบ DEBT_REASK_MAX" ของ bot_logic ~3962
+#              ไม่มียอดผ่อน = debt_unverified -> A ถูกลดเป็น B (กฎเดิมของ _grade)
+#   contact -> state[contact_refused] = True (ธงเดิมที่ engine ใช้เองตอนถามครบ)
+#   objective / coborrow -> เติมโน้ต ไม่มีผลกับ _grade
+#   age     -> ปิดธงถามอายุทุกตัว (age_asked / _r107_age_q / r137_age_wait)
+#              ไม่เติม data[age] เพราะเป็นตัวเลขที่ใช้คำนวณ
+#   credit  -> ปิดธงรอคำตอบบูโร (awaiting_ncb / ncb_pending) ncb_kind คงเดิม
+#
+# ไม่ทับข้อมูลจริง: ช่องไหนมีคำตอบแล้วไม่แตะ
+# ลูกค้าตอบทีหลัง: awaiting ไม่ถูกล้าง -> คำตอบที่มาช้ายังลงช่องเดิมได้
+# ถอนอะไร: ไม่ถอน · เพิ่มการเรียก 1 จุดใน _process_r152 (ตอนติดธงครั้งแรก)
+# ======================================================================
+import bot_logic as _bl153
+
+R153_NOTE = "ไม่ตอบ (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"
+
+
+def _r153_mark_unanswered(state, topic):
+    """เติมสถานะว่าลูกค้าไม่ตอบหัวข้อนี้ คืนชื่อช่องที่แตะ หรือ '' ถ้าไม่แตะอะไร"""
+    if not isinstance(state, dict) or not topic:
+        return ""
+    d = state.setdefault("data", {})
+    asked = state.setdefault("asked", {})
+    _max_ask = int(getattr(_bl153, "MAX_ASK_PER_FIELD", 2))
+    done = ""
+    if topic == "income":
+        if not _bl153._income_known(d):
+            d["income"] = (str(d.get("income_note") or "") + " " + R153_NOTE).strip()
+            state["income_reask"] = max(int(state.get("income_reask") or 0),
+                                        int(getattr(_bl153, "INCOME_REASK_MAX", 3)))
+            asked["income"] = max(int(asked.get("income") or 0), _max_ask)
+            done = "income"
+    elif topic == "debt":
+        if not d.get("debt") and d.get("debt_baht") is None:
+            d["debt"] = (str(d.get("debt_note") or "") + " " + R153_NOTE).strip()
+            state["debt_reask"] = max(int(state.get("debt_reask") or 0),
+                                      int(getattr(_bl153, "DEBT_REASK_MAX", 1)) + 1)
+            asked["debt"] = max(int(asked.get("debt") or 0), _max_ask)
+            done = "debt"
+    elif topic == "objective":
+        if not d.get("objective"):
+            d["objective"] = R153_NOTE
+            asked["objective"] = max(int(asked.get("objective") or 0), _max_ask)
+            done = "objective"
+    elif topic == "coborrow":
+        if not d.get("co_borrower"):
+            d["co_borrower"] = R153_NOTE
+            asked["co_borrower"] = max(int(asked.get("co_borrower") or 0), _max_ask)
+            done = "co_borrower"
+    elif topic == "contact":
+        if not d.get("contact") and not state.get("contact_refused"):
+            state["contact_refused"] = True
+            asked["contact"] = max(int(asked.get("contact") or 0), _max_ask)
+            done = "contact"
+    elif topic == "age":
+        if d.get("age") is None:
+            state["age_asked"] = True
+            state["_r107_age_q"] = True
+            state.pop("age_pending", None)
+            state.pop("awaiting_age", None)
+            state["r137_age_wait"] = 99
+            d["age_unknown"] = True
+            done = "age"
+    elif topic == "credit":
+        state.pop("ncb_pending", None)
+        state.pop("awaiting_ncb", None)
+        d["ncb_unanswered"] = True
+        done = "credit"
+    if done:
+        print("[R153] เติมช่อง " + done + " = ไม่ตอบ -> engine ข้ามไปข้อถัดไป")
+    return done
+
+
+def _r153_selftest(which):
+    """ข้อสอบสายไฟ r153 — ใช้ engine ตัวจริง (_next_missing / _grade)"""
+    try:
+        eng = bot
+        if which == "income_moves_on":
+            st = {"data": {}, "asked": {"income": 1}, "income_reask": 1}
+            _r153_mark_unanswered(st, "income")
+            f, _q = eng._next_missing(st["data"], st)
+            g = eng._grade(st["data"], st)
+            return (f != "income") and (g == "N") and _bl153._income_known(st["data"])
+        if which == "debt_moves_on":
+            st = {"data": {"income": "50000", "income_baht": 50000}, "asked": {}}
+            _r153_mark_unanswered(st, "debt")
+            f, _q = eng._next_missing(st["data"], st)
+            return f != "debt"
+        if which == "debt_no_A":
+            st = {"data": {"income": "200000", "income_baht": 200000}, "asked": {}}
+            _r153_mark_unanswered(st, "debt")
+            return eng._grade(st["data"], st) != "A"
+        if which == "contact_skip":
+            st = {"data": {"income": "50000", "income_baht": 50000, "debt": "ไม่มี",
+                           "debt_baht": 0}, "asked": {}}
+            _r153_mark_unanswered(st, "contact")
+            f, _q = eng._next_missing(st["data"], st)
+            return st.get("contact_refused") is True and f != "contact"
+        if which == "objective_skip":
+            st = {"data": {}, "asked": {}}
+            _r153_mark_unanswered(st, "objective")
+            f, _q = eng._next_missing(st["data"], st)
+            return f != "objective"
+        if which == "keep_real_answer":
+            st = {"data": {"income": "45000", "income_baht": 45000,
+                           "objective": "ปล่อยเช่า"}, "asked": {}}
+            _r153_mark_unanswered(st, "income")
+            _r153_mark_unanswered(st, "objective")
+            return st["data"]["income"] == "45000" and st["data"]["objective"] == "ปล่อยเช่า"
+        if which == "age_flags":
+            st = {"data": {}, "asked": {}, "awaiting_age": True, "age_pending": True}
+            _r153_mark_unanswered(st, "age")
+            return (st.get("age_asked") and not st.get("awaiting_age")
+                    and not st.get("age_pending") and st["data"].get("age") is None)
+        if which == "note_not_number":
+            return (_bl153._parse_income(R153_NOTE) is None
+                    and _bl153._parse_debt_monthly(R153_NOTE) is None
+                    and not _bl153._says_no_debt(R153_NOTE))
+        return False
+    except Exception as _e:
+        print("[R153 SELFTEST ERROR] " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RT1", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("income_moves_on",), ("truthy", ""), "ไม่ตอบรายได้ -> engine ไปข้อถัดไป · เกรด N เท่าเดิม"),
+        ("RT2", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("debt_moves_on",), ("truthy", ""), "ไม่ตอบภาระผ่อน -> ไปข้อถัดไป"),
+        ("RT3", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("debt_no_A",), ("truthy", ""), "ไม่รู้ยอดผ่อน ห้ามได้ A (กฎเดิม debt_unverified)"),
+        ("RT4", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("contact_skip",), ("truthy", ""), "ไม่ให้เบอร์ 3 ครั้ง -> contact_refused ไม่ขอเบอร์อีก"),
+        ("RT5", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("objective_skip",), ("truthy", ""), "ไม่ตอบวัตถุประสงค์ -> ไปข้อถัดไป"),
+        ("RT6", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("keep_real_answer",), ("truthy", ""), "ช่องที่มีคำตอบจริงแล้ว ห้ามทับ"),
+        ("RT7", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("age_flags",), ("truthy", ""), "ไม่ตอบอายุ -> ปิดธงถามอายุทุกตัว ไม่ยัดค่าปลอมลงอายุ"),
+        ("RT8", "ไม่ตอบ 3 ครั้ง (r153)", "_r153_selftest", ("note_not_number",), ("truthy", ""), "โน้ต 'ไม่ตอบ (ถาม 3 ครั้ง)' ต้องไม่ถูกอ่านเป็นตัวเลข 3 บาท"),
+    ])
+    print("[R153] ลูกค้าไม่ตอบครบ 3 ครั้ง -> เติมช่องว่าไม่ตอบ · ข้อสอบ 8 ข้อ · รวม "
+          + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R153 EXAM ERROR] " + str(_e))
 
 
 if __name__ == "__main__":
