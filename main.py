@@ -10406,10 +10406,16 @@ def _r152_is_question(text):
 
 
 def _r152_bubble_topic(text):
-    """หัวข้อของบับเบิลนี้ เฉพาะเมื่อเป็นประโยคคำถามเท่านั้น"""
-    if not _r152_is_question(text):
+    """หัวข้อของบับเบิลนี้ เฉพาะเมื่อเป็นประโยคคำถามเท่านั้น
+    r154: บับเบิลสรุปทวนตอนปิดเคส (R136 มีบรรทัด • รายได้ / • ไม่มีภาระผ่อน
+    แล้วลงท้ายชวนแก้ข้อมูล) เคยถูกจัดเป็นคำถามภาระผ่อน -> ถูกเขียนทับทั้งบับเบิล
+    สรุป/รายการ (มี •) หรือบับเบิลยาวเกิน 260 ตัว = ข้อมูล ไม่ใช่คำถามคัดกรอง"""
+    t = str(text or "")
+    if "•" in t or len(t) > 260:
         return ""
-    return _r151_topic(text)
+    if not _r152_is_question(t):
+        return ""
+    return _r151_topic(t)
 
 
 def _r152_count(user_id, topic):
@@ -10643,6 +10649,7 @@ except Exception as _e:
 import bot_logic as _bl153
 
 R153_NOTE = "ไม่ตอบ (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"
+R153_NOTE_PARTIAL = "ยังไม่ได้ตัวเลข (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"
 
 
 def _r153_mark_unanswered(state, topic):
@@ -10655,14 +10662,16 @@ def _r153_mark_unanswered(state, topic):
     done = ""
     if topic == "income":
         if not _bl153._income_known(d):
-            d["income"] = (str(d.get("income_note") or "") + " " + R153_NOTE).strip()
+            _n = str(d.get("income_note") or "").strip()
+            d["income"] = (_n + " " + R153_NOTE_PARTIAL).strip() if _n else R153_NOTE
             state["income_reask"] = max(int(state.get("income_reask") or 0),
                                         int(getattr(_bl153, "INCOME_REASK_MAX", 3)))
             asked["income"] = max(int(asked.get("income") or 0), _max_ask)
             done = "income"
     elif topic == "debt":
         if not d.get("debt") and d.get("debt_baht") is None:
-            d["debt"] = (str(d.get("debt_note") or "") + " " + R153_NOTE).strip()
+            _n = str(d.get("debt_note") or "").strip()
+            d["debt"] = (_n + " " + R153_NOTE_PARTIAL).strip() if _n else R153_NOTE
             state["debt_reask"] = max(int(state.get("debt_reask") or 0),
                                       int(getattr(_bl153, "DEBT_REASK_MAX", 1)) + 1)
             asked["debt"] = max(int(asked.get("debt") or 0), _max_ask)
@@ -10744,6 +10753,8 @@ def _r153_selftest(which):
                     and not st.get("age_pending") and st["data"].get("age") is None)
         if which == "note_not_number":
             return (_bl153._parse_income(R153_NOTE) is None
+                    and _bl153._parse_income(R153_NOTE_PARTIAL) is None
+                    and _bl153._parse_debt_monthly("บัตรเครดิต " + R153_NOTE_PARTIAL) is None
                     and _bl153._parse_debt_monthly(R153_NOTE) is None
                     and not _bl153._says_no_debt(R153_NOTE))
         return False
@@ -10767,6 +10778,467 @@ try:
           + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
     print("[R153 EXAM ERROR] " + str(_e))
+
+
+
+# ======================================================================
+# r154 (2 ต.ค. 2569) — ลูกค้าตอบแล้ว ต้องเก็บได้ ต้องจัดเกรดได้ ต้องมีคนโทร
+# ----------------------------------------------------------------------
+# Gift 2 ต.ค.: "ลูกค้าตอบแล้วบอทไม่เข้าใจว่าเป็นข้อมูลอันไหน จัดเก็บไม่ได้
+#   เลยถามวน ... ถ้าไม่จัดเกรด ลูกค้าจะมีความสำคัญต่ำ อาจไม่มีใครโทรเลย"
+#
+# หลักฐาน (log 1-2 ต.ค. + เล่นซ้ำด้วย engine จริง):
+#  ก) ตัวเลือกช่วงของ r151 ขัดกติกาเดิมของ Gift
+#     "ต่ำกว่า 3 หมื่น" -> r142 (Gift 5 ก.ย.: ไม่ถึง/ต่ำกว่า X ห้ามเดา ให้ถามกลับ)
+#     -> ลูกค้าตอบตรงตัวเลือกเป๊ะ บอทก็ต้องถามกลับ = วนเพราะตัวเลือกของเราเอง
+#     และ "ต่ำกว่า 3 หมื่น" คร่อมเส้นเกรด 25,000 พอดี ต่อให้อ่านได้ก็ตีเกรดไม่ได้
+#     "ไม่เกินหมื่น" (ตัวเลือกภาระผ่อนของเราเอง) ตัวอ่านคืน None -> ถามซ้ำ
+#  ข) "ต่ำกว่าสามหมื่น" (ตัวหนังสือ) หลุดด่าน r142 -> บันทึก 30,000 ผิดกติกา
+#  ค) ถามผีดิบ: engine นับ asked[contact]+1 แต่ patch อื่น (R107) เอาคำถามอายุ
+#     มาแทนคำถามขอเบอร์ ลูกค้าไม่เคยเห็นคำขอเบอร์ -> ครบโควตา 2 -> engine ตั้ง
+#     contact_refused เอง -> ส่งเคสเกรด N + "ไม่สะดวกให้โทร" ทั้งที่ลูกค้าไม่เคยปฏิเสธ
+#     (เล่นซ้ำแชทจริง psid 2918024900 ได้ผลนี้ทุกครั้ง)
+#  ง) เบอร์มาหลังส่งเคสแล้ว (done) -> ทาง done ไม่มีตัวเก็บเบอร์ -> เบอร์หาย
+#     บอทตอบ "รับเรื่องไว้แล้ว" แต่ชีตไม่มีเบอร์ = ไม่มีใครโทร
+#
+# เส้นแบ่งเกรดจริง (วัดจาก _grade ตัวจริง ไม่มีหนี้ อายุ 35):
+#   รายได้ < 25,000 = C · >= 25,000 = A · อายุ >= 61 เกรดตก
+# ตัวเลือกใหม่ทุกช่วงอยู่ฝั่งเดียวของเส้น + ใช้กติกาเดิม r69 "เอาตัวสูง"
+#
+# แตะเฉพาะชั้น "อ่าน/เก็บ" — ไม่แตะเกณฑ์ สูตร เกรด การแจกเคส
+# ถอนอะไร: ไม่ถอน · ครอบ CalmBotEngine.process ชั้นนอกสุด 1 ชั้น
+#          + เปลี่ยนข้อความตัวเลือก 3 หัวข้อใน R151_SOFT_M/F
+#          + ขยายคำของ r142 / ตัวอ่านหนี้ แบบห่อ ตกกลับของเดิมเสมอ
+# ======================================================================
+import bot_logic as _bl154
+
+# ---------- ก) ตัวเลือกช่วงชุดใหม่ ----------
+R154_BUCKET = {
+    "income": ("ช่วง 15,000-24,000", "ช่วง 25,000-40,000",
+               "ช่วง 40,000-60,000", "60,000 ขึ้นไป"),
+    "debt":   ("ไม่มีเลย", "ไม่เกิน 5,000", "5,000-15,000", "15,000 ขึ้นไป"),
+    "age":    ("อายุราว 35 (ช่วง 20-39)", "อายุราว 45 (ช่วง 40-50)",
+               "อายุราว 55 (ช่วง 51-60)", "อายุ 61 ขึ้นไป"),
+}
+R154_SOFT_M = {
+    "income": ("ไม่ต้องบอกตัวเลขเป๊ะก็ได้ครับ เลือกเป็นช่วงได้เลยครับ ตอบเป็นข้อก็ได้ "
+               "1) 15,000-24,000  2) 25,000-40,000  3) 40,000-60,000  "
+               "4) 60,000 ขึ้นไป  ใกล้ข้อไหนที่สุดครับ"),
+    "debt":   ("ยอดผ่อนรวมต่อเดือน (บ้าน รถ บัตรเครดิต สินเชื่อ) ตอบเป็นข้อก็ได้ครับ "
+               "1) ไม่มีเลย  2) ไม่เกิน 5,000  3) 5,000-15,000  "
+               "4) 15,000 ขึ้นไป  ใกล้ข้อไหนที่สุดครับ"),
+    "age":    ("อายุมีผลกับจำนวนปีที่กู้ได้ครับ ตอบเป็นข้อก็ได้ครับ "
+               "1) 20-39  2) 40-50  3) 51-60  4) 61 ขึ้นไป"),
+}
+R154_SOFT_F = {
+    "income": ("ไม่ต้องบอกตัวเลขเป๊ะก็ได้ค่ะ เลือกเป็นช่วงได้เลยค่ะ ตอบเป็นข้อก็ได้ "
+               "1) 15,000-24,000  2) 25,000-40,000  3) 40,000-60,000  "
+               "4) 60,000 ขึ้นไป  ใกล้ข้อไหนที่สุดคะ"),
+    "debt":   ("ยอดผ่อนรวมต่อเดือน (บ้าน รถ บัตรเครดิต สินเชื่อ) ตอบเป็นข้อก็ได้ค่ะ "
+               "1) ไม่มีเลย  2) ไม่เกิน 5,000  3) 5,000-15,000  "
+               "4) 15,000 ขึ้นไป  ใกล้ข้อไหนที่สุดคะ"),
+    "age":    ("อายุมีผลกับจำนวนปีที่กู้ได้ค่ะ ตอบเป็นข้อก็ได้ค่ะ "
+               "1) 20-39  2) 40-50  3) 51-60  4) 61 ขึ้นไป"),
+}
+try:
+    for _k in ("income", "debt", "age"):
+        R151_SOFT_M[_k] = R154_SOFT_M[_k]
+        R151_SOFT_F[_k] = R154_SOFT_F[_k]
+except Exception as _e:
+    print("[R154 SOFT ERROR] " + str(_e))
+
+_R154_LAST_BUCKET = {}       # skey -> หัวข้อที่เพิ่งส่งตัวเลือกไป (RAM)
+
+_R154_IDX = (("1", "หนึ่ง", "แรก"), ("2", "สอง"), ("3", "สาม"), ("4", "สี่", "สุดท้าย"))
+
+
+def _r154_index(msg):
+    """'2' / 'ข้อ 2' / 'อันแรก' / 'ข้อสาม' / 'อันสุดท้าย' -> 0..3 · ไม่ใช่คืน None"""
+    t = re.sub(r"[\s\.\)\(]", "", str(msg or ""))
+    t = re.sub("(ครับ|ค่ะ|คะ|ค่า|คับ|จ้า|จ้ะ|นะ|ฮะ|ค่ะะ)+$", "", t)
+    t = re.sub("^(ข้อ|อัน|แบบ|ตัวเลือก|ช่อง|ช้อย|choice|no)(ที่)?", "", t, flags=re.I)
+    if not t or len(t) > 8:
+        return None
+    for i, words in enumerate(_R154_IDX):
+        if t in words:
+            return i
+    return None
+
+
+def _r154_bucket_topic(reply):
+    """ตอบกลับรอบนี้มีตัวเลือกช่วงของหัวข้อไหน"""
+    n = _norm_msg(reply)
+    for tp in ("income", "debt", "age"):
+        for src in (R154_SOFT_M, R154_SOFT_F):
+            if _norm_msg(src[tp]) in n:
+                return tp
+    return ""
+
+
+# ---------- ข) r142 รู้จักตัวเลขเป็นตัวหนังสือด้วย ----------
+try:
+    _R154_TH_NUM = "หนึ่ง|สอง|สาม|สี่|ห้า|หก|เจ็ด|แปด|เก้า|สิบ|ครึ่ง"
+    _R142_RE = re.compile(
+        "(" + "|".join(_R142_WORDS) + ")[ ]*"
+        + "([0-9][0-9,. ]*|(?:" + _R154_TH_NUM + "))?[ ]*(" + _R142_UNIT + "|k|K)?")
+    print("[R154] r142 รู้จักตัวเลขตัวหนังสือแล้ว (ต่ำกว่าสามหมื่น = ถามกลับ ไม่เดา)")
+except Exception as _e:
+    print("[R154 R142 ERROR] " + str(_e))
+
+# ---------- ค) ยอดผ่อน "ไม่เกินหมื่น / ไม่เกินหมื่นห้า" ----------
+_R154_DEBT_WORDS = (("หมื่นห้า", 15000), ("หมืนห้า", 15000), ("สองหมื่น", 20000),
+                    ("สามหมื่น", 30000), ("หมื่น", 10000), ("หมืน", 10000), ("แปดพัน", 8000), ("เจ็ดพัน", 7000),
+                    ("หกพัน", 6000), ("ห้าพัน", 5000), ("สี่พัน", 4000),
+                    ("สามพัน", 3000), ("สองพัน", 2000), ("พันนึง", 1000))
+try:
+    _R154_BASE_DEBT = _bl154._parse_debt_monthly
+
+    def _r154_parse_debt(msg, *a, **k):
+        out = _R154_BASE_DEBT(msg, *a, **k)
+        if out is not None:
+            return out
+        try:
+            t = str(msg or "").replace(" ", "")
+            for lead in ("ไม่เกิน", "ไม่ถึง", "ประมาณ", "ราวๆ", "ราว"):
+                if t.startswith(lead) or ("ผ่อน" + lead) in t:
+                    for w, v in _R154_DEBT_WORDS:
+                        if w in t:
+                            print("[R154 DEBT] " + t[:30] + " -> " + str(v))
+                            return v
+        except Exception as _e:
+            print("[R154 DEBT ERROR] " + str(_e))
+        return out
+    _bl154._parse_debt_monthly = _r154_parse_debt
+except Exception as _e:
+    print("[R154 DEBT PATCH ERROR] " + str(_e))
+
+
+# ---------- ง) นับ "ถามแล้ว" เฉพาะที่ลูกค้าเห็นจริง ----------
+_R154_FIELD_TOPIC = {"income": "income", "debt": "debt", "contact": "contact",
+                     "co_borrower": "coborrow", "objective": "objective"}
+_R154_PART = re.compile("(ครับ|ค่ะ|คะ|ค่า|นะ|ผม|ดิฉัน|เรา)")
+
+
+def _r154_core(t):
+    return _R154_PART.sub("", _norm_msg(t))
+
+
+def _r154_q_shown(field, last_q, reply):
+    """คำถามช่อง field ไปถึงตาลูกค้าจริงไหม (True = เห็น/ไม่แน่ใจ · False = ไม่เห็นแน่ๆ)"""
+    if not reply or not str(reply).strip():
+        return True                      # เงียบ/ส่งต่อคน — ไม่แตะ
+    tp = _R154_FIELD_TOPIC.get(field, "")
+    for b in str(reply).split(_R152_SPLIT):
+        if tp and _r152_bubble_topic(b) == tp:
+            return True
+    if tp and _r154_bucket_topic(reply) == tp:
+        return True
+    try:
+        for src in (R151_SOFT_M, R151_SOFT_F):
+            if tp and src.get(tp) and _norm_msg(src[tp]) in _norm_msg(reply):
+                return True
+    except Exception:
+        pass
+    try:
+        _nr = _norm_msg(reply)
+        for _t in (R151_MOVEON_M, R151_MOVEON_F, R151_MOVEON_CONTACT_M, R151_MOVEON_CONTACT_F,
+                   R152_HANDOFF_M, R152_HANDOFF_F, R152_HOLD_M, R152_HOLD_F,
+                   R152_GOTPHONE_M, R152_GOTPHONE_F, R152_ACKPHONE_M, R152_ACKPHONE_F):
+            if _norm_msg(_t) in _nr:
+                return True              # r152 เปลี่ยนคำพูดเอง (ตั้งใจ) — ไม่แตะ
+    except Exception:
+        pass
+    core_r = _r154_core(reply)
+    core_q = _r154_core(last_q)
+    if not core_q:
+        return True                      # ไม่รู้ว่าตั้งใจถามอะไร — ไม่แตะ
+    if core_q[:14] in core_r or core_q[-14:] in core_r:
+        return True
+    return False
+
+
+# ---------- ฉ) ลูกค้าให้ข้อมูลข้ออื่นมาเอง -> เก็บลงช่องที่ถูก ----------
+# เคสจริง: บอทถามผู้กู้ร่วม ลูกค้าตอบ "รายได้ 250,000-300,000/เดือน" -> ถามผู้กู้ร่วมซ้ำ 4 รอบ
+#          บอทถามรายได้ ลูกค้าตอบ "ไม่มีผ่อนค่ะ" -> หาย แล้วถามภาระผ่อนซ้ำทีหลัง
+# รับเฉพาะประโยคที่ชัดมาก 3 แบบ แล้วส่งเข้าตัวเก็บเดิมของ engine (_capture / ทางอายุเดิม)
+_R154_AGE_RE = re.compile("(?:อายุ\\s*(\\d{2})(?!\\d))|(?:(?<!\\d)(\\d{2})\\s*ปี(?!ละ))")
+_R154_AGE_NOT = ("ทำงาน", "อายุงาน", "ผ่อน", "กู้", "สัญญา", "เช่า", "ประสบการณ์",
+                 "จดทะเบียน", "ทำมา", "เปิดมา", "มาแล้ว", "ปีที่แล้ว", "ปีก่อน")
+_R154_NODEBT = ("ไม่มีผ่อน", "ไม่มีหนี้", "ไม่มีภาระ", "ไม่ได้ผ่อน", "ไม่ติดผ่อน",
+                "ไม่มีค่างวด", "ไม่มีสินเชื่อ", "ไม่มีบัตรเครดิต")
+_R154_INC_STRONG = ("เงินเดือน", "รายได้", "สลิป", "รับเดือนละ", "ได้เดือนละ")
+_R154_INC_NOT = ("งบ", "ราคา", "วงเงิน", "ยอดกู้", "ค่าเช่า")
+
+
+def _r154_route(eng, state, msg):
+    """คืนชื่อช่องที่เก็บให้ หรือ '' — ทำเฉพาะช่องที่ยังว่าง และไม่ใช่ข้อที่ engine รออยู่"""
+    if not isinstance(state, dict) or state.get("done"):
+        return ""
+    d = state.setdefault("data", {})
+    t = str(msg or "")
+    t0 = t.replace(" ", "")
+    aw = state.get("awaiting")
+    # 1) ไม่มีภาระผ่อน
+    if (aw != "debt" and not d.get("debt") and d.get("debt_baht") is None
+            and any(w in t0 for w in _R154_NODEBT)):
+        eng._capture(state, "debt", t)
+        d = state.get("data") or {}
+        if d.get("debt_baht") is None:
+            d["debt_baht"] = 0
+        if aw and aw != "debt":
+            state["awaiting"] = None     # ข้อความนี้ไม่ได้ตอบข้อที่รออยู่
+        return "debt"
+    # 2) อายุ
+    if d.get("age") is None and not state.get("awaiting_age"):
+        mt = _R154_AGE_RE.search(t)
+        if mt and not any(w in t0 for w in _R154_AGE_NOT):
+            v = int(mt.group(1) or mt.group(2))
+            if 20 <= v <= 75:
+                state["awaiting_age"] = True     # ให้ทางรับอายุเดิมของ engine เก็บเอง
+                return "age"
+    # 3) รายได้ (ตอนรอข้อที่ไม่ใช่รายได้/หนี้ — คู่ หนี้<->รายได้ มี r100 ดูแลแล้ว)
+    if (aw not in ("income", "debt", "debt_baht") and not d.get("income")
+            and not d.get("income_unknown") and not d.get("cash")
+            and any(w in t0 for w in _R154_INC_STRONG)
+            and not any(w in t0 for w in _R154_INC_NOT)
+            and not _bl154._has_any(t, _bl154._DEBT_SAYS)):
+        v = _bl154._parse_income(t)
+        if v and int(v) >= 5000:
+            eng._capture(state, "income", t)
+            if aw:
+                state["awaiting"] = None
+            return "income"
+    return ""
+
+
+# ---------- จ) เบอร์มาหลังส่งเคสแล้ว ----------
+R154_LATEPHONE_M = "ได้รับเบอร์แล้วครับ เดี๋ยวที่ปรึกษาโทรกลับไปคุยรายละเอียดให้ครับ"
+R154_LATEPHONE_F = "ได้รับเบอร์แล้วค่ะ เดี๋ยวที่ปรึกษาโทรกลับไปคุยรายละเอียดให้ค่ะ"
+
+
+def _r154_late_phone(eng, state, user_id, msg, female):
+    """คืนข้อความตอบ ถ้าเก็บเบอร์ที่มาหลังส่งเคสได้ · ไม่เข้าเงื่อนไขคืน ''"""
+    d = state.get("data") or {}
+    if not (state.get("done") and state.get("lead_sent")):
+        return ""
+    if d.get("contact") or not _bl154._looks_like_phone(msg):
+        return ""
+    eng._capture(state, "contact", msg)
+    d = state.get("data") or {}
+    if not d.get("contact"):
+        return ""
+    state["contact_refused"] = False
+    eng._add_signal(state, "📞 ลูกค้าให้เบอร์หลังส่งเคสแล้ว — อัปเดตแถวเดิม (r154)")
+    try:
+        eng._send_to_sheets(user_id, d, d.get("grade") or "N",
+                            state.get("fb_name", ""), state.get("referral", {}),
+                            state.get("platform", "facebook"),
+                            state.get("page_id", ""), state.get("sheet_tab", ""),
+                            signals=state.get("signals", []),
+                            contact_refused=False, calendar=False,
+                            sale=state.get("handover_by", ""))
+    except Exception as _e:
+        print("[R154 LATE PHONE SHEET ERROR] " + str(_e))
+    print("[R154 LATE PHONE] " + str(user_id)[:8] + "... ได้เบอร์หลังส่งเคส -> อัปเดตแถวเดิม")
+    return R154_LATEPHONE_F if female else R154_LATEPHONE_M
+
+
+try:
+    _R154_BASE_PROCESS = CalmBotEngine.process
+
+    def _process_r154(self, user_message, user_id, referral=None,
+                      platform="facebook", page_id="", brand="",
+                      sheet_tab="", gender=""):
+        _skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+        _female = str(gender or "").lower().startswith("f")
+        _msg = user_message
+        _before = {}
+        try:
+            # ตอบเป็นเลขข้อ -> แปลงเป็นข้อความช่วงก่อนเข้า engine
+            _st0 = _lead_states.get(_skey) or {}
+            if _st0:
+                try:
+                    _rt = _r154_route(self, _st0, user_message)
+                    if _rt:
+                        print("[R154 ROUTE] " + str(user_id)[:8] + "... ลูกค้าให้ข้อมูล "
+                              + _rt + " มาเอง -> เก็บลงช่องที่ถูก")
+                except Exception as _e4:
+                    print("[R154 ROUTE ERROR] " + str(_e4))
+            _bt = _R154_LAST_BUCKET.get(_skey, "")
+            if _bt:
+                _i = _r154_index(user_message)
+                if _i is not None:
+                    _R154_LAST_BUCKET.pop(_skey, None)
+                    _msg = R154_BUCKET[_bt][_i]
+                    if _bt == "age":
+                        _st0["awaiting_age"] = True     # ให้ทางรับคำตอบอายุเดิมทำงาน
+                    print("[R154 PICK] " + str(user_id)[:8] + "... ตอบข้อ " + str(_i + 1)
+                          + " ของ " + _bt + " -> " + _msg)
+            _before = dict(_st0.get("asked") or {})
+        except Exception as _e:
+            print("[R154 PRE ERROR] " + str(_e))
+        reply, grade = _R154_BASE_PROCESS(
+            self, _msg, user_id, referral=referral, platform=platform,
+            page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+        try:
+            _st = _lead_states.get(_skey)
+            if _st is not None:
+                # เบอร์มาหลังส่งเคส
+                _lp = _r154_late_phone(self, _st, user_id, _msg, _female)
+                if _lp:
+                    return _lp, grade
+                # ถามผีดิบ: นับเพิ่มแต่ลูกค้าไม่เห็นคำถาม -> คืนตัวนับ
+                _after = _st.get("asked") or {}
+                _inc = [f for f in _after if int(_after.get(f) or 0) > int(_before.get(f) or 0)]
+                if len(_inc) == 1:
+                    _f = _inc[0]
+                    if not _r154_q_shown(_f, _st.get("last_q") or "", reply):
+                        _after[_f] = int(_before.get(_f) or 0)
+                        if _st.get("awaiting") == _f:
+                            _st["awaiting"] = None
+                        print("[R154 PHANTOM] " + str(user_id)[:8] + "... engine นับถาม "
+                              + _f + " แต่ลูกค้าไม่เห็นคำถาม -> คืนตัวนับ")
+                # จำว่าส่งตัวเลือกช่วงหัวข้อไหนไว้ — จำไว้จนกว่าจะได้คำตอบ
+                # หรือ engine เลิกรอข้อนั้น (ลูกค้าคั่นด้วยคำถามอื่นก่อนได้)
+                _bt2 = _r154_bucket_topic(reply)
+                if _bt2:
+                    if len(_R154_LAST_BUCKET) > 5000:
+                        _R154_LAST_BUCKET.clear()
+                    _R154_LAST_BUCKET[_skey] = _bt2
+                else:
+                    _old = _R154_LAST_BUCKET.get(_skey, "")
+                    _d2 = _st.get("data") or {}
+                    _gone = ((_old == "income" and _d2.get("income"))
+                             or (_old == "debt" and (_d2.get("debt") or _d2.get("debt_baht") is not None))
+                             or (_old == "age" and _d2.get("age") is not None)
+                             or _st.get("done"))
+                    if _old and _gone:
+                        _R154_LAST_BUCKET.pop(_skey, None)
+        except Exception as _e:
+            print("[R154 POST ERROR] " + str(_e) + " — ใช้คำตอบเดิม")
+        return reply, grade
+
+    CalmBotEngine.process = _process_r154
+    print("[R154] เก็บคำตอบให้ได้: ตัวเลือกตรงเส้นเกรด · ตอบเลขข้อได้ · ไม่นับถามผี · เบอร์มาช้าไม่หาย")
+except Exception as _e:
+    print("[R154 PATCH ERROR] ต่อไม่ติด — ใช้ทางเดิม: " + str(_e))
+
+
+def _r154_selftest(which):
+    """ข้อสอบสายไฟ r154 — ใช้ตัวอ่าน/engine ตัวจริง"""
+    try:
+        if which == "buckets_parse":
+            P = _bl154._parse_income
+            inc = [P(x) for x in R154_BUCKET["income"]]
+            dbt = [_bl154._parse_debt_monthly(x) for x in R154_BUCKET["debt"]]
+            age = [_bl154._parse_age(x) for x in R154_BUCKET["age"]]
+            return (inc == [24000, 40000, 60000, 60000]
+                    and dbt == [0, 5000, 10000, 15000]
+                    and age == [35, 45, 55, 61])
+        if which == "buckets_grade_side":
+            # ทุกช่วงรายได้ต้องอยู่ฝั่งเดียวของเส้น 25,000
+            g = []
+            for x in R154_BUCKET["income"]:
+                d = {"income": x, "income_baht": _bl154._parse_income(x),
+                     "debt": "ไม่มี", "debt_baht": 0}
+                g.append(bot._grade(d, {"data": d, "signals": []}))
+            return g[0] in ("C", "D", "N") and all(x == "A" for x in g[1:])
+        if which == "r142_thai_words":
+            return (_bl154._parse_income("ต่ำกว่าสามหมื่น") is None
+                    and _bl154._parse_income("3หมื่น") == 30000)
+        if which == "debt_words":
+            return (_bl154._parse_debt_monthly("ไม่เกินหมื่น") == 10000
+                    and _bl154._parse_debt_monthly("ไม่เกินหมื่นห้า") == 15000
+                    and _bl154._parse_debt_monthly("ไม่มีเลย") == 0)
+        if which == "index":
+            return ([_r154_index(x) for x in ("2", "ข้อ 3", "อันแรก", "ข้อสอง ค่ะ",
+                                               "อันสุดท้าย", "4)")] == [1, 2, 0, 1, 3, 3]
+                    and _r154_index("สนใจครับ") is None
+                    and _r154_index("25,000") is None)
+        if which == "phantom":
+            # engine ตั้งใจถามขอเบอร์ แต่ลูกค้าเห็นแค่คำถามอายุ -> ไม่นับ
+            q = "ขอเบอร์หน่อยครับ เดี๋ยวที่ปรึกษาโทรไปบอกห้องที่ตรงงบพร้อมตารางผ่อนให้"
+            r_age = "เดี๋ยวประเมินวงเงินคร่าวๆ ให้เลยค่ะ คุณลูกค้าอายุเท่าไหร่คะ"
+            r_cont = "ขอเบอร์หน่อยค่ะ เดี๋ยวที่ปรึกษาโทรไปบอกห้องที่ตรงงบพร้อมตารางผ่อนให้ค่ะ"
+            return (_r154_q_shown("contact", q, r_age) is False
+                    and _r154_q_shown("contact", q, r_cont) is True
+                    and _r154_q_shown("income", "", r_age) is True)
+        if which == "phantom_soft_counts":
+            # ตัวเลือกช่วงของ r152 ต้องนับว่า "เห็นคำถาม" ไม่งั้นวนไม่จบ
+            return _r154_q_shown("income", "ขอถามหน่อยนะครับ รายได้เดือนละประมาณเท่าไหร่ครับ",
+                                 R154_SOFT_F["income"]) is True
+        if which == "late_phone":
+            st = {"data": {"income": "40000", "income_baht": 40000, "grade": "N"},
+                  "done": True, "lead_sent": True, "contact_refused": True,
+                  "signals": [], "asked": {}}
+            _sent = {}
+            class _E:
+                def _capture(self, state, field, msg):
+                    state["data"][field] = msg
+                def _add_signal(self, state, tag):
+                    state["signals"].append(tag)
+                def _send_to_sheets(self, *a, **k):
+                    _sent["k"] = k
+            out = _r154_late_phone(_E(), st, "TEST", "0812345678", True)
+            return (bool(out) and st["data"].get("contact") == "0812345678"
+                    and st["contact_refused"] is False
+                    and _sent.get("k", {}).get("contact_refused") is False)
+        if which.startswith("route_"):
+            st = {"data": {}, "asked": {}, "signals": [], "awaiting": "income"}
+            if which == "route_nodebt":
+                r = _r154_route(bot, st, "ไม่มีผ่อนค่ะ")
+                return r == "debt" and st["data"].get("debt_baht") == 0 and st["awaiting"] is None
+            if which == "route_age":
+                r = _r154_route(bot, st, "อายุ 47 ค่ะ")
+                return r == "age" and st.get("awaiting_age") is True
+            if which == "route_age_not_work":
+                r = _r154_route(bot, st, "ทำงานมา 10 ปีแล้วค่ะ")
+                r2 = _r154_route(bot, st, "ผ่อนอีก 25 ปี")
+                return r == "" and r2 == "" and not st.get("awaiting_age")
+            if which == "route_income":
+                st["awaiting"] = "co_borrower"
+                st["data"]["low_income"] = True
+                r = _r154_route(bot, st, "รายได้ 250,000-300,000/เดือน ยังไม่หัก")
+                return r == "income" and bool(st["data"].get("income")) and st["awaiting"] is None
+            if which == "route_income_not_budget":
+                st["awaiting"] = "objective"
+                r = _r154_route(bot, st, "งบไม่เกิน 3 ล้าน รายได้ไม่แน่นอน")
+                return r == "" and not st["data"].get("income")
+            if which == "route_keep_awaited":
+                # ข้อที่ engine รออยู่ ให้ engine เก็บเอง ห้ามแย่ง
+                st["awaiting"] = "income"
+                r = _r154_route(bot, st, "เงินเดือน 45,000")
+                return r == "" and st["awaiting"] == "income"
+        return False
+    except Exception as _e:
+        print("[R154 SELFTEST ERROR] " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RU1", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("buckets_parse",), ("truthy", ""), "ตัวเลือกช่วงทุกข้อต้องอ่านออกเป็นตัวเลขตามกติกาเดิม (r69 ตัวสูง)"),
+        ("RU2", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("buckets_grade_side",), ("truthy", ""), "ทุกช่วงรายได้อยู่ฝั่งเดียวของเส้นเกรด 25,000 — ห้ามคร่อมเส้น"),
+        ("RU3", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("r142_thai_words",), ("truthy", ""), "ต่ำกว่าสามหมื่น = ถามกลับตามกติกา r142 ห้ามบันทึก 30,000"),
+        ("RU4", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("debt_words",), ("truthy", ""), "ไม่เกินหมื่น = 10,000 (ตัวเลือกภาระผ่อนของบอทเอง)"),
+        ("RU5", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("index",), ("truthy", ""), "ลูกค้าตอบเลขข้อ/อันแรก ต้องอ่านได้ ข้อความทั่วไปห้ามโดนแปลง"),
+        ("RU6", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("phantom",), ("truthy", ""), "เคสจริง 2918024900 — คำถามขอเบอร์ถูกแทนด้วยคำถามอายุ ห้ามนับว่าถามแล้ว"),
+        ("RU7", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("phantom_soft_counts",), ("truthy", ""), "ตัวเลือกช่วงต้องนับว่าลูกค้าเห็นคำถาม ไม่งั้นวน"),
+        ("RU8", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("late_phone",), ("truthy", ""), "เบอร์มาหลังส่งเคส -> เก็บ + ล้างธงไม่สะดวกให้โทร + อัปเดตแถวเดิม"),
+        ("RU9", "เก็บคำตอบได้ (r154)", "_r154_index", ("สนใจคอนโดปล่อยเช่า",), ("falsy", ""), "ข้อความทั่วไป ห้ามถูกตีเป็นเลขข้อ"),
+        ("RU10", "เก็บคำตอบได้ (r154)", "_r152_pick", ("debt", 1, True, 0), ("has", "บ้าน รถ บัตรเครดิต"), "คำถามผ่อนแบบย่อต้องบอกว่าหมายถึงอะไร (เคส Ajin Noi A)"),
+        ("RU12", "เก็บคำตอบได้ (r154)", "_r152_bubble_topic", ("ขอทวนข้อมูลนะคะ\n• รายได้ 40,000 / เดือน\n• ไม่มีภาระผ่อน\nถ้ามีอะไรไม่ตรง พิมพ์บอกได้เลยค่ะ ถูกต้องไหมคะ",), ("falsy", ""), "สรุปทวนตอนปิดเคส ห้ามถูกจัดเป็นคำถามภาระผ่อน (เคยถูกเขียนทับ)"),
+        ("RU13", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_nodebt",), ("truthy", ""), "ลูกค้าพิมพ์ 'ไม่มีผ่อนค่ะ' เองตอนบอทถามรายได้ -> เก็บภาระ 0"),
+        ("RU14", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_age",), ("truthy", ""), "'อายุ 47' -> ให้ทางรับอายุเดิมเก็บ"),
+        ("RU15", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_age_not_work",), ("truthy", ""), "'ทำงานมา 10 ปี' / 'ผ่อนอีก 25 ปี' ห้ามตีเป็นอายุ"),
+        ("RU16", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_income",), ("truthy", ""), "เคสจริง 2918024900 — ตอบรายได้ตอนบอทถามผู้กู้ร่วม ต้องเก็บเป็นรายได้"),
+        ("RU17", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_income_not_budget",), ("truthy", ""), "ประโยคที่มีคำว่างบ ห้ามเก็บเป็นรายได้"),
+        ("RU18", "เก็บคำตอบได้ (r154)", "_r154_selftest", ("route_keep_awaited",), ("truthy", ""), "ข้อที่ engine รออยู่ ให้ engine เก็บเอง ห้ามแย่ง"),
+        ("RU11", "เก็บคำตอบได้ (r154)", "_r152_pick", ("income", 1, False, 0), ("no", "ต่ำกว่า"), "ตัวเลือกรายได้ห้ามใช้คำว่าต่ำกว่า (ชนกติกา r142)"),
+    ])
+    print("[R154] ข้อสอบเก็บคำตอบ 18 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R154 EXAM ERROR] " + str(_e))
 
 
 if __name__ == "__main__":
