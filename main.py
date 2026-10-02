@@ -11079,6 +11079,23 @@ def _r154_late_phone(eng, state, user_id, msg, female):
         return ""
     state["contact_refused"] = False
     eng._add_signal(state, "📞 ลูกค้าให้เบอร์หลังส่งเคสแล้ว — อัปเดตแถวเดิม (r154)")
+    # r155 (Gift 2 ต.ค.): ข้อมูลมาเพิ่ม = จัดเกรดใหม่ เผื่อขยับขึ้นเป็นเคสสำคัญ
+    try:
+        if hasattr(eng, "_grade"):
+            if state.get("owner"):
+                _g = "O"
+            elif state.get("renter"):
+                _g = "R"
+            elif d.get("income_unknown") or d.get("co_borrower_none"):
+                _g = "C"
+            else:
+                _g = eng._grade(d, state)
+            if _g and _g != d.get("grade"):
+                print("[R155 REGRADE] " + str(user_id)[:8] + "... เบอร์มาทีหลัง เกรด "
+                      + str(d.get("grade")) + " -> " + str(_g))
+            d["grade"] = _g or d.get("grade")
+    except Exception as _e:
+        print("[R155 REGRADE ERROR] " + str(_e) + " — ใช้เกรดเดิม")
     try:
         eng._send_to_sheets(user_id, d, d.get("grade") or "N",
                             state.get("fb_name", ""), state.get("referral", {}),
@@ -11322,6 +11339,195 @@ try:
     print("[R154] ข้อสอบเก็บคำตอบ 22 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
     print("[R154 EXAM ERROR] " + str(_e))
+
+
+
+# ======================================================================
+# r155 (2 ต.ค. 2569) — N1 ค้างรายงานไว้ รอลูกค้ากลับมา -> ถามต่อจนจัดเกรดได้ -> แจก
+# ----------------------------------------------------------------------
+# Gift เคาะ 2 ต.ค.:
+#   1) "ลูกค้า N1 ไม่สำคัญ ไม่ต้องแจก ถูกแล้ว ค้างรีพอร์ตไว้ รอเค้าเห็น retarget
+#       ทางการตลาด ถามส่วนที่จะจัดเกรดได้แล้วค่อยแจก"
+#   2) "เบอร์มาทีหลัง เช็คจะดี จะได้เปลี่ยนลำดับเกรดให้ดีขึ้น"
+#
+# ของเดิมที่ขวางเรื่องนี้ (เช็คแล้ว):
+#   ก) r144 ปิดแชททุกเคสที่ "มีเบอร์ + มีเกรด" รวม N1 ที่ไม่ได้แจกให้ใคร
+#      -> ลูกค้ากลับมาจาก retarget บอทเงียบ + ไม่มีเซลเจ้าของเคส = ไม่มีใครตอบเลย
+#   ข) เคสที่ done แล้ว เปิดใหม่ได้ทางเดียวคือ "มีผู้กู้ร่วมแล้ว" (_is_reopen)
+#      ลูกค้ากลับมาบอกรายได้ = ไม่เก็บ ไม่ตีเกรดใหม่ ค้าง N1 ตลอดกาล
+#
+# ฝั่ง Apps Script (อ่านแล้ว ไม่ได้แก้):
+#   p4UpsertLead อัปเดตแถวเดิมตาม PSID · ถ้าแถวเดิมมีเกรดแล้วเงียบเกิน 7 วัน = เปิดแถวใหม่
+#   dDispatchPage แจกครั้งเดียวต่อ ID · ต้องมีเบอร์/LINE · p90Hold_ กันธง "รอ verify"
+#   -> เคส N1 ที่ตีเกรดใหม่ได้ (ธงหาย) จะถูกแจกในรอบถัดไปเอง ไม่ต้องแก้ Apps Script
+#
+# แตะ: เงื่อนไขปิดแชทของ r144 (ยกเว้น N1) + เปิดเคส N1 เมื่อลูกค้ากลับมา
+# ไม่แตะ: เกณฑ์เกรด · กติกา N1 ไม่แจก (r147) · การแจกเคสฝั่ง Apps Script
+# ======================================================================
+R155_N1_SIGNAL = "🔁 ลูกค้า N1 กลับมาคุยอีกครั้ง — บอทถามรายได้ต่อ ได้ครบเมื่อไหร่ตีเกรดใหม่แล้วแจก"
+R155_DROP_SIG = ("รอ verify", "ยังไม่ได้ตัวเลขรายได้", "ไม่ให้ตัวเลขรายได้",
+                 "ลูกค้าไม่ตอบรายได้", "เคสจบแล้ว (ได้เบอร์", "[N1]")
+
+
+def _r155_is_n1(state):
+    """เคสนี้ถูกตีเป็น N1 (ไม่รู้รายได้ — กติกา r147 ไม่แจก) ใช่ไหม"""
+    try:
+        d = (state or {}).get("data") or {}
+        if str(d.get("grade") or "").strip() != "N":
+            return False
+        if d.get("n_kind"):
+            return d.get("n_kind") == "N1"
+        return _r147_kind(d) == "N1"
+    except Exception:
+        return False
+
+
+# ---------- ก) r144 ห้ามปิดแชท N1 ----------
+try:
+    _R155_BASE_DONE = _r144_done_case
+
+    def _r144_done_case(state):
+        if _r155_is_n1(state):
+            return False                 # N1 ไม่มีเซลเจ้าของเคส ห้ามปิดแชท
+        return _R155_BASE_DONE(state)
+    print("[R155] r144 ไม่ปิดแชทเคส N1 แล้ว (รอลูกค้ากลับมาจาก retarget)")
+except Exception as _e:
+    print("[R155 R144 ERROR] " + str(_e))
+
+
+# ---------- ข) N1 กลับมา -> เปิดเคสถามรายได้ต่อ ----------
+def _r155_reopen_ok(state, msg, now=None):
+    if not isinstance(state, dict) or not state.get("done"):
+        return False
+    if not _r155_is_n1(state):
+        return False
+    if state.get("handover"):
+        return False
+    if state.get("bot_off"):
+        # ปิดโดย r144 อัตโนมัติ = เปิดคืนได้ · เซลสั่งปิดเอง (#ปิดบอท / ประโยคปิด) = ห้าม
+        _sig = " | ".join(str(x) for x in (state.get("signals") or []))
+        if "เคสจบแล้ว (ได้เบอร์" not in _sig or "เซลสั่งปิด" in _sig:
+            return False
+    try:
+        _gap = int(now or _bl154._now()) - int(state.get("last_seen") or 0)
+    except Exception:
+        _gap = 0
+    if _gap >= int(getattr(_bl154, "GAP_LIVE", 1800)):
+        return True
+    # คุยต่อเนื่องอยู่ แต่พิมพ์รายได้มาเอง -> เปิดได้เลย
+    t0 = str(msg or "").replace(" ", "")
+    if any(w in t0 for w in _R154_INC_STRONG) and _bl154._parse_income(str(msg or "")):
+        return True
+    return False
+
+
+def _r155_reopen(state, user_id):
+    d = state.setdefault("data", {})
+    _old = str(d.get("income") or d.get("income_note") or "").strip()
+    state["done"] = False
+    state["closed"] = False
+    if state.get("bot_off"):
+        state["bot_off"] = False
+    state["qualifying"] = True
+    state["awaiting"] = None
+    state["soft_close"] = False
+    for k in ("income", "income_note", "income_refused"):
+        d.pop(k, None)
+    state["income_reask"] = 0
+    state.setdefault("asked", {})["income"] = 0
+    _skey = str(state.get("page_id") or "")
+    _skey = (_skey + ":" + str(user_id)) if _skey else str(user_id)
+    _R152_SEEN.pop((_skey, "income"), None)
+    _R152_FLAGGED.discard((_skey, "income"))
+    state["signals"] = [x for x in (state.get("signals") or [])
+                        if not any(w in str(x) for w in R155_DROP_SIG)]
+    if _old:
+        state["signals"].append("คำตอบรายได้รอบก่อน: " + _old[:80])
+    state["signals"].append(R155_N1_SIGNAL)
+    print("[R155 REOPEN] " + str(user_id)[:8] + "... N1 กลับมา -> เปิดเคส ถามรายได้ต่อ")
+
+
+try:
+    _R155_BASE_PROCESS = CalmBotEngine.process
+
+    def _process_r155(self, user_message, user_id, referral=None,
+                      platform="facebook", page_id="", brand="",
+                      sheet_tab="", gender=""):
+        try:
+            _skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+            _st = _lead_states.get(_skey)
+            if _st is not None and _r155_reopen_ok(_st, user_message):
+                _r155_reopen(_st, user_id)
+        except Exception as _e:
+            print("[R155 PRE ERROR] " + str(_e) + " — ทำงานแบบเดิม")
+        return _R155_BASE_PROCESS(
+            self, user_message, user_id, referral=referral, platform=platform,
+            page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+
+    CalmBotEngine.process = _process_r155
+    print("[R155] N1 ค้างไว้ ลูกค้ากลับมา = ถามรายได้ต่อ จัดเกรดได้แล้วค่อยแจก")
+except Exception as _e:
+    print("[R155 PATCH ERROR] ต่อไม่ติด — ใช้ทางเดิม: " + str(_e))
+
+
+def _r155_selftest(which):
+    try:
+        base = {"data": {"contact": "0812345678", "grade": "N", "n_kind": "N1",
+                         "income": "ไม่ตอบ (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"},
+                "done": True, "lead_sent": True, "last_seen": 1000,
+                "signals": ["N รอ verify — ยังไม่แจก", "อายุ 40"], "asked": {"income": 2},
+                "income_reask": 3}
+        if which == "n1_not_closed":
+            return _r144_done_case(base) is False
+        if which == "a_still_closed":
+            return _r144_done_case({"data": {"contact": "0812345678", "grade": "A"}}) is True
+        if which == "n2_still_closed":
+            return _r144_done_case({"data": {"contact": "0812345678", "grade": "N",
+                                             "n_kind": "N2"}}) is True
+        if which == "reopen_after_gap":
+            st = dict(base); st["data"] = dict(base["data"]); st["signals"] = list(base["signals"])
+            ok = _r155_reopen_ok(st, "สนใจค่ะ", now=1000 + 7200)
+            _r155_reopen(st, "TEST")
+            return (ok and st["done"] is False and "income" not in st["data"]
+                    and st["income_reask"] == 0
+                    and not any("รอ verify" in x for x in st["signals"])
+                    and any("คำตอบรายได้รอบก่อน" in x for x in st["signals"]))
+        if which == "no_reopen_live":
+            return _r155_reopen_ok(base, "ขอบคุณค่ะ", now=1000 + 60) is False
+        if which == "reopen_live_with_income":
+            return _r155_reopen_ok(base, "เงินเดือน 45,000 ค่ะ", now=1000 + 60) is True
+        if which == "no_reopen_sales_off":
+            st = dict(base); st["bot_off"] = True
+            st["signals"] = ["🔇 เซลสั่งปิดบอทถาวรสำหรับแชทนี้ (ประโยคปิด)"]
+            return _r155_reopen_ok(st, "สนใจค่ะ", now=1000 + 7200) is False
+        if which == "reopen_r144_off":
+            st = dict(base); st["bot_off"] = True
+            st["signals"] = ["🔇 เคสจบแล้ว (ได้เบอร์ + แจกเคส + แจกเกรด) — บอทหยุดแชทนี้"]
+            return _r155_reopen_ok(st, "สนใจค่ะ", now=1000 + 7200) is True
+        if which == "no_reopen_graded":
+            st = dict(base); st["data"] = dict(base["data"], grade="A", n_kind="")
+            return _r155_reopen_ok(st, "สนใจค่ะ", now=1000 + 7200) is False
+        return False
+    except Exception as _e:
+        print("[R155 SELFTEST ERROR] " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RV1", "N1 รอกลับมา (r155)", "_r155_selftest", ("n1_not_closed",), ("truthy", ""), "Gift 2 ต.ค. — N1 ไม่มีเซลเจ้าของ ห้ามปิดแชท รอ retarget"),
+        ("RV2", "N1 รอกลับมา (r155)", "_r155_selftest", ("a_still_closed",), ("truthy", ""), "เคส A ได้เบอร์แล้ว ยังปิดแชทตามเดิม (r144)"),
+        ("RV3", "N1 รอกลับมา (r155)", "_r155_selftest", ("n2_still_closed",), ("truthy", ""), "N2 แจกได้ ปิดแชทตามเดิม"),
+        ("RV4", "N1 รอกลับมา (r155)", "_r155_selftest", ("reopen_after_gap",), ("truthy", ""), "N1 กลับมาหลัง 30 นาที -> เปิดเคส ล้างธงรอ verify เก็บคำตอบเก่าไว้ให้เซล"),
+        ("RV5", "N1 รอกลับมา (r155)", "_r155_selftest", ("no_reopen_live",), ("truthy", ""), "คุยต่อเนื่องแค่ขอบคุณ ห้ามเปิดเคสถามซ้ำทันที"),
+        ("RV6", "N1 รอกลับมา (r155)", "_r155_selftest", ("reopen_live_with_income",), ("truthy", ""), "พิมพ์รายได้มาเอง เปิดเคสได้ทันที"),
+        ("RV7", "N1 รอกลับมา (r155)", "_r155_selftest", ("no_reopen_sales_off",), ("truthy", ""), "เซลสั่งปิดบอทเอง ห้ามเปิดคืน"),
+        ("RV8", "N1 รอกลับมา (r155)", "_r155_selftest", ("reopen_r144_off",), ("truthy", ""), "r144 ปิดอัตโนมัติ (ก่อนมี r155) เปิดคืนได้"),
+        ("RV9", "N1 รอกลับมา (r155)", "_r155_selftest", ("no_reopen_graded",), ("truthy", ""), "เคสที่มีเกรดจริงแล้ว ห้ามเปิดถามรายได้ใหม่"),
+    ])
+    print("[R155] ข้อสอบ N1 รอกลับมา 9 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R155 EXAM ERROR] " + str(_e))
 
 
 if __name__ == "__main__":
