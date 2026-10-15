@@ -12095,6 +12095,160 @@ except Exception as _e:
     print("[R156 EXAM ERROR] " + str(_e))
 
 
+# =====================================================================
+# r157 (15 ต.ค. 2569 · Gift: "มันควรอัตโนมัติได้แล้ว")
+# เคสจริง: Realty Smart เงียบตั้งแต่ 14 ต.ค. 22:01 — token เพจใช้ไม่ได้ (190/492
+# คนสร้าง token หลุดสิทธิ์เพจ) Meta หยุดส่ง webhook · ไม่มีใครรู้จน Gift เห็นแชทค้าง 12 ชม.
+# ตัวเฝ้า token (ไม่แตะ/ไม่แสดงค่า token):
+#   ทุก 30 นาที ต่อเพจ: ① GET /me ด้วย token เพจ -> 190 = token ตาย
+#                        ② GET /{page}/subscribed_apps -> แอปหลุด = สมัครคืนเอง (auto-heal)
+#   ตาย -> แจ้ง Gift ทาง Messenger เพจหลัก (ซ้ำได้ทุก 6 ชม.) · กลับมาปกติ -> แจ้งอีกครั้ง
+#   ดูสถานะ: GET /health/tokens (แสดงแค่ ok/โค้ด error ไม่มีค่า token)
+# =====================================================================
+R157_SEC = int(os.environ.get("TOKEN_WATCH_SEC", "1800"))
+R157_REALERT_SEC = 6 * 3600
+_R157_STATE = {}      # page_id -> {"ok": bool, "code": "", "msg": "", "at": ts, "alert_at": ts, "sub": ""}
+
+
+def _r157_classify(js):
+    """คืน (ok, code, msg) จาก JSON ของ Graph"""
+    try:
+        if isinstance(js, dict) and js.get("error"):
+            e = js.get("error") or {}
+            code = str(e.get("code", "")) + ("/" + str(e.get("error_subcode")) if e.get("error_subcode") else "")
+            return False, code, str(e.get("message", ""))[:160]
+        if isinstance(js, dict) and js.get("id"):
+            return True, "", ""
+    except Exception:
+        pass
+    return False, "?", "ตอบกลับไม่รู้จัก"
+
+
+def _r157_fix_hint(code):
+    c = str(code or "")
+    if c.startswith("190"):
+        return ("token ใช้ไม่ได้ (คนที่สร้าง token ไม่มีสิทธิ์เพจแล้ว / หมดอายุ / ยังไม่เปิด 2FA) "
+                "→ สร้าง page token ใหม่จากบัญชีแอดมินหรือ System User แล้วแทนค่า PAGE_TOKEN_<เพจ> ใน Railway")
+    if c.startswith("10") or c.startswith("200"):
+        return "สิทธิ์แอปไม่พอ → เช็คสิทธิ์แอปของเพจใน Business Settings"
+    return "เช็ค Railway log คำว่า FB SEND ERROR"
+
+
+def _r157_alert(text):
+    try:
+        if GIFT_FB_PSID:
+            send_message(GIFT_FB_PSID, text, MAIN_PAGE_ID)
+    except Exception as _e:
+        print("[TOKEN WATCH ALERT ERROR] " + str(_e))
+    print("[TOKEN WATCH ALERT] " + text.replace("\n", " | ")[:300])
+
+
+def _r157_check_once(now=None):
+    now = int(now or time.time())
+    for _key in [k for k in os.environ if k.startswith("PAGE_TOKEN_")]:
+        _tok = (os.environ.get(_key) or "").strip()
+        _pid = _key[len("PAGE_TOKEN_"):]
+        if not _tok or not _pid.isdigit():
+            continue
+        st = _R157_STATE.setdefault(_pid, {"ok": True, "code": "", "msg": "", "at": 0, "alert_at": 0, "sub": ""})
+        try:
+            r = requests.get("https://graph.facebook.com/v22.0/me",
+                             params={"fields": "id", "access_token": _tok}, timeout=10)
+            ok, code, msg = _r157_classify(r.json())
+        except Exception as _e:
+            # เน็ต/Graph สะดุด ไม่ใช่ token ตาย — ไม่แจ้ง
+            print("[TOKEN WATCH] page=%s เช็คไม่ได้ (เครือข่าย) %s" % (_pid, str(_e)[:80]))
+            continue
+        was_ok = st.get("ok", True)
+        st.update({"ok": ok, "code": code, "msg": msg, "at": now})
+        if ok:
+            # ② แอปยังสมัครรับข้อความของเพจอยู่ไหม — หลุด = สมัครคืนเอง
+            try:
+                rs = requests.get("https://graph.facebook.com/v22.0/%s/subscribed_apps" % _pid,
+                                  params={"access_token": _tok}, timeout=10).json()
+                apps = (rs or {}).get("data") or []
+                if isinstance(rs, dict) and "data" in rs and not apps:
+                    rr = requests.post("https://graph.facebook.com/v22.0/%s/subscribed_apps" % _pid,
+                                       params={"subscribed_fields": SUBSCRIBE_FIELDS,
+                                               "access_token": _tok}, timeout=10)
+                    st["sub"] = "สมัครคืน http=%s" % rr.status_code
+                    print("[TOKEN WATCH] page=%s แอปหลุดจากเพจ -> สมัครคืน http=%s" % (_pid, rr.status_code))
+                    if (not st.get("sub_alert_at")) or now - int(st["sub_alert_at"]) >= R157_REALERT_SEC:
+                        st["sub_alert_at"] = now
+                        _r157_alert("🛠️ บอทเพจ %s เคยหลุดการรับข้อความ — ระบบสมัครคืนให้เองแล้ว (http %s)"
+                                    % (page_brand(_pid), rr.status_code))
+                else:
+                    st["sub"] = "ok"
+            except Exception as _e:
+                st["sub"] = "เช็คไม่ได้"
+            if not was_ok:
+                _r157_alert("✅ บอทเพจ %s กลับมาตอบได้แล้ว (token ใช้ได้)" % page_brand(_pid))
+                st["alert_at"] = 0
+            continue
+        print("[TOKEN WATCH] page=%s token ใช้ไม่ได้ code=%s %s" % (_pid, code, msg[:100]))
+        if (not st.get("alert_at")) or now - int(st["alert_at"]) >= R157_REALERT_SEC:
+            st["alert_at"] = now
+            _r157_alert("🔴 บอทเพจ %s ตอบแชทไม่ได้\nสาเหตุ: %s (code %s)\nต้องทำ: %s\nระหว่างนี้ให้ทีมตอบแชทมือ"
+                        % (page_brand(_pid), msg[:120] or "-", code, _r157_fix_hint(code)))
+
+
+def _r157_loop():
+    time.sleep(60)          # ให้บูตเสร็จก่อน
+    while True:
+        try:
+            _r157_check_once()
+        except Exception as _e:
+            print("[TOKEN WATCH ERROR] " + str(_e))
+        time.sleep(max(300, R157_SEC))
+
+
+try:
+    if R157_SEC > 0:
+        import threading as _th157
+        _th157.Thread(target=_r157_loop, daemon=True).start()
+        print("[R157] เฝ้า token ทุกเพจ ทุก %d นาที · ตายแจ้ง Gift · แอปหลุดสมัครคืนเอง" % (R157_SEC // 60))
+except Exception as _e:
+    print("[R157 BOOT ERROR] " + str(_e))
+
+
+@app.route("/health/tokens", methods=["GET"])
+def health_tokens():
+    out = {}
+    for pid, st in _R157_STATE.items():
+        out[pid] = {"brand": page_brand(pid), "ok": st.get("ok"), "code": st.get("code"),
+                    "checked": st.get("at"), "subscribe": st.get("sub")}
+    return jsonify({"revision": BOT_REVISION, "pages": out, "every_min": R157_SEC // 60})
+
+
+def _r157_selftest(which):
+    try:
+        if which == "dead":
+            ok, code, _m = _r157_classify({"error": {"code": 190, "error_subcode": 492, "message": "x"}})
+            return (not ok) and code == "190/492" and "token" in _r157_fix_hint(code)
+        if which == "alive":
+            return _r157_classify({"id": "102444118935634"})[0] is True
+        if which == "garbage":
+            return _r157_classify("nope")[0] is False
+        if which == "no_token_in_alert":
+            return "access_token" not in _r157_fix_hint("190/492")
+        return False
+    except Exception as _e:
+        print("[R157 SELFTEST ERROR] " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RX1", "เฝ้า token (r157)", "_r157_selftest", ("dead",), ("truthy", ""), "Realty Smart 15 ต.ค. — 190/492 ต้องจับได้ว่า token ตาย + บอกวิธีแก้"),
+        ("RX2", "เฝ้า token (r157)", "_r157_selftest", ("alive",), ("truthy", ""), "token ปกติห้ามแจ้งเตือนมั่ว"),
+        ("RX3", "เฝ้า token (r157)", "_r157_selftest", ("garbage",), ("truthy", ""), "ตอบกลับแปลกๆ ไม่นับว่าปกติ"),
+        ("RX4", "เฝ้า token (r157)", "_r157_selftest", ("no_token_in_alert",), ("truthy", ""), "ข้อความแจ้งเตือนห้ามมีค่า token"),
+    ])
+    print("[R157] ข้อสอบเฝ้า token 4 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R157 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
