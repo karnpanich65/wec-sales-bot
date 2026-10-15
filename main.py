@@ -12249,6 +12249,27 @@ except Exception as _e:
     print("[R157 EXAM ERROR] " + str(_e))
 
 
+
+# ---------- r157b (Gift 15 ต.ค. 69): เคสใหญ่ >5 ล้าน เพจ Wealth Estate ไม่กันไว้ให้ Gift แล้ว ----------
+# Gift: "A/B ทุกเพจ ส่งให้ปราชหมด" + "เคสเกิน 5 ล้าน ให้ปราชหมด" -> ปิดกติกา BIG_CASE (route_to=Gift + ธง 🔷)
+# ย้อนกลับ: ลบบล็อกนี้ (ค่าเดิม BIG_CASE_PAGES = {"108248514185091"})
+try:
+    _bl9.BIG_CASE_PAGES = set()
+    print("[R157b] เคสใหญ่ไม่กันให้ Gift แล้ว — A/B ทุกเพจเข้าคิวแจกปกติ (Apps Script p157 ส่งปราช)")
+except Exception as _e:
+    print("[R157b ERROR] " + str(_e))
+
+
+def _r157b_selftest(_=None):
+    return len(getattr(_bl9, "BIG_CASE_PAGES", {"x"})) == 0
+
+
+try:
+    _R124_EXAM.append(("RX5", "เฝ้า token (r157)", "_r157b_selftest", ("",), ("truthy", ""),
+                       "Gift 15 ต.ค. — เคสเกิน 5 ล้านไม่กันให้ Gift · A/B ทุกเพจไปปราช"))
+except Exception as _e:
+    print("[R157b EXAM ERROR] " + str(_e))
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
