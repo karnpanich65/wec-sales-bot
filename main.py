@@ -12468,6 +12468,191 @@ except Exception as _e:
     print("[R158 EXAM ERROR] " + str(_e))
 
 
+
+# ---------- r159 (Gift 17 ต.ค. 69): ทางเข้าเคส "นอกแชทบอท" ทางเดียว -> /intake/manual ----------
+# การตลาดพิมพ์ #ส่งเคส ใน LINE OA (MA LINE Notifier) -> Apps Script ยิงมาที่นี่
+# -> ใช้ตัวคิดเกรดชุดเดียวกับบอท -> เขียนแถวผ่าน Lead Handler เดิม -> แจกเซลตามกฎ P92 เดิม
+# ไม่สร้างทางเขียนชีตใหม่ ไม่แตะ Apps Script Lead Handler
+# ความปลอดภัย: ต้องตั้ง Railway env INTAKE_KEY (Gift ตั้งเอง) ไม่ตั้ง = ปิด (503)
+# PSID สังเคราะห์ = MANUAL-<เบอร์> -> ส่งซ้ำเบอร์เดิม = อัปเดตแถวเดิม (upsert) ไม่เกิดแถวซ้ำ
+# ย้อนกลับ: ลบบล็อกนี้ หรือไม่ตั้ง INTAKE_KEY
+R159_TAB_ALIAS = [
+    ("Leads_RealtySmart", ("realty", "rs")),
+    ("Leads_WealthOwner", ("wealth owner", "wealthowner", "wo")),
+    ("Leads_Angel", ("angel", "ag")),
+    ("Leads_Millionaire", ("millionaire", "ma")),
+    ("Leads_NewChapter", ("new chapter", "newchapter", "nc")),
+    ("Leads_MillionCondo", ("เงินล้าน", "million condo", "millioncondo", "mc")),
+    ("Facebook Leads", ("wealth estate", "wealthestate", "คุ้มค่า", "we")),
+]
+
+
+def _r159_page(text, pages=None):
+    """ชื่อเพจที่การตลาดพิมพ์ -> (page_id, tab) · หาไม่เจอ = ("", "")"""
+    pages = PAGES if pages is None else pages
+    t = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not t:
+        return "", ""
+    want = ""
+    for tab, keys in R159_TAB_ALIAS:
+        for k in keys:
+            if (len(k) <= 2 and t == k) or (len(k) > 2 and k in t):
+                want = tab
+                break
+        if want:
+            break
+    for pid, cfg in (pages or {}).items():
+        cfg = cfg or {}
+        tab = str(cfg.get("tab") or DEFAULT_TAB)
+        if want and tab == want:
+            return str(pid), tab
+    for pid, cfg in (pages or {}).items():          # สำรอง: เทียบชื่อแบรนด์ตรงๆ
+        b = str((cfg or {}).get("brand") or "").lower()
+        if len(t) > 2 and b and (t in b or b in t):
+            return str(pid), str((cfg or {}).get("tab") or DEFAULT_TAB)
+    if want == DEFAULT_TAB:
+        return MAIN_PAGE_ID, DEFAULT_TAB
+    return "", ""
+
+
+def _r159_phone(text):
+    d = re.sub(r"[^\d]", "", str(text or ""))
+    if d.startswith("66") and len(d) == 11:
+        d = "0" + d[2:]
+    return d if re.fullmatch(r"0\d{8,9}", d) else ""
+
+
+def _r159_intake(body, eng=None, pages=None):
+    """คืน (http_code, dict) — แยกจาก route เพื่อให้ข้อสอบเรียกตรงได้"""
+    eng = eng or bot
+    b = body or {}
+    phone = _r159_phone(b.get("phone"))
+    line_id = str(b.get("line") or "").strip()[:60]
+    pid, tab = _r159_page(b.get("page"), pages)
+    miss = []
+    if not pid:
+        miss.append("เพจ")
+    if not (phone or line_id):
+        miss.append("เบอร์หรือไลน์")
+    if miss:
+        return 400, {"ok": False, "missing": miss}
+    who = re.sub(r"\s+", " ", str(b.get("by") or "")).strip()[:40]
+    name = re.sub(r"\s+", " ", str(b.get("name") or "")).strip()[:60]
+    uid = "MANUAL-" + (phone or re.sub(r"[^A-Za-z0-9._@-]", "", line_id))
+    st = {"data": {}, "signals": [], "asked": {}, "psid": uid,
+          "chat_name": name, "fb_name": name, "page_id": pid, "sheet_tab": tab,
+          "platform": "facebook",
+          "referral": {"ref": "MANUAL_LINE" + (":" + who if who else "")}}
+    for fld in ("objective", "income", "debt"):
+        v = str(b.get(fld) or "").strip()
+        if v:
+            try:
+                eng._capture(st, fld, v[:200])
+            except Exception as _e:
+                print("[R159 CAPTURE] " + fld + " " + str(_e))
+    d = st["data"]
+    if not d.get("objective"):
+        d["objective"] = "ลงทุน/ปล่อยเช่า (ส่งเคสมือ)"
+    contact = phone or ("LINE: " + line_id)
+    if phone and line_id:
+        contact = phone + " · LINE: " + line_id
+    d["contact"] = contact
+    eng._add_signal(st, "📥 ส่งเคสมือผ่าน LINE OA" + (" โดย " + who if who else "")
+                    + " (ไม่ได้มาจากแชทบอท) — r159")
+    note = str(b.get("note") or "").strip()
+    if note:
+        eng._add_signal(st, "หมายเหตุการตลาด: " + note[:200])
+    g = eng._finish(uid, st, contact, calendar=True)
+    print("[R159 INTAKE] " + tab + " · เกรด " + str(g) + " · โดย " + (who or "-"))
+    return 200, {"ok": True, "grade": g, "tab": tab, "page_id": pid,
+                 "income": d.get("income", ""), "psid": uid}
+
+
+@app.route("/intake/manual", methods=["POST"])
+def r159_intake_route():
+    key = os.environ.get("INTAKE_KEY", "").strip()
+    if not key:
+        return jsonify({"ok": False, "err": "INTAKE_KEY ยังไม่ได้ตั้ง — ปิดอยู่"}), 503
+    body = request.get_json(silent=True) or {}
+    if not hmac.compare_digest(str(body.get("key") or ""), key):
+        return jsonify({"ok": False, "err": "key ไม่ถูก"}), 403
+    try:
+        code, out = _r159_intake(body)
+    except Exception as _e:
+        print("[R159 ERROR] " + str(_e))
+        return jsonify({"ok": False, "err": "ระบบผิดพลาด"}), 500
+    return jsonify(out), code
+
+
+def _r159_selftest(which):
+    fake_pages = {"102444118935634": {"brand": "Realty Smart", "tab": "Leads_RealtySmart"},
+                  "108248514185091": {"brand": "Wealth Estate", "tab": "Facebook Leads"},
+                  "100899675332209": {"brand": "Millionaire Asset", "tab": "Leads_Millionaire"}}
+    try:
+        if which == "page_alias":
+            return (_r159_page("RS", fake_pages)[0] == "102444118935634"
+                    and _r159_page("realty smart", fake_pages)[0] == "102444118935634"
+                    and _r159_page("Millionaire Asset", fake_pages)[0] == "100899675332209"
+                    and _r159_page("เพจอะไรไม่รู้", fake_pages) == ("", ""))
+        if which == "phone_norm":
+            return (_r159_phone("+66 81-234-5678") == "0812345678"
+                    and _r159_phone("081 234 5678") == "0812345678"
+                    and _r159_phone("12345") == "")
+        sent = []
+        eng = CalmBotEngine()
+        eng._send_to_sheets = lambda *a, **k: sent.append((a, k))
+        eng._get_fb_name = lambda *a, **k: ""
+        if which == "missing_fields":
+            code, out = _r159_intake({"page": "rs"}, eng, fake_pages)
+            return code == 400 and "เบอร์หรือไลน์" in out["missing"] and not sent
+        if which == "full_case":
+            code, out = _r159_intake({"page": "rs", "phone": "081-234-5678", "name": "คุณเอ",
+                                      "income": "เงินเดือน 45,000", "debt": "ไม่มีหนี้",
+                                      "by": "แอดมินโอ๋"}, eng, fake_pages)
+            if code != 200 or len(sent) != 1:
+                return False
+            a, k = sent[0]
+            # _finish ส่งแบบ positional: (psid, data, grade, name, referral, platform, page_id, tab)
+            return (a[0] == "MANUAL-0812345678" and a[6] == "102444118935634"
+                    and a[7] == "Leads_RealtySmart"
+                    and "MANUAL_LINE" in str(a[4])
+                    and "0812345678" in str(a[1].get("contact"))
+                    and out["grade"] in ("A", "B", "N", "C", "D", "X", "W1")
+                    and k.get("calendar") is True)
+        if which == "route_locked":
+            os.environ.pop("INTAKE_KEY", None)
+            r = app.test_client().post("/intake/manual", json={"page": "rs", "phone": "0812345678"})
+            return r.status_code == 503 and not sent
+        return False
+    except Exception as _e:
+        print("[R159 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RZ1", "ส่งเคสมือ (r159)", "_r159_selftest", ("page_alias",), ("truthy", ""),
+         "พิมพ์ชื่อเพจย่อ/เต็ม ต้องลงแท็บถูก · ชื่อมั่วต้องไม่เดา"),
+        ("RZ2", "ส่งเคสมือ (r159)", "_r159_selftest", ("phone_norm",), ("truthy", ""),
+         "เบอร์ +66 / มีขีด / มีวรรค ต้องเป็นเบอร์เดียวกัน (กันแถวซ้ำ)"),
+        ("RZ3", "ส่งเคสมือ (r159)", "_r159_selftest", ("missing_fields",), ("truthy", ""),
+         "ไม่มีเบอร์/ไลน์ ห้ามเขียนแถว ต้องบอกว่าขาดอะไร"),
+        ("RZ4", "ส่งเคสมือ (r159)", "_r159_selftest", ("full_case",), ("truthy", ""),
+         "เคสครบ -> แถวเดียว PSID=MANUAL-เบอร์ · แท็บถูก · ติดป้าย MANUAL_LINE · นัดโทร"),
+        ("RZ5", "ส่งเคสมือ (r159)", "_r159_selftest", ("route_locked",), ("truthy", ""),
+         "ไม่ตั้ง INTAKE_KEY = ปิด ห้ามใครยิงเคสปลอมเข้ามาได้"),
+    ])
+    _r159_map = []
+    for _tab, _keys in R159_TAB_ALIAS:
+        _pp = _r159_page(_keys[0])[0]
+        _r159_map.append(_keys[-1].upper() + "=" + (_pp[-4:] if _pp else "ไม่เจอ"))
+    print("[R159] แมปเพจ " + " ".join(_r159_map)
+          + " · INTAKE_KEY " + ("ตั้งแล้ว" if os.environ.get("INTAKE_KEY") else "ยังไม่ตั้ง (ปิด)"))
+    print("[R159] ทางเข้าเคสมือ /intake/manual · ข้อสอบ 5 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R159 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
