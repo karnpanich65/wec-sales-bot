@@ -12270,6 +12270,204 @@ try:
 except Exception as _e:
     print("[R157b EXAM ERROR] " + str(_e))
 
+
+# ---------- r158 (Gift 17 ต.ค. 69): แชทที่ "ปิดบอทถาวร" ยังต้องเก็บข้อมูล + แจกเคสอัตโนมัติ ----------
+# ปัญหาจริง (log 14–17 ต.ค.): การตลาดพิมพ์ "##" รับแชทไปคุยเอง -> state bot_off
+# ทางเดิม r64 = ไม่ตอบ ไม่แจก ไม่เก็บอะไรเลย -> ลูกค้าพิมพ์เบอร์/รายได้มาเป็นสิบเคสใน 3 วัน
+# (เช่น 0625762898 · 0828292654 · "รายได้45,000-55,000") แต่ไม่เข้าชีต ไม่ถึงเซล
+# ทีมเลยส่งต่อกันเองทางไลน์ รีพอร์ตมั่ว
+# Gift เคาะ: "ทำเลย" + แจก "อัตโนมัติ" ตามกฎเดิม (Apps Script P92)
+# กติกา:
+#   · บอทยังเงียบเหมือนเดิม 100% (ห้ามตอบลูกค้า)
+#   · ใช้ตัวเก็บข้อมูลเดียวกับตอนเซลรับช่วง (_handover_absorb ของ r49) ไม่เขียนตัวอ่านใหม่
+#   · ได้เบอร์ใหม่ = เขียนแถว (upsert ตาม PSID) -> Apps Script แจกเซลตามกฎ
+#   · แถวเดิมมีเบอร์อยู่แล้ว = แจกไปแล้ว ห้ามยิงซ้ำ (ยกเว้นได้ "รายได้" ใหม่ -> อัปเดตแถว ไม่นัดโทรซ้ำ)
+# ย้อนกลับ: ลบบล็อกนี้ทั้งก้อน (process กลับเป็น r156)
+_R158_BASE_PROCESS = CalmBotEngine.process
+R158_SIGNAL_CONTACT = ("📞 แชทนี้ทีมรับไปคุยเอง (ปิดบอท) แต่ลูกค้าให้เบอร์ภายหลัง "
+                       "— บอทเก็บให้และแจกเซลอัตโนมัติ (r158)")
+R158_SIGNAL_INCOME = "📝 ลูกค้าให้รายได้หลังปิดบอท — อัปเดตแถวให้ (r158)"
+
+
+_R158_LATE_TXT = {str(R154_LATEPHONE_M).strip(), str(R154_LATEPHONE_F).strip()}
+
+
+def _r158_staff_closed(state):
+    """ปิดโดยทีม (## / ประโยคปิด) ไม่ใช่ r144 ปิดเองตอนเคสจบ"""
+    _sig = " | ".join(str(x) for x in (state.get("signals") or []))
+    return "เซลสั่งปิด" in _sig
+
+
+def _r158_absorb_off(self, user_id, state, msg):
+    """แชท bot_off -> เก็บข้อมูลเงียบๆ คืน 'contact' | 'income' | 'partial' | ''"""
+    if not isinstance(state, dict) or not state.get("bot_off"):
+        return ""
+    d = state.setdefault("data", {})
+    if state.get("lead_sent") and d.get("contact"):
+        state["handover_lead_contact"] = True       # แจกไปแล้วตอนบอทยังคุย
+    had_contact = bool(d.get("contact"))
+    had_income = bool(d.get("income"))
+    try:
+        will = self._handover_absorb(user_id, state, msg, dispatch=False)
+    except Exception as _e:
+        print("[R158 ABSORB ERROR] " + str(_e))
+        return ""
+    kind = ""
+    if will and d.get("contact") and not had_contact:
+        kind = "contact"
+    elif will and not d.get("contact"):
+        kind = "partial"
+    elif (d.get("income") and not had_income and state.get("lead_sent")
+          and not state.get("r158_income_upd")):
+        kind = "income"
+    if not kind:
+        return ""
+    if kind == "contact":
+        # ลูกค้าให้เบอร์เอง = ยอมให้โทรแล้ว ล้างธงจากประโยคปิด
+        state["contact_refused"] = False
+        state["below_threshold"] = False
+        self._add_signal(state, R158_SIGNAL_CONTACT)
+    elif kind == "income":
+        state["r158_income_upd"] = True
+        self._add_signal(state, R158_SIGNAL_INCOME)
+    try:
+        g = self._finish(user_id, state, d.get("contact", ""),
+                         calendar=(kind == "contact"))
+    except Exception as _e:
+        print("[R158 FINISH ERROR] " + str(_e))
+        return ""
+    print("[R158] " + str(user_id)[:8] + "... แชทปิดบอท -> " + kind
+          + " · เกรด " + str(g) + " · เบอร์ " + ("มี" if d.get("contact") else "ยังไม่มี"))
+    return kind
+
+
+def _process_r158(self, user_message, user_id, referral=None,
+                  platform="facebook", page_id="", brand="",
+                  sheet_tab="", gender=""):
+    _skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+    _was_off, _staff_off = False, False
+    try:
+        _st0 = _lead_states.get(_skey) or {}
+        _was_off = bool(_st0.get("bot_off"))
+        _staff_off = _was_off and _r158_staff_closed(_st0)
+    except Exception:
+        pass
+    out = _R158_BASE_PROCESS(
+        self, user_message, user_id, referral=referral, platform=platform,
+        page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+    try:
+        reply = out[0] if isinstance(out, tuple) else out
+        # ทีมสั่งปิดบอท (## / ประโยคปิด) = ห้ามพูดเด็ดขาด
+        # บั๊กเดิม: r154 "ได้รับเบอร์แล้วครับ เดี๋ยวที่ปรึกษาโทรกลับ..." หลุดออกไปในแชทที่ปิดบอทแล้ว
+        _still_off = bool((_lead_states.get(_skey) or {}).get("bot_off"))
+        # ยังปิดอยู่หลังเทิร์นนี้ = ต้องเงียบ (r155 เปิดแชท N1 คืนเอง -> bot_off=False -> พูดได้)
+        if reply and _was_off and (_staff_off or _still_off
+                                   or str(reply).strip() in _R158_LATE_TXT):
+            print("[R158 MUTE] " + str(user_id)[:8] + "... แชทปิดบอท — กลืนข้อความ "
+                  + repr(str(reply)[:40]))
+            out = ("", out[1]) if isinstance(out, tuple) else ""
+            reply = ""
+        if not reply:
+            st = _lead_states.get(_skey)
+            if st and st.get("bot_off"):
+                _r158_absorb_off(self, user_id, st, user_message)
+    except Exception as _e:
+        print("[R158 ERROR] " + str(_e))
+    return out
+
+
+try:
+    CalmBotEngine.process = _process_r158
+    print("[R158] แชทปิดบอท (##) ยังเก็บเบอร์/รายได้ + แจกเคสอัตโนมัติ (บอทยังเงียบ)")
+except Exception as _e:
+    print("[R158 INSTALL ERROR] " + str(_e))
+
+
+def _r158_selftest(which):
+    sent = []
+    eng = CalmBotEngine()
+    eng._send_to_sheets = lambda *a, **k: sent.append(k)
+    eng._get_fb_name = lambda *a, **k: "ทดสอบ"
+
+    def _st(**kw):
+        s = {"bot_off": True, "handover": True, "closed": True, "done": True,
+             "soft_close": True, "contact_refused": True, "below_threshold": True,
+             "chat_name": "ทดสอบ", "signals": [], "asked": {},
+             "data": {"objective": "ปล่อยเช่า"}}
+        s.update(kw)
+        return s
+    try:
+        if which == "phone_after_kill":
+            s = _st(lead_sent=True)
+            k = _r158_absorb_off(eng, "__R158A__", s, "ติดต่อมาหน่อยนะคะ 0828292654")
+            return (k == "contact" and len(sent) == 1 and not sent[0].get("contact_refused")
+                    and sent[0].get("calendar") is True)
+        if which == "no_double_send":
+            s = _st(lead_sent=True)
+            s["data"]["contact"] = "0811111111"
+            k = _r158_absorb_off(eng, "__R158B__", s, "0822222222")
+            return k == "" and not sent
+        if which == "income_update_once":
+            s = _st(lead_sent=True)
+            s["data"]["contact"] = "0811111111"
+            k1 = _r158_absorb_off(eng, "__R158C__", s, "รายได้ 45,000 บาทค่ะ")
+            k2 = _r158_absorb_off(eng, "__R158C__", s, "เงินเดือน 50,000")
+            return (k1 == "income" and k2 == "" and len(sent) == 1
+                    and sent[0].get("calendar") is False)
+        if which == "not_bot_off":
+            s = _st(bot_off=False)
+            return _r158_absorb_off(eng, "__R158D__", s, "0828292654") == "" and not sent
+        if which == "chitchat_nothing":
+            s = _st(lead_sent=True)
+            return _r158_absorb_off(eng, "__R158E__", s, "ขอบคุณค่ะ") == "" and not sent
+        if which == "silent_via_process":
+            sk = "108248514185091:__R158F__"
+            _lead_states[sk] = _st(lead_sent=True, page_id="108248514185091",
+                                   last_seen=int(time.time()), psid="__R158F__")
+            out = eng.process("0638956077 เตอร์ครับ", "__R158F__",
+                              page_id="108248514185091")
+            st = _lead_states.pop(sk, {}) or {}
+            reply = out[0] if isinstance(out, tuple) else out
+            return (not reply) and len(sent) == 1 and (st.get("data") or {}).get("contact")
+        if which == "mute_staff_closed":
+            sk = "108248514185091:__R158G__"
+            s = _st(lead_sent=True, page_id="108248514185091",
+                    last_seen=int(time.time()), psid="__R158G__")
+            s["signals"] = ["🔇 เซลสั่งปิดบอทถาวรสำหรับแชทนี้ (ประโยคปิด)"]
+            _lead_states[sk] = s
+            out = eng.process("ติดต่อมาหน่อยนะคะ 0828292654", "__R158G__",
+                              page_id="108248514185091")
+            _lead_states.pop(sk, None)
+            reply = out[0] if isinstance(out, tuple) else out
+            return (not reply) and len(sent) == 1 and not sent[0].get("contact_refused")
+        return False
+    except Exception as _e:
+        print("[R158 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RY1", "แชทปิดบอท (r158)", "_r158_selftest", ("phone_after_kill",), ("truthy", ""),
+         "log 14 ต.ค. — ทีมพิมพ์ ## แล้วลูกค้าให้เบอร์ ต้องเข้าชีต + แจก + ล้างธงห้ามโทร"),
+        ("RY2", "แชทปิดบอท (r158)", "_r158_selftest", ("no_double_send",), ("truthy", ""),
+         "แถวเดิมมีเบอร์แล้ว = แจกไปแล้ว ห้ามยิงซ้ำ"),
+        ("RY3", "แชทปิดบอท (r158)", "_r158_selftest", ("income_update_once",), ("truthy", ""),
+         "ได้รายได้ใหม่ = อัปเดตแถว 1 ครั้ง ไม่นัดโทรซ้ำ"),
+        ("RY4", "แชทปิดบอท (r158)", "_r158_selftest", ("not_bot_off",), ("truthy", ""),
+         "แชทปกติไม่ผ่านทางนี้"),
+        ("RY5", "แชทปิดบอท (r158)", "_r158_selftest", ("chitchat_nothing",), ("truthy", ""),
+         "คุยเล่น/ขอบคุณ ไม่เขียนอะไร"),
+        ("RY6", "แชทปิดบอท (r158)", "_r158_selftest", ("silent_via_process",), ("truthy", ""),
+         "ผ่าน process จริง: บอทต้องเงียบ แต่เก็บเบอร์ + เขียนแถว"),
+        ("RY7", "แชทปิดบอท (r158)", "_r158_selftest", ("mute_staff_closed",), ("truthy", ""),
+         "บั๊กเดิม r154 ตอบ 'ได้รับเบอร์แล้ว' ในแชทที่ทีมสั่ง ## — ต้องเงียบ แต่ยังอัปเดตแถว"),
+    ])
+    print("[R158] ข้อสอบแชทปิดบอท 7 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R158 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
