@@ -12653,6 +12653,227 @@ except Exception as _e:
     print("[R159 EXAM ERROR] " + str(_e))
 
 
+
+# ---------- r160 (18 ต.ค. 69): ห้ามลีดหายเงียบเพราะ Apps Script ช้า + ลด log ขยะ ----------
+# log 17–18 ต.ค. (ตรวจตามคำสั่ง Gift "เชค log และพัฒนาเวอร์ชั่น"):
+#   ก) 09:36 ลูกค้า RS ให้เบอร์ระหว่างเซลดูแล -> [SHEETS ERROR] ครบ 2 รอบ
+#      แถว FB-RS-20261018-1888 เข้าชีตแต่ "ไม่ถูกแจก" และบอทไม่ลองใหม่เลย
+#      -> คิวลองใหม่เบื้องหลัง 1·3·10·30·60 นาที (upsert ตาม PSID = ยิงซ้ำปลอดภัย)
+#      -> เขียนสำเร็จทีหลังเมื่อไหร่ ล้างของค้างในคิวทิ้ง (กันข้อมูลเก่าทับใหม่)
+#   ข) [NAME ERROR] 246 บรรทัด/12 ชม. ทุกเพจ FB อ่านชื่อไม่ได้ (รอ App Review)
+#      -> พักการอ่านชื่อรายเพจ 1 ชม. หลังพลาด (IG ไม่โดน เพราะแยกตาม platform)
+#   ค) [LABEL] สร้างป้ายไม่ได้ RS ซ้ำทุกเคส -> พักเพจนั้น 6 ชม.
+# ย้อนกลับ: ลบบล็อกนี้ + bot_logic.SHEETS_RESULT_HOOK = None
+import threading as _th160
+_R160_Q = {}
+_R160_LOCK = _th160.Lock()
+_R160_BACKOFF = (60, 180, 600, 1800, 3600)
+_R160_STATS = {"queued": 0, "recovered": 0, "lost": 0, "last_lost": ""}
+
+
+def _r160_result(payload, ok):
+    psid = str((payload or {}).get("facebook_psid") or "")
+    if not psid:
+        return
+    with _R160_LOCK:
+        if ok:
+            if _R160_Q.pop(psid, None) is not None:
+                print("[SHEETS QUEUE] " + _mask(psid) + " เขียนสำเร็จทางปกติแล้ว — ล้างของค้างในคิว")
+            return
+        old = _R160_Q.get(psid)
+        _R160_Q[psid] = {"p": dict(payload), "n": 0,
+                         "at": time.time() + _R160_BACKOFF[0],
+                         "first": (old or {}).get("first") or time.time()}
+        _R160_STATS["queued"] += 1
+    print("[SHEETS QUEUE] " + _mask(psid) + " เขียนชีตไม่ผ่าน -> เข้าคิวลองใหม่ใน 1 นาที "
+          "(เกรด " + str(payload.get("grade") or "-") + " · เบอร์ "
+          + ("มี" if payload.get("contact") else "ไม่มี") + ")")
+
+
+def _r160_post(payload, timeout=30):
+    try:
+        r = requests.post(_bl9.APPS_SCRIPT_URL, json=payload, timeout=timeout)
+        return r.status_code < 500, str(r.status_code) + " " + r.text[:80]
+    except Exception as _e:
+        return False, str(_e)[:80]
+
+
+def _r160_tick(now=None, poster=None):
+    """ลองส่งของที่ถึงเวลา 1 รอบ · คืน (สำเร็จ, หาย)"""
+    now = now or time.time()
+    poster = poster or _r160_post
+    with _R160_LOCK:
+        due = [(k, v) for k, v in _R160_Q.items() if v["at"] <= now]
+    ok_n = lost_n = 0
+    for psid, e in due:
+        ok, info = poster(e["p"])
+        with _R160_LOCK:
+            cur = _R160_Q.get(psid)
+            if cur is not e:
+                continue                     # มีของใหม่กว่ามาแทนระหว่างยิง -> ไม่ยุ่ง
+            if ok:
+                _R160_Q.pop(psid, None)
+                _R160_STATS["recovered"] += 1
+                ok_n += 1
+                print("[SHEETS RECOVERED] " + _mask(psid) + " เขียนชีตสำเร็จ (ลองใหม่ครั้งที่ "
+                      + str(e["n"] + 1) + ") หลังพลาด " + str(int((now - e["first"]) / 60)) + " นาที")
+                continue
+            e["n"] += 1
+            if e["n"] >= len(_R160_BACKOFF):
+                _R160_Q.pop(psid, None)
+                _R160_STATS["lost"] += 1
+                _R160_STATS["last_lost"] = _mask(psid)
+                lost_n += 1
+            else:
+                e["at"] = now + _R160_BACKOFF[e["n"]]
+        if e["n"] >= len(_R160_BACKOFF) and not ok:
+            msg = ("🔴 ลีดเขียนลงชีตไม่ได้ ลองครบ 6 รอบ (~1.5 ชม.) " + _mask(psid)
+                   + " เกรด " + str(e["p"].get("grade") or "-") + " · เพจ "
+                   + str(e["p"].get("tab") or "-") + " — เช็ค Apps Script Lead Handler")
+            print("[SHEETS LOST] " + msg + " | " + info)
+            try:
+                _r157_alert(msg)
+            except Exception:
+                pass
+    return ok_n, lost_n
+
+
+def _r160_loop():
+    sec = int(os.environ.get("SHEETS_RETRY_SEC", "20") or 0)
+    if sec <= 0:
+        return
+    while True:
+        time.sleep(sec)
+        try:
+            _r160_tick()
+        except Exception as _e:
+            print("[SHEETS QUEUE ERROR] " + str(_e))
+
+
+try:
+    _bl9.SHEETS_RESULT_HOOK = _r160_result
+    if int(os.environ.get("SHEETS_RETRY_SEC", "20") or 0) > 0:
+        _th160.Thread(target=_r160_loop, daemon=True, name="wec-sheets-retry").start()
+    print("[R160] คิวลองใหม่แถวลีด (1·3·10·30·60 นาที) เปิดแล้ว")
+except Exception as _e:
+    print("[R160 INSTALL ERROR] " + str(_e))
+
+
+@app.route("/health/sheets")
+def r160_health_sheets():
+    with _R160_LOCK:
+        q = [{"psid": _mask(k), "tries": v["n"] + 1,
+              "waiting_min": int((time.time() - v["first"]) / 60)} for k, v in _R160_Q.items()]
+    return jsonify({"pending": q, **_R160_STATS})
+
+
+# ข) พักการอ่านชื่อรายเพจ
+_R160_NAME_COOL = {}
+_R160_BASE_NAME = CalmBotEngine._get_fb_name
+
+
+def _get_fb_name_r160(self, user_id, platform="facebook", page_id=""):
+    k = (str(platform), str(page_id))
+    if time.time() < _R160_NAME_COOL.get(k, 0):
+        return ""
+    nm = _R160_BASE_NAME(self, user_id, platform, page_id)
+    if nm:
+        _R160_NAME_COOL.pop(k, None)
+    else:
+        _R160_NAME_COOL[k] = time.time() + 3600
+        print("[NAME COOLDOWN] (" + k[0] + ") page=" + (k[1] or "-")
+              + " อ่านชื่อไม่ได้ — พัก 1 ชม. (ชื่อจะมาจากที่ลูกค้าพิมพ์เองแทน)")
+    return nm
+
+
+CalmBotEngine._get_fb_name = _get_fb_name_r160
+
+# ค) พักการสร้างป้ายรายเพจ
+_R160_LABEL_COOL = {}
+_R160_BASE_LABEL = _label_id_for_page
+
+
+def _label_id_for_page(page_id, token):   # noqa: F811
+    if time.time() < _R160_LABEL_COOL.get(str(page_id), 0):
+        return ""
+    lid = _R160_BASE_LABEL(page_id, token)
+    if not lid:
+        _R160_LABEL_COOL[str(page_id)] = time.time() + 6 * 3600
+        print("[LABEL COOLDOWN] page=" + str(page_id) + " ติดป้ายไม่ได้ — พัก 6 ชม.")
+    return lid
+
+
+def _r160_selftest(which):
+    try:
+        _R160_Q.clear()
+        p = {"facebook_psid": "__R160__", "grade": "C", "contact": "0949732584", "tab": "Leads_RealtySmart"}
+        if which == "fail_then_recover":
+            _r160_result(p, False)
+            t0 = time.time()
+            a = _r160_tick(now=t0 + 30, poster=lambda x: (True, "x"))      # ยังไม่ถึงเวลา
+            b = _r160_tick(now=t0 + 61, poster=lambda x: (True, "200"))
+            return a == (0, 0) and b == (1, 0) and not _R160_Q
+        if which == "gives_up_and_counts":
+            _r160_result(p, False)
+            lost0 = _R160_STATS["lost"]
+            t = time.time()
+            for _ in range(len(_R160_BACKOFF)):
+                t += 4000
+                _r160_tick(now=t, poster=lambda x: (False, "timeout"))
+            return not _R160_Q and _R160_STATS["lost"] == lost0 + 1
+        if which == "ok_clears_queue":
+            _r160_result(p, False)
+            _r160_result(p, True)          # เขียนทางปกติสำเร็จทีหลัง
+            return not _R160_Q
+        if which == "newer_replaces_older":
+            _r160_result(dict(p, grade="C"), False)
+            _r160_result(dict(p, grade="A"), False)
+            return len(_R160_Q) == 1 and _R160_Q["__R160__"]["p"]["grade"] == "A"
+        if which == "hook_wired":
+            return _bl9.SHEETS_RESULT_HOOK is _r160_result
+        if which == "name_cooldown":
+            _R160_NAME_COOL.clear()
+            eng = CalmBotEngine()
+            calls = []
+            global _R160_BASE_NAME
+            base = _R160_BASE_NAME
+            _R160_BASE_NAME = lambda self, u, pf, pg: calls.append(u) or ""
+            try:
+                eng._get_fb_name("a", "facebook", "P1")
+                eng._get_fb_name("b", "facebook", "P1")      # ต้องไม่ยิงซ้ำ
+                eng._get_fb_name("c", "instagram", "P1")     # IG แยกกัน ยิงได้
+            finally:
+                _R160_BASE_NAME = base
+                _R160_NAME_COOL.clear()
+            return calls == ["a", "c"]
+        return False
+    except Exception as _e:
+        print("[R160 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _R160_Q.pop("__R160__", None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RQ1", "ลีดไม่หาย (r160)", "_r160_selftest", ("fail_then_recover",), ("truthy", ""),
+         "log 18 ต.ค. — เขียนชีต timeout ต้องลองใหม่เองจนสำเร็จ"),
+        ("RQ2", "ลีดไม่หาย (r160)", "_r160_selftest", ("gives_up_and_counts",), ("truthy", ""),
+         "ลองครบแล้วไม่ได้ ต้องนับว่าหาย + แจ้งเตือน ไม่วนไม่จบ"),
+        ("RQ3", "ลีดไม่หาย (r160)", "_r160_selftest", ("ok_clears_queue",), ("truthy", ""),
+         "เขียนสำเร็จทางปกติทีหลัง ต้องล้างคิว (กันของเก่าทับใหม่)"),
+        ("RQ4", "ลีดไม่หาย (r160)", "_r160_selftest", ("newer_replaces_older",), ("truthy", ""),
+         "ลูกค้าคนเดียวพลาด 2 รอบ ต้องเหลือข้อมูลล่าสุดตัวเดียว"),
+        ("RQ5", "ลีดไม่หาย (r160)", "_r160_selftest", ("hook_wired",), ("truthy", ""),
+         "bot_logic ต้องส่งผลการเขียนชีตมาที่คิว"),
+        ("RQ6", "ลีดไม่หาย (r160)", "_r160_selftest", ("name_cooldown",), ("truthy", ""),
+         "อ่านชื่อไม่ได้ พักรายเพจ ไม่ยิงซ้ำทุกข้อความ (IG แยก)"),
+    ])
+    print("[R160] ข้อสอบ 6 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R160 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")

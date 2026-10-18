@@ -1285,6 +1285,19 @@ SESSION_LOAD_TIMEOUTS = (6.0, 9.0)
 # ปลอดภัยที่จะยิงซ้ำ เพราะ p4UpsertLead หาแถวตาม PSID (idempotent)
 SHEETS_POST_TIMEOUTS = (10.0, 20.0)
 
+# r160 (18 ต.ค. 2569) — ผลการเขียนแถวลีดทุกครั้งส่งต่อให้ main.py (คิวลองใหม่)
+# เคสจริง 18 ต.ค. 09:36: ลูกค้าให้เบอร์ระหว่างเซลดูแล -> SHEETS timeout ครบ 2 รอบ
+# -> แถวเข้าชีตแต่ไม่ถูกแจก และบอทไม่รู้ตัว ไม่ลองใหม่
+SHEETS_RESULT_HOOK = None      # main.py ตั้งเป็น fn(payload, ok)
+
+
+def _sheets_result(payload, ok):
+    try:
+        if SHEETS_RESULT_HOOK:
+            SHEETS_RESULT_HOOK(payload, ok)
+    except Exception as _e:
+        print(f"[SHEETS HOOK ERROR] {_e}")
+
 # กู้ประวัติไม่ได้ -> หยุดบอทส่งให้คนไหม
 # ค่าเริ่มต้น = ไม่หยุด (บทเรียน 19 ส.ค. 2026 บ่าย: ชีตพัง -> บอทเงียบทั้งระบบ)
 SESSION_FAIL_HANDOVER = os.environ.get("SESSION_FAIL_HANDOVER", "0") == "1"
@@ -5895,15 +5908,20 @@ class BotEngine:
         # และ PATCH ข้างบนการันตีแล้วว่ามี PSID เสมอ
         # เดิมยิงครั้งเดียว timeout=10 -> Apps Script ตัน = ลีดหายเงียบ
         for _try, _tmo in enumerate(SHEETS_POST_TIMEOUTS, start=1):
+            _last = _try == len(SHEETS_POST_TIMEOUTS)
             try:
                 resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=_tmo)
                 print(f"[SHEETS] {resp.status_code} {resp.text[:120]}")
+                if resp.status_code >= 500 and not _last:
+                    continue          # r160 — Apps Script ล่มชั่วคราว ลองอีกรอบ
+                _sheets_result(payload, resp.status_code < 500)
                 return
             except Exception as e:
-                _last = _try == len(SHEETS_POST_TIMEOUTS)
                 print(f"[SHEETS {'ERROR' if _last else 'RETRY'}] "
                       f"attempt {_try}/{len(SHEETS_POST_TIMEOUTS)} "
                       f"(timeout={_tmo}s): {e}")
+        # r160 — ครบทุกรอบแล้วยังไม่ผ่าน = ส่งต่อให้คิวลองใหม่เบื้องหลัง (ห้ามหายเงียบ)
+        _sheets_result(payload, False)
 
     # ==================================================================
     def _log(self, user_id: str, user_msg: str, reply: str):
