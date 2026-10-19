@@ -12874,6 +12874,447 @@ except Exception as _e:
     print("[R160 EXAM ERROR] " + str(_e))
 
 
+# ---------- r161 (19 ต.ค. 69): Chat_Log/สถานะแชทห้ามหายเงียบเมื่อ Apps Script ช้า ----------
+# log 18 ต.ค. (24 ชม.): [PERSIST ERROR] 81 (script.google.com 45 · googleusercontent 36) + [PERSIST] HTTP 404 ×12
+#   worker เดิม (bot_logic._persist_worker) ยิงครั้งเดียว timeout 15 วิ พลาด = ทิ้ง
+#   -> Chat_Log หาย เช่นเคส RS ที่ลูกค้าพิมพ์ "แย่มากคะ" 09:33–09:36 (BOT_GROWTH_LOG 18 ต.ค.)
+# แก้: คิว+worker ใหม่แทน bot_logic._enqueue (ไม่แตะไฟล์ bot_logic · payload หน้าตาเดิมทุกช่อง)
+#   1) timeout 15 -> 30 วิ (worker อยู่เบื้องหลัง ไม่ทำให้ตอบลูกค้าช้า)
+#   2) "ไม่ถึงแน่" (ต่อไม่ติด · timeout/404 ที่ script.google.com · 5xx · 429) -> ลองใหม่ 1·3·10·30 นาที
+#   3) timeout/404 ที่ googleusercontent = Apps Script ทำงานจบแล้ว แค่อ่านคำตอบไม่ทัน -> ไม่ยิงซ้ำ (กันแถวซ้ำ)
+#   4) ลองใหม่ใช้ "สถานะล่าสุด" ของแชทนั้น + แถว log ของรอบที่พลาด -> สถานะเก่าไม่ทับใหม่
+#      lead_partial (upsert) ที่มีรอบใหม่กว่าเขียนสำเร็จแล้ว = ทิ้งของเก่า
+#   ยิงลองใหม่ผ่านคิวเดียวกัน (worker ตัวเดียว) = ลำดับการเขียนไม่สลับกัน
+# ข้อจำกัด: แถวที่ลองใหม่สำเร็จจะต่อท้าย Chat_Log ตามเวลาที่เขียนได้ (ไม่แทรกกลับเวลาเดิม)
+# ย้อนกลับ: ลบบล็อกนี้ทั้งก้อน (bot_logic._enqueue + worker เดิมยังอยู่ครบ)
+import queue as _q161
+from urllib.parse import urlparse as _up161
+_R161_Q = _q161.Queue(maxsize=500)
+_R161_LOCK = _th160.Lock()
+_R161_BACKOFF = (60, 180, 600, 1800)
+_R161_TIMEOUT = 30
+_R161_LATEST = {}      # (action, psid) -> payload ล่าสุดที่เข้าคิว
+_R161_SEQ = {}         # (action, psid) -> เลขรอบล่าสุดที่เข้าคิว
+_R161_OKSEQ = {}       # (action, psid) -> เลขรอบล่าสุดที่เขียนสำเร็จ
+_R161_PEND = {}        # (action, psid) -> {"rows": [...], "n": ครั้ง, "at": เวลา, "first": เวลา}
+_R161_STATS = {"failed": 0, "no_retry": 0, "queued": 0, "recovered": 0, "lost": 0, "last_lost": ""}
+
+
+def _r161_key(p):
+    return (str(p.get("action") or ""), str(p.get("psid") or p.get("facebook_psid") or ""))
+
+
+def _r161_classify(resp=None, exc=None):
+    """คืน (สำเร็จ, ควรลองใหม่, ข้อความ)"""
+    if exc is not None:
+        s = str(exc)
+        if isinstance(exc, requests.exceptions.ReadTimeout) and "googleusercontent" in s:
+            return False, False, s[:110]
+        return False, True, s[:110]
+    code = getattr(resp, "status_code", 0)
+    if code == 200:
+        return True, False, "200"
+    host = _up161(str(getattr(resp, "url", "") or "")).hostname or ""
+    info = "HTTP " + str(code) + " " + host + " " + str(getattr(resp, "text", ""))[:60]
+    if "googleusercontent" in host:
+        return False, False, info
+    return False, (code >= 500 or code in (404, 408, 429)), info
+
+
+def _r161_post(payload):
+    try:
+        r = requests.post(_bl9.APPS_SCRIPT_URL, json=payload, timeout=_R161_TIMEOUT)
+        return _r161_classify(resp=r)
+    except Exception as _e:
+        return _r161_classify(exc=_e)
+
+
+def _r161_enqueue(payload):
+    if not (_bl9.FEATURE_PERSIST and _bl9.APPS_SCRIPT_URL):
+        return
+    k = _r161_key(payload)
+    with _R161_LOCK:
+        seq = _R161_SEQ.get(k, 0) + 1
+        _R161_SEQ[k] = seq
+        _R161_LATEST.pop(k, None)
+        _R161_LATEST[k] = payload
+        while len(_R161_LATEST) > 3000:
+            old = next(iter(_R161_LATEST))
+            _R161_LATEST.pop(old, None)
+            if old not in _R161_PEND:
+                _R161_SEQ.pop(old, None)
+                _R161_OKSEQ.pop(old, None)
+    try:
+        _R161_Q.put_nowait({"p": payload, "k": k, "seq": seq, "rows": None})
+    except _q161.Full:
+        print("[PERSIST] queue full — dropped")
+
+
+def _r161_process(it, poster=None):
+    ok, retry, info = (poster or _r161_post)(it["p"])
+    k, now = it["k"], time.time()
+    with _R161_LOCK:
+        if ok:
+            _R161_OKSEQ[k] = max(_R161_OKSEQ.get(k, 0), it["seq"])
+            e = _R161_PEND.get(k)
+            if e is not None:
+                if it["rows"] is not None:                 # รอบลองใหม่สำเร็จ
+                    e["rows"] = e["rows"][len(it["rows"]):]
+                    if e["rows"]:
+                        e["at"] = now + _R161_BACKOFF[0]   # มีแถวพลาดเพิ่มระหว่างรอ -> รอบถัดไป
+                    else:
+                        _R161_PEND.pop(k, None)
+                        _R161_STATS["recovered"] += 1
+                        print("[PERSIST RECOVERED] " + _mask(k[1]) + " " + k[0] + " เขียนสำเร็จ (ลองใหม่ครั้งที่ "
+                              + str(e["n"]) + ") หลังพลาด " + str(int((now - e["first"]) / 60)) + " นาที")
+                elif k[0] != "turn":                       # upsert รอบใหม่กว่าลงแล้ว ของเก่าไม่ต้องยิง
+                    _R161_PEND.pop(k, None)
+            return ok
+        _R161_STATS["failed"] += 1
+        if not retry:
+            _R161_STATS["no_retry"] += 1
+            print("[PERSIST ERROR] " + info + " -> Apps Script ทำงานจบแล้ว ไม่ยิงซ้ำ (กันแถวซ้ำ)")
+            return ok
+        if it["rows"] is not None:                         # รอบลองใหม่พลาดอีก
+            e = _R161_PEND.get(k)
+            if e is None:
+                return ok
+            if e["n"] >= len(_R161_BACKOFF):
+                _R161_PEND.pop(k, None)
+                _R161_STATS["lost"] += 1
+                _R161_STATS["last_lost"] = _mask(k[1])
+                print("[PERSIST LOST] " + _mask(k[1]) + " " + k[0] + " ลองครบ " + str(e["n"] + 1)
+                      + " รอบ (~45 นาที) ไม่สำเร็จ — แถว log หาย " + str(len(e["rows"])) + " แถว | " + info)
+            else:
+                e["at"] = now + _R161_BACKOFF[e["n"]]
+            return ok
+        if k[0] != "turn" and _R161_OKSEQ.get(k, 0) > it["seq"]:
+            return ok                                      # มีรอบใหม่กว่าเขียนสำเร็จแล้ว
+        if k not in _R161_PEND and len(_R161_PEND) >= 300:
+            _R161_STATS["lost"] += 1
+            print("[PERSIST LOST] คิวลองใหม่เต็ม 300 แชท — ทิ้ง " + _mask(k[1]))
+            return ok
+        e = _R161_PEND.setdefault(k, {"rows": [], "n": 0, "at": now + _R161_BACKOFF[0], "first": now})
+        e["rows"] = (e["rows"] + list(it["p"].get("log") or []))[-40:]
+        _R161_STATS["queued"] += 1
+    print("[PERSIST ERROR] " + info + " -> เข้าคิวลองใหม่ใน 1 นาที (" + k[0] + " " + _mask(k[1]) + ")")
+    return ok
+
+
+def _r161_tick(now=None, push=True):
+    """สร้างรอบลองใหม่ของที่ถึงเวลา · ใช้สถานะล่าสุด + แถว log ที่ค้าง"""
+    now = now or time.time()
+    out = []
+    with _R161_LOCK:
+        for k, e in list(_R161_PEND.items()):
+            if e["at"] > now:
+                continue
+            base = _R161_LATEST.get(k)
+            if base is None:
+                _R161_PEND.pop(k, None)
+                continue
+            p = dict(base)
+            rows = list(e["rows"])
+            if k[0] == "turn":
+                p["log"] = rows
+            e["n"] += 1
+            e["at"] = now + 10 ** 9                       # รอผลรอบนี้ก่อน
+            out.append({"p": p, "k": k, "seq": _R161_SEQ.get(k, 0), "rows": rows})
+    if push:
+        for it in out:
+            try:
+                _R161_Q.put_nowait(it)
+            except _q161.Full:
+                with _R161_LOCK:
+                    e = _R161_PEND.get(it["k"])
+                    if e:
+                        e["n"] -= 1
+                        e["at"] = now + 60
+    return out
+
+
+def _r161_worker():
+    while True:
+        it = _R161_Q.get()
+        try:
+            _r161_process(it)
+        except Exception as _e:
+            print("[PERSIST ERROR] worker " + str(_e)[:100])
+        finally:
+            _R161_Q.task_done()
+
+
+def _r161_loop():
+    sec = int(os.environ.get("PERSIST_RETRY_SEC", "20") or 0)
+    if sec <= 0:
+        return
+    while True:
+        time.sleep(sec)
+        try:
+            _r161_tick()
+        except Exception as _e:
+            print("[PERSIST QUEUE ERROR] " + str(_e)[:100])
+
+
+try:
+    _th160.Thread(target=_r161_worker, daemon=True, name="wec-persist-r161").start()
+    _th160.Thread(target=_r161_loop, daemon=True, name="wec-persist-retry").start()
+    _bl9._enqueue = _r161_enqueue
+    print("[R161] Chat_Log/สถานะแชท ลองใหม่เอง (1·3·10·30 นาที) · timeout 30 วิ · เปิดแล้ว")
+except Exception as _e:
+    print("[R161 INSTALL ERROR] " + str(_e))
+
+
+@app.route("/health/persist")
+def r161_health_persist():
+    with _R161_LOCK:
+        q = [{"psid": _mask(k[1]), "action": k[0], "rows": len(v["rows"]), "tries": v["n"],
+              "waiting_min": int((time.time() - v["first"]) / 60)} for k, v in _R161_PEND.items()]
+    return jsonify({"pending": q, "queue": _R161_Q.qsize(), **_R161_STATS})
+
+
+def _r161_selftest(which):
+    P = "__R161__"
+    try:
+        for d in (_R161_PEND, _R161_LATEST, _R161_SEQ, _R161_OKSEQ):
+            for k in [k for k in d if k[1] == P]:
+                d.pop(k, None)
+        F = lambda x: (False, True, "Read timed out script.google.com")
+        OK = lambda x: (True, False, "200")
+
+        def mk(action, st, log=None):
+            p = {"action": action, "psid": P, "state": {"awaiting": st}}
+            if action == "lead_partial":
+                p = {"action": action, "facebook_psid": P, "income": st}
+            if log is not None:
+                p["log"] = log
+            k = _r161_key(p)
+            _R161_SEQ[k] = _R161_SEQ.get(k, 0) + 1
+            _R161_LATEST.pop(k, None)
+            _R161_LATEST[k] = p
+            return {"p": p, "k": k, "seq": _R161_SEQ[k], "rows": None}
+        if which == "turn_timeout_recovers_latest":
+            # เคสจริง 18 ต.ค.: รอบ "แย่มากคะ" timeout แล้วลูกค้าพิมพ์ต่อ -> ต้องได้แถวเดิม + สถานะล่าสุด
+            a = mk("turn", "q2", [{"role": "user", "text": "แย่มากคะ"}])
+            _r161_process(a, F)
+            b = mk("turn", "q3", [{"role": "user", "text": "ต่อ"}])
+            _r161_process(b, OK)
+            t0 = time.time()
+            early = _r161_tick(now=t0 + 30, push=False)
+            due = _r161_tick(now=t0 + 61, push=False)
+            sent = []
+            _r161_process(due[0], lambda x: sent.append(x) or (True, False, "200"))
+            return (early == [] and len(due) == 1 and sent[0]["state"]["awaiting"] == "q3"
+                    and sent[0]["log"] == [{"role": "user", "text": "แย่มากคะ"}]
+                    and ("turn", P) not in _R161_PEND)
+        if which == "usercontent_timeout_no_dup":
+            a = mk("turn", "q1", [{"role": "user", "text": "x"}])
+            _r161_process(a, lambda x: (False, False, "googleusercontent"))
+            return ("turn", P) not in _R161_PEND
+        if which == "partial_superseded":
+            a = mk("lead_partial", "15000")
+            _r161_process(a, F)
+            b = mk("lead_partial", "25000")
+            _r161_process(b, OK)
+            return ("lead_partial", P) not in _R161_PEND
+        if which == "gives_up_counts":
+            lost0 = _R161_STATS["lost"]
+            _r161_process(mk("turn", "q1", [{"role": "user", "text": "x"}]), F)
+            t = time.time()
+            for _ in range(len(_R161_BACKOFF) + 1):
+                t += 4000
+                for it in _r161_tick(now=t, push=False):
+                    _r161_process(it, F)
+            return ("turn", P) not in _R161_PEND and _R161_STATS["lost"] == lost0 + 1
+        if which == "classify":
+            class R:
+                def __init__(s, c, u):
+                    s.status_code, s.url, s.text = c, u, ""
+            RT = requests.exceptions.ReadTimeout
+            c = [_r161_classify(exc=requests.exceptions.ConnectTimeout("x"))[1],
+                 _r161_classify(exc=RT("HTTPSConnectionPool(host='script.googleusercontent.com')"))[1],
+                 _r161_classify(exc=RT("HTTPSConnectionPool(host='script.google.com')"))[1],
+                 _r161_classify(resp=R(404, "https://script.google.com/macros/s/x/exec"))[1],
+                 _r161_classify(resp=R(404, "https://script.googleusercontent.com/macros/echo"))[1],
+                 _r161_classify(resp=R(503, "https://script.google.com/x"))[1],
+                 _r161_classify(resp=R(200, "https://script.googleusercontent.com/x"))[0]]
+            return c == [True, False, True, True, False, True, True]
+        if which == "hook_wired":
+            return _bl9._enqueue is _r161_enqueue and _R161_TIMEOUT >= 30
+        return False
+    except Exception as _e:
+        print("[R161 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        for d in (_R161_PEND, _R161_LATEST, _R161_SEQ, _R161_OKSEQ):
+            for k in [k for k in d if k[1] == P]:
+                d.pop(k, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RP1", "Chat_Log ไม่หาย (r161)", "_r161_selftest", ("turn_timeout_recovers_latest",), ("truthy", ""),
+         "log 18 ต.ค. — PERSIST timeout ต้องลองใหม่ได้แถวเดิม + สถานะล่าสุด (เก่าไม่ทับใหม่)"),
+        ("RP2", "Chat_Log ไม่หาย (r161)", "_r161_selftest", ("usercontent_timeout_no_dup",), ("truthy", ""),
+         "timeout ที่ googleusercontent = เขียนแล้ว ห้ามยิงซ้ำ (กันแถวซ้ำ)"),
+        ("RP3", "Chat_Log ไม่หาย (r161)", "_r161_selftest", ("partial_superseded",), ("truthy", ""),
+         "lead_partial รอบใหม่ลงแล้ว ต้องทิ้งรอบเก่าที่พลาด"),
+        ("RP4", "Chat_Log ไม่หาย (r161)", "_r161_selftest", ("gives_up_counts",), ("truthy", ""),
+         "ลองครบแล้วไม่ได้ ต้องนับว่าหาย ไม่วนไม่จบ"),
+        ("RP5", "Chat_Log ไม่หาย (r161)", "_r161_selftest", ("classify",), ("truthy", ""),
+         "แยก ไม่ถึงแน่ (ลองใหม่) กับ ถึงแล้วแต่อ่านคำตอบไม่ทัน (ไม่ยิงซ้ำ)"),
+        ("RP6", "Chat_Log ไม่หาย (r161)", "_r161_selftest", ("hook_wired",), ("truthy", ""),
+         "bot_logic ต้องเขียนผ่านคิวใหม่ + timeout 30 วิ"),
+    ])
+    print("[R161] ข้อสอบ 6 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R161 EXAM ERROR] " + str(_e))
+
+
+
+# ---------- r162 (19 ต.ค. 69): ข้อความเดียวมีทั้งรายได้และหนี้ -> แยกให้ถูกช่อง ----------
+# เคสจริง 18 ต.ค. 10:36 (MKT แจ้ง "Ai คำนวณรายได้และหนี้ผิด" · Gift: ร้ายแรง)
+#   ลูกค้ารับราชการพิมพ์ "งด. ประมาณ47000 เงิน ประจำตำแหน่ง 10000 หนี้ 11300/ด"
+#   บอทอ่าน: รายได้ 47,000 · ผ่อน 68,300 (= บวกทุกตัวเลขรวมเงินเดือนเข้าไปในหนี้)
+#   -> บอกลูกค้าว่า "ภาระกินวงเงินจนแทบไม่เหลือ ต้องมีผู้กู้ร่วม" -> ลูกค้าตอบ "ไม่เป็นไรค่ะ" เคสดีหลุด
+# ต้นเหตุ: _parse_debt_monthly ไม่รู้จัก "/ด" และรวมตัวเลขทุกตัวในข้อความ
+#          _parse_income หยิบตัวเลขตัวแรก ("ผ่อนบ้าน12000 รายได้ 44000" -> 12,000)
+# แก้: เฉพาะข้อความที่มี "คำบอกรายได้" และ "คำบอกหนี้" อยู่ด้วยกัน -> ตัดเป็นท่อนตามคำบอก
+#   ท่อนหนี้ไปตัวอ่านหนี้ · ท่อนรายได้ไปตัวอ่านรายได้ · ท่อนอายุ/ราคา/ยอดคงเหลือไม่นับ
+#   รายได้ = เงินเดือน + เงินประจำตำแหน่ง (ถ้าบอกแยก) · มีคำว่า "รวม" ใช้ยอดรวม
+#   "/ด" "ต่อด." "ผ่อนต่อเดือน 5,000" = ค่างวดต่อเดือน
+# ข้อความที่มีแค่อย่างเดียว -> ทางเดิมทุกประการ (ไม่เปลี่ยนเกณฑ์เกรด)
+# ย้อนกลับ: ลบบล็อกนี้ (คืน _parse_income/_parse_debt_monthly ตัวเดิม)
+_R162_LBL = [
+    # (คำ, ชนิด) — ยาวก่อนสั้น กันคำซ้อน
+    ("เงินประจำตำแหน่ง", "allow"), ("ประจำตำแหน่ง", "allow"), ("ค่าตำแหน่ง", "allow"),
+    ("ฐานเงินเดือน", "inc"), ("เงินเดือน", "inc"), ("รายได้รวม", "total"), ("รับรวม", "total"),
+    ("รายได้", "inc"), ("รายรับ", "inc"), ("งด.", "inc"), ("งด ", "inc"), ("ฐาน", "inc"),
+    ("ยอดหนี้", "skip"), ("ยอดคงเหลือ", "skip"), ("คงเหลือ", "skip"), ("อายุ", "skip"),
+    ("ราคา", "skip"), ("วงเงิน", "skip"), ("งบ", "skip"),
+    ("ค่างวด", "debt"), ("ผ่อน", "debt"), ("หนี้", "debt"), ("ภาระ", "debt"),
+    ("บัตรเครดิต", "debt"), ("สินเชื่อ", "debt"),
+]
+_R162_RE = re.compile("|".join(re.escape(w) for w, _ in sorted(_R162_LBL, key=lambda x: -len(x[0]))))
+_R162_KIND = dict(_R162_LBL)
+
+
+def _r162_norm(msg):
+    t = str(msg or "")
+    t = re.sub(r"/\s*ด\.?(?![ก-๙])", "/เดือน", t)
+    t = re.sub(r"ต่อ\s*ด\.(?![ก-๙])", "/เดือน", t)
+    t = re.sub(r"(?:ต่อ|/)\s*เดือน\s*(?:ละ)?\s*(\d[\d,]*)", r"เดือนละ \1", t)
+    return t
+
+
+def _r162_split(msg):
+    """คืน list[(ชนิด, ท่อนข้อความ)] หรือ None ถ้าไม่ใช่ข้อความผสม"""
+    t = _r162_norm(msg)
+    hits = list(_R162_RE.finditer(t))
+    kinds = {_R162_KIND[h.group(0)] for h in hits}
+    if not (kinds & {"inc", "allow", "total"}) or "debt" not in kinds:
+        return None
+    out = []
+    for i, h in enumerate(hits):
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(t)
+        out.append((_R162_KIND[h.group(0)], t[h.start():end]))
+    return out
+
+
+_R162_BASE_INC = _bl9._parse_income
+_R162_BASE_DEBT = _bl9._parse_debt_monthly
+
+
+def _r162_parse_income(msg):
+    parts = _r162_split(msg)
+    if not parts:
+        return _R162_BASE_INC(msg)
+    tot = [x for k, x in parts if k == "total"]
+    if tot:
+        v = _R162_BASE_INC(" ".join(tot))
+        if v:
+            return v
+    inc = [x for k, x in parts if k == "inc"]
+    allow = [x for k, x in parts if k == "allow"]
+    base = _R162_BASE_INC(" ".join(inc)) if inc else None
+    add = 0
+    for a in allow:
+        n = _bl9._all_amounts(a)
+        if n and n[0] <= 100_000:
+            add += n[0]
+    if base:
+        return base + add
+    return add or None
+
+
+def _r162_parse_debt(msg):
+    parts = _r162_split(msg)
+    if not parts:
+        t = _r162_norm(msg)
+        return _R162_BASE_DEBT(t if t != str(msg or "") else msg)
+    debt = [x for k, x in parts if k == "debt"]
+    if not debt:
+        return _R162_BASE_DEBT(msg)
+    return _R162_BASE_DEBT(" ".join(debt))
+
+
+try:
+    _bl9._parse_income = _r162_parse_income
+    _bl9._parse_debt_monthly = _r162_parse_debt
+    print("[R162] ข้อความเดียวมีรายได้+หนี้ -> แยกท่อน (หนี้ไม่บวกเงินเดือน · /ด = ต่อเดือน)")
+except Exception as _e:
+    print("[R162 INSTALL ERROR] " + str(_e))
+
+
+def _r162_selftest(which):
+    cases = {
+        # (ข้อความจริง, รายได้ที่ต้องได้, ผ่อน/เดือนที่ต้องได้)
+        "walaiporn": ("งด. ประมาณ47000 เงิน ประจำตำแหน่ง 10000 หนี้ 11300/ด", 57000, 11300),
+        "two_loans": ("เงินเดือน 30,000 ผ่อนรถ 8,000 ผ่อนบ้าน 12,000", 30000, 20000),
+        "debt_first": ("ผ่อนบ้าน12000 รายได้ 44000", 44000, 12000),
+        "card_slash_d": ("เงินเดือน 50,000 หนี้บัตร 3,000/ด", 50000, 3000),
+        "balance_and_monthly": ("รายได้ 25,000 บาท\nภาระ 200,000 ผ่อนต่อเดือน 5,000", 25000, 5000),
+        "range_age": ("รายได้45,000-55,000\nผ่อนอยู่30,000\nอายุ29", None, 30000),
+    }
+    try:
+        if which == "single_kind_unchanged":
+            return (_bl9._parse_debt_monthly("ผ่อนรถ 8,500 บาท") == _R162_BASE_DEBT("ผ่อนรถ 8,500 บาท")
+                    and _bl9._parse_income("เงินเดือน 35,000") == _R162_BASE_INC("เงินเดือน 35,000"))
+        if which == "slash_d_alone":
+            return _bl9._parse_debt_monthly("หนี้ 11300/ด") == 11300
+        msg, inc, debt = cases[which]
+        gi, gd = _bl9._parse_income(msg), _bl9._parse_debt_monthly(msg)
+        ok_inc = (inc is None and gi and gi >= 45000) or gi == inc
+        return bool(ok_inc) and gd == debt
+    except Exception as _e:
+        print("[R162 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RI1", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("walaiporn",), ("truthy", ""),
+         "เคสจริง 18 ต.ค. ข้าราชการ: งด.47000+ประจำตำแหน่ง10000 หนี้11300/ด -> รายได้ 57,000 ผ่อน 11,300 (เดิม 68,300)"),
+        ("RI2", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("two_loans",), ("truthy", ""),
+         "เงินเดือน + ผ่อน 2 ก้อน -> หนี้ = ผลรวมเฉพาะก้อนผ่อน"),
+        ("RI3", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("debt_first",), ("truthy", ""),
+         "LL-036: ผ่อนบ้าน12000 รายได้ 44000 -> รายได้ 44,000 (เดิม 12,000)"),
+        ("RI4", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("card_slash_d",), ("truthy", ""),
+         "/ด = ต่อเดือน · เงินเดือนไม่ปนเข้าหนี้"),
+        ("RI5", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("balance_and_monthly",), ("truthy", ""),
+         "log 15 ต.ค.: ภาระ 200,000 (ยอดรวม) ผ่อนต่อเดือน 5,000 -> ผ่อน 5,000"),
+        ("RI6", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("range_age",), ("truthy", ""),
+         "log 15 ต.ค.: ช่วงรายได้ + ผ่อน + อายุ ในข้อความเดียว -> ผ่อน 30,000 ไม่บวกอายุ/รายได้"),
+        ("RI7", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("single_kind_unchanged",), ("truthy", ""),
+         "ข้อความที่มีอย่างเดียว ต้องได้ผลเหมือนเดิมทุกประการ"),
+        ("RI8", "อ่านรายได้/หนี้ (r162)", "_r162_selftest", ("slash_d_alone",), ("truthy", ""),
+         "หนี้ 11300/ด -> 11,300"),
+    ])
+    print("[R162] ข้อสอบ 8 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R162 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
