@@ -13315,6 +13315,263 @@ except Exception as _e:
     print("[R162 EXAM ERROR] " + str(_e))
 
 
+
+# ---------- r163 (19 ต.ค. 69): ก่อนบอกลูกค้าว่า "ภาระสูง/ต้องมีผู้กู้ร่วม" ต้องทวนตัวเลขก่อน ----------
+# Gift: "อ่านไม่ออกเหรอ ทำไงให้อ่านออก หรือถามทวน"
+# เคสจริง 18 ต.ค.: บอทอ่านผิด (ผ่อน 68,300 แทน 11,300) แล้วพูดปิดประตูทันที ลูกค้าไม่มีโอกาสแก้
+# กติกา: ตอนบอท "เพิ่งตัดสิน" ว่าภาระกินวงเงิน (high_burden) หรือรายได้ไม่ถึง (low_income)
+#        จากข้อความที่มีตัวเลขมากกว่า 1 ตัว -> พักข้อความตัดสินไว้ ถามทวนตัวเลขก่อน 1 รอบ
+#   ลูกค้า "ใช่" -> ส่งข้อความเดิมที่พักไว้ (ทางเดิมทุกอย่าง)
+#   ลูกค้าพิมพ์ตัวเลขใหม่ -> อ่านใหม่ (ตัวอ่าน r162) คิดใหม่ ถ้าไม่ติดแล้ว = คุยต่อปกติ ไม่พูดเรื่องผู้กู้ร่วม
+#   ลูกค้าพูดเรื่องอื่น -> ปล่อยให้ทางเดิมทำงาน
+# ทวนได้ครั้งเดียวต่อแชท (กันวน) · ไม่ใช้ในแชทที่ปิดบอท/เซลดูแล
+# ย้อนกลับ: ลบบล็อกนี้
+R163_ASK_M = ("ขอทวนตัวเลขให้ถูกก่อนนะครับ รายได้ต่อเดือนประมาณ {inc} บาท{debt} ตรงไหมครับ "
+              "ถ้าไม่ตรง พิมพ์ตัวเลขที่ถูกมาได้เลยครับ")
+R163_ASK_F = ("ขอทวนตัวเลขให้ถูกก่อนนะคะ รายได้ต่อเดือนประมาณ {inc} บาท{debt} ตรงไหมคะ "
+              "ถ้าไม่ตรง พิมพ์ตัวเลขที่ถูกมาได้เลยค่ะ")
+R163_DEBT_M = " ผ่อนอยู่เดือนละ {debt} บาท"
+R163_REASK_M = "รบกวนพิมพ์รายได้ต่อเดือน กับยอดผ่อนต่อเดือนที่ถูกมาได้เลยครับ เช่น เงินเดือน 30,000 ผ่อน 5,000"
+R163_REASK_F = "รบกวนพิมพ์รายได้ต่อเดือน กับยอดผ่อนต่อเดือนที่ถูกมาได้เลยค่ะ เช่น เงินเดือน 30,000 ผ่อน 5,000"
+R163_THANKS_M = "ขอบคุณที่แก้ให้นะครับ"
+R163_THANKS_F = "ขอบคุณที่แก้ให้นะคะ"
+_R163_YES = ("ใช่", "ถูก", "ตรง", "ครับผม", "โอเค", "ok", "yes", "แม่น")
+_R163_NO = ("ไม่ใช่", "ไม่ถูก", "ไม่ตรง", "ผิด")
+_R163_BASE_PROCESS = CalmBotEngine.process
+
+
+def _r163_inc_of(d):
+    v = d.get("income_baht")
+    if not v:
+        v = _bl9._parse_income(str(d.get("income") or ""))
+    return int(v or 0)
+
+
+def _r163_debt_of(d):
+    v = d.get("debt_baht")
+    if v is None and d.get("debt"):
+        v = _bl9._parse_debt_monthly(str(d.get("debt") or ""))
+    return int(v or 0)
+
+
+def _r163_ask(st, female):
+    d = st.get("data") or {}
+    inc, debt = _r163_inc_of(d), _r163_debt_of(d)
+    dtxt = ""
+    if debt > 0:
+        dtxt = R163_DEBT_M.format(debt=f"{debt:,}")
+    t = (R163_ASK_F if female else R163_ASK_M).format(inc=f"{inc:,}" if inc else "-", debt=dtxt)
+    return t
+
+
+def _r163_apply_fix(eng, st, msg):
+    """ลูกค้าแก้ตัวเลข -> อ่านใหม่ คืน True ถ้าอ่านได้อย่างน้อย 1 ตัว"""
+    d = st.setdefault("data", {})
+    parts = _r162_split(msg)
+    has_inc = bool(re.search(r"เงินเดือน|งด|รายได้|รายรับ|ฐาน|ตำแหน่ง", msg))
+    has_debt = bool(re.search(r"ผ่อน|หนี้|ภาระ|ค่างวด|บัตร", msg))
+    nums = _bl9._all_amounts(msg)
+    if not nums:
+        return False
+    inc2 = debt2 = None
+    if parts or (has_inc and has_debt):
+        inc2, debt2 = _bl9._parse_income(msg), _bl9._parse_debt_monthly(msg)
+    elif has_debt:
+        debt2 = _bl9._parse_debt_monthly(msg)
+    elif has_inc:
+        inc2 = _bl9._parse_income(msg)
+    elif len(nums) == 1:
+        # ตัวเลขลอยๆ ตัวเดียว: ตัดสินเพราะภาระ = แก้ยอดผ่อน · ตัดสินเพราะรายได้ = แก้รายได้
+        if d.get("high_burden"):
+            debt2 = nums[0]
+        else:
+            inc2 = nums[0]
+    else:
+        inc2, debt2 = max(nums), min(nums)
+    if inc2:
+        d["income"] = msg[:200]
+        d["income_baht"] = int(inc2)
+        d.pop("low_income", None)
+        d.pop("income_unbankable", None)
+        if int(inc2) < _bl9.LOW_INCOME_BAHT:
+            d["low_income"] = True
+    if debt2 is not None:
+        d["debt"] = msg[:200]
+        d["debt_baht"] = int(debt2)
+    if inc2 is None and debt2 is None:
+        return False
+    d.pop("high_burden", None)
+    try:
+        eng._flag_high_burden(d, st)
+    except Exception as _e:
+        print("[R163 FLAG ERROR] " + str(_e))
+    eng._add_signal(st, "✏️ ลูกค้าแก้ตัวเลขหลังบอททวน: รายได้ "
+                    + (f"{_r163_inc_of(d):,}") + " · ผ่อน " + (f"{_r163_debt_of(d):,}") + " (r163)")
+    return True
+
+
+def _process_r163(self, user_message, user_id, referral=None,
+                  platform="facebook", page_id="", brand="",
+                  sheet_tab="", gender=""):
+    _skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+    female = str(gender or "").lower().startswith("f")
+    st0 = _lead_states.get(_skey)
+    kw = dict(referral=referral, platform=platform, page_id=page_id,
+              brand=brand, sheet_tab=sheet_tab, gender=gender)
+    # ---- รอบที่ลูกค้าตอบคำถามทวน ----
+    try:
+        if st0 and st0.get("r163_pending") and not st0.get("bot_off") and not st0.get("handover"):
+            held = st0.pop("r163_pending")
+            msg = str(user_message or "").strip()
+            low = msg.lower().replace(" ", "")
+            nums = _bl9._all_amounts(msg)
+            is_no = any(w in low for w in _R163_NO)
+            is_yes = (not is_no) and not nums and any(w in low for w in _R163_YES)
+            if not is_no and not nums and len(low) <= 6 and low in ("ค่ะ", "คะ", "ครับ", "จ้า", "จ้ะ", "ค่า"):
+                is_yes = True
+            if is_yes:
+                print("[R163] " + _mask(user_id) + " ลูกค้ายืนยันตัวเลข -> ส่งข้อความที่พักไว้")
+                st0["last_seen"] = int(time.time())
+                return held.get("reply", ""), held.get("grade")
+            if nums and _r163_apply_fix(self, st0, msg):
+                d = st0.get("data") or {}
+                still = d.get("high_burden") or d.get("low_income")
+                print("[R163] " + _mask(user_id) + " ลูกค้าแก้ตัวเลข -> รายได้ "
+                      + str(_r163_inc_of(d)) + " ผ่อน " + str(_r163_debt_of(d))
+                      + (" ยังติดเกณฑ์ -> ส่งข้อความเดิม" if still else " ไม่ติดแล้ว -> คุยต่อปกติ"))
+                if still:
+                    return held.get("reply", ""), held.get("grade")
+                # ไม่ติดแล้ว: ล้างคำถามผู้กู้ร่วมที่ค้าง แล้วให้ทางเดิมถามข้อถัดไป
+                if st0.get("awaiting") in ("co_borrower", "co_income", "co_debt", "co_self_emp"):
+                    st0["awaiting"] = None
+                out = _R163_BASE_PROCESS(self, "ค่ะ" if female else "ครับ", user_id, **kw)
+                reply = out[0] if isinstance(out, tuple) else out
+                thanks = R163_THANKS_F if female else R163_THANKS_M
+                _bs = [b for b in str(reply or "").split(_bl9.MSG_SPLIT) if b.strip()]
+                if _bs and _bs[0].strip().startswith("รับทราบ"):
+                    _bs = _bs[1:]                    # กันพูดรับคำซ้ำ 2 บับเบิล
+                reply = _bl9.MSG_SPLIT.join([thanks] + _bs)
+                return (reply, out[1]) if isinstance(out, tuple) else reply
+            if is_no:
+                st0["r163_pending"] = held          # ถามอีกรอบให้พิมพ์ตัวเลข
+                return (R163_REASK_F if female else R163_REASK_M), None
+            # พูดเรื่องอื่น -> ทางเดิม
+    except Exception as _e:
+        print("[R163 ANSWER ERROR] " + str(_e))
+    # ---- รอบปกติ: ดูว่าเพิ่งตัดสินปิดประตูไหม ----
+    before = {}
+    try:
+        if st0:
+            d0 = st0.get("data") or {}
+            before = {"hb": bool(d0.get("high_burden")), "li": bool(d0.get("low_income"))}
+    except Exception:
+        pass
+    out = _R163_BASE_PROCESS(self, user_message, user_id, **kw)
+    try:
+        reply = out[0] if isinstance(out, tuple) else out
+        st = _lead_states.get(_skey)
+        if not (reply and st) or st.get("r163_asked") or st.get("bot_off") or st.get("handover"):
+            return out
+        d = st.get("data") or {}
+        new_hb = d.get("high_burden") and not before.get("hb")
+        new_li = (d.get("low_income") and not before.get("li")
+                  and not d.get("income_unbankable"))
+        if not (new_hb or new_li):
+            return out
+        if len(_bl9._all_amounts(user_message)) < 2 and not new_hb:
+            return out                      # รายได้ต่ำจากตัวเลขตัวเดียวชัดๆ = ทางเดิม
+        if not _r163_inc_of(d):
+            return out
+        st["r163_asked"] = True
+        st["r163_pending"] = {"reply": reply, "grade": out[1] if isinstance(out, tuple) else None}
+        ask = _r163_ask(st, female)
+        print("[R163] " + _mask(user_id) + " จะบอก" + ("ภาระสูง" if new_hb else "รายได้ไม่ถึง")
+              + " -> ทวนตัวเลขก่อน: " + ask[:80])
+        return (ask, None) if isinstance(out, tuple) else ask
+    except Exception as _e:
+        print("[R163 ERROR] " + str(_e))
+        return out
+
+
+try:
+    CalmBotEngine.process = _process_r163
+    print("[R163] ทวนตัวเลขก่อนบอก ภาระสูง/รายได้ไม่ถึง (ครั้งเดียวต่อแชท)")
+except Exception as _e:
+    print("[R163 INSTALL ERROR] " + str(_e))
+
+
+def _r163_selftest(which):
+    eng = CalmBotEngine()
+    eng._send_to_sheets = lambda *a, **k: None
+    eng._get_fb_name = lambda *a, **k: ""
+    P = "102444118935634"
+    U = "__R163_" + which + "__"
+    sk = P + ":" + U
+
+    def fresh():
+        _lead_states[sk] = {"data": {"objective": "ปล่อยเช่า"}, "signals": [], "asked": {},
+                            "awaiting": "income", "page_id": P, "chat_name": "t",
+                            "last_seen": int(time.time()), "psid": U}
+
+    def say(t):
+        out = eng.process(t, U, page_id=P)
+        return str(out[0] if isinstance(out, tuple) else out)
+    try:
+        fresh()
+        if which == "asks_before_verdict":
+            say("เงินเดือน 30,000")
+            r = say("ผ่อนรถ 15,000 บ้าน 10,000")
+            return "ขอทวนตัวเลข" in r and "ผู้กู้ร่วม" not in r and "30,000" in r and "25,000" in r
+        if which == "yes_gives_held":
+            say("เงินเดือน 30,000")
+            say("ผ่อนรถ 15,000 บ้าน 10,000")
+            r = say("ใช่ค่ะ")
+            st = _lead_states.get(sk) or {}
+            return "ขอทวน" not in r and bool(r) and not st.get("r163_pending")
+        if which == "fix_clears_verdict":
+            say("เงินเดือน 30,000")
+            say("ผ่อนรถ 15,000 บ้าน 10,000")
+            r = say("ผิดค่ะ ผ่อนแค่ 5,000")
+            d = (_lead_states.get(sk) or {}).get("data") or {}
+            verdict = ("ยื่นกู้คนเดียวมักยังไม่พอ", "กินวงเงิน", "แทบไม่เหลือ", "ขอทวน")
+            return (not any(v in r for v in verdict) and d.get("debt_baht") == 5000
+                    and not d.get("high_burden") and r.startswith("ขอบคุณที่แก้ให้")
+                    and "รับทราบ" not in r[:40])
+        if which == "only_once":
+            say("เงินเดือน 30,000")
+            say("ผ่อนรถ 15,000 บ้าน 10,000")
+            say("ใช่ครับ")
+            st = _lead_states.get(sk) or {}
+            return st.get("r163_asked") and not st.get("r163_pending")
+        if which == "plain_low_income_unchanged":
+            r = say("เงินเดือน 15000")
+            return "ขอทวน" not in r
+        return False
+    except Exception as _e:
+        print("[R163 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _lead_states.pop(sk, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RT1", "ทวนตัวเลข (r163)", "_r163_selftest", ("asks_before_verdict",), ("truthy", ""),
+         "Gift 19 ต.ค. — จะบอกภาระสูง ต้องทวนรายได้+ผ่อนก่อน ยังไม่พูดเรื่องผู้กู้ร่วม"),
+        ("RT2", "ทวนตัวเลข (r163)", "_r163_selftest", ("yes_gives_held",), ("truthy", ""),
+         "ลูกค้าตอบใช่ -> ส่งข้อความเดิมที่พักไว้"),
+        ("RT3", "ทวนตัวเลข (r163)", "_r163_selftest", ("fix_clears_verdict",), ("truthy", ""),
+         "ลูกค้าแก้ผ่อนเหลือ 5,000 -> ไม่ติดภาระแล้ว ไม่พูดเรื่องผู้กู้ร่วม"),
+        ("RT4", "ทวนตัวเลข (r163)", "_r163_selftest", ("only_once",), ("truthy", ""),
+         "ทวนครั้งเดียวต่อแชท ไม่วน"),
+        ("RT5", "ทวนตัวเลข (r163)", "_r163_selftest", ("plain_low_income_unchanged",), ("truthy", ""),
+         "รายได้ต่ำจากตัวเลขตัวเดียวชัดๆ ไม่ต้องทวน (ทางเดิม)"),
+    ])
+    print("[R163] ข้อสอบ 5 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R163 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
