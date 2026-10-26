@@ -13572,6 +13572,284 @@ except Exception as _e:
     print("[R163 EXAM ERROR] " + str(_e))
 
 
+# ---------- r166 (26 ต.ค. 69 · Gift สั่ง): ขอ "ชื่อ + เบอร์" ในคำถามเดียว แล้วค่อยถามเวลาสะดวกอีกคำถาม ----------
+# Gift: 'ขอ ชื่อและเบอร์ติดต่อกลับ เพื่อให้ที่ปรึกษาโทรให้รายละเอียดเพิ่มเติม · แล้วค่อยถามเวลาอีกคำถาม'
+# ปัญหาเดิม (เจอใน CEO Dashboard 26 ต.ค.):
+#   1) ประโยคขอเบอร์ (r122) พ่วง "แจ้งเวลาที่สะดวก" -> ลูกค้าส่งเบอร์ก่อน แล้วพิมพ์เวลาตามมาอีกข้อความ
+#   2) ได้เบอร์ปุ๊บ บอทถามชื่อ แต่ r144 ปิดแชท (bot_off) ทันที -> คำตอบชื่อ/เวลาไม่มีใครเก็บ
+#      ตัวกู้ชื่อจากประวัติแชทเลยหยิบ "ขอเป็นช่วงเวลา" / "ว่างหลัง" / "โมง" ไปเป็นชื่อลูกค้า
+#      แท็บงานเซล: ไม่มีชื่อ 61% · ชื่อเป็นประโยค/เวลา ~30 แถว · เวลาสะดวกไม่ถูกเก็บ
+# แก้ (ไม่แตะเกรด/กฎแจก/การปิดแชท r144):
+#   ก) ประโยคขอเบอร์ = "ขอชื่อและเบอร์ติดต่อกลับ ..." (ชื่อในข้อความเดียวกับเบอร์ ระบบเดิมแยกให้เอง)
+#   ข) ได้เบอร์แล้ว เคสที่จะมีเซลโทร + ยังไม่รู้เวลา -> ถาม "สะดวกให้โทรช่วงเวลาไหน" เป็นคำถามสุดท้าย
+#      (แทนคำถามขอชื่อเดิม) · รู้เวลาแล้วแต่ยังไม่มีชื่อ -> ถามชื่อเป็นคำถามสุดท้าย
+#   ค) คำตอบเวลา/ชื่อหลังปิดแชท: r166 รับเองก่อนประตู bot_off (ครั้งละ 1 คำถาม · ภายใน 6 ชม.)
+#      เวลา -> ช่องสัญญาณ "📞 ลูกค้าขอให้โทร" + อัปเดตแถว · ชื่อ -> ช่องชื่อ (กรองคำเวลา/ประโยคทิ้ง)
+#      ข้อความที่ไม่ใช่ทั้งสองอย่าง -> ปล่อยทางเดิม (เงียบ ให้เซลดู)
+# ปิด: R166_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ 153656e
+import bot_logic as _bl166
+
+R166_ASK = "ขอชื่อและเบอร์ติดต่อกลับ เพื่อให้ที่ปรึกษาโทรให้รายละเอียดเพิ่มเติมครับ"
+R166_TIME_Q = "สะดวกให้ที่ปรึกษาโทรช่วงเวลาไหนครับ เช่น หลัง 6 โมงเย็น หรือวันเสาร์"
+R166_TIME_OK = "รับทราบครับ บันทึกเวลาที่สะดวกให้ที่ปรึกษาแล้ว จะโทรตามเวลานั้นครับ"
+R166_NAME_Q = "ขอชื่อที่ให้ที่ปรึกษาเรียกด้วยครับ จะได้ติดต่อถูกคนครับ 🙏"
+R166_NAME_OK = "ขอบคุณครับ คุณ{n} 🙏"
+_R166_OFF = os.environ.get("R166_OFF", "") == "1"
+_R166_TTL = 6 * 3600
+_R166_NAME_MARK = "ขอชื่อที่ให้ที่ปรึกษาเรียก"
+_R166_TIMEISH = ("เวลา", "โมง", "ทุ่ม", "ตี ", "เช้า", "สาย", "บ่าย", "เย็น", "ค่ำ", "ดึก", "กลางวัน",
+                 "เที่ยง", "ว่าง", "สะดวก", "ได้ตลอด", "ตลอด", "เลิกงาน", "พักเที่ยง", "วันหยุด",
+                 "เสาร์", "อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "พรุ่งนี้", "วันนี้",
+                 "ตอนนี้", "เดี๋ยว", "หลัง", "ก่อน", "ช่วง", "นาฬิกา", "น.")
+_R166_MONEY = ("บาท", "หมื่น", "พัน", "แสน", "ล้าน", "ผ่อน", "เงินเดือน", "รายได้", "หนี้")
+
+try:
+    if not _R166_OFF:
+        _bl166.QUALIFY_QUESTIONS[3] = R166_ASK
+        try:
+            import faq_data as _fq166
+            _fq166.QUALIFY_QUESTIONS[3] = R166_ASK
+        except Exception:
+            pass
+        print("[R166] ประโยคขอเบอร์ -> ขอชื่อ+เบอร์ · เวลาสะดวกถามแยกอีกคำถาม")
+except Exception as _e:
+    print("[R166 WARN] ตั้งประโยคขอเบอร์ไม่ได้: " + str(_e))
+
+
+def _r166_time_of(msg):
+    """คำตอบเรื่องเวลา -> ข้อความเวลา ('' = ไม่ใช่)"""
+    t = re.sub(r"\s+", " ", str(msg or "")).strip()
+    if not t or len(t) > 80 or "?" in t:
+        return ""
+    if len(re.sub(r"\D", "", t)) >= 9:          # มีเบอร์ -> ทางเดิมจัดการ
+        return ""
+    try:
+        w = _bl166._parse_callback_time(t)
+        if w:
+            return w
+    except Exception:
+        pass
+    if any(m in t for m in _R166_MONEY):
+        return ""
+    if any(k in t for k in _R166_TIMEISH) or re.search(r"\d{1,2}\s*[.:]\s*\d{2}|\b\d{1,2}\s*(?:โมง|ทุ่ม|น\.)", t):
+        return t.strip(" ,.-")[:80]
+    return ""
+
+
+def _r166_name_of(msg):
+    t = str(msg or "").strip()
+    if _r166_time_of(t) or any(m in t for m in _R166_MONEY):
+        return ""
+    try:
+        n = _bl166._name_from_reply(t)
+    except Exception:
+        n = ""
+    if n and any(k in n for k in _R166_TIMEISH):
+        return ""
+    return n
+
+
+def _r166_female(st, gender=""):
+    return str(gender or "").lower().startswith("f") or (st or {}).get("gender") == "female"
+
+
+def _r166_say(st, text, gender=""):
+    try:
+        return _bl166.to_female(text) if _r166_female(st, gender) else text
+    except Exception:
+        return text
+
+
+_R166_BASE_PROCESS = CalmBotEngine.process
+
+
+def _process_r166(self, user_message, user_id, referral=None, platform="facebook",
+                  page_id="", brand="", sheet_tab="", gender=""):
+    skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+    st = _lead_states.get(skey) or {}
+    # ---- ค) รับคำตอบเวลา/ชื่อเอง (แชทปิดไปแล้วหลังได้เบอร์) ----
+    try:
+        want = st.get("r166_await")
+        if (want and not _R166_OFF and not st.get("handover")
+                and time.time() - float(st.get("r166_at") or 0) <= _R166_TTL):
+            msg = str(user_message or "")
+            reply, note = "", ""
+            if want == "time":
+                w = _r166_time_of(msg)
+                if w:
+                    self._note_callback_time(user_id, st, w)
+                    reply, note = R166_TIME_OK, "เวลา=" + w
+                    st["r166_await"] = None
+                    if not st.get("chat_name"):
+                        reply = reply + MSG_SPLIT + R166_NAME_Q
+                        st["r166_await"], st["r166_at"] = "name", time.time()
+                elif not st.get("chat_name"):
+                    n = _r166_name_of(msg)
+                    if n:                                   # ตอบชื่อมาแทน -> เก็บชื่อ แล้วถามเวลาอีกครั้งเดียว
+                        st["chat_name"] = st["fb_name"] = n
+                        self._send_name_update(user_id, st)
+                        reply, note = R166_NAME_OK.format(n=n), "ชื่อ=" + n
+                        if not st.get("r166_time_reasked"):
+                            st["r166_time_reasked"] = True
+                            reply = reply + MSG_SPLIT + R166_TIME_Q
+                        else:
+                            st["r166_await"] = None
+            elif want == "name":
+                n = _r166_name_of(msg)
+                if n:
+                    st["chat_name"] = st["fb_name"] = n
+                    self._send_name_update(user_id, st)
+                    reply, note = R166_NAME_OK.format(n=n), "ชื่อ=" + n
+                    st["r166_await"] = None
+                else:
+                    w = _r166_time_of(msg)
+                    if w:
+                        self._note_callback_time(user_id, st, w)
+                        reply, note = R166_TIME_OK, "เวลา=" + w
+                        st["r166_await"] = None
+            if reply:
+                reply = MSG_SPLIT.join(_r166_say(st, p, gender) for p in reply.split(MSG_SPLIT))
+                st["last_seen"] = int(time.time())
+                try:
+                    self._log(user_id, msg, reply)
+                    self._persist(user_id, st, msg, reply, "r166")
+                except Exception as _pe:
+                    print("[R166 PERSIST ERROR] " + str(_pe))
+                print("[R166] " + _mask(str(user_id)) + " รับคำตอบหลังปิดแชท: " + note)
+                return reply, None
+            st["r166_await"] = None                      # ไม่ใช่คำตอบ -> ทางเดิม ไม่ถามซ้ำ
+    except Exception as _e:
+        print("[R166 ERROR in] " + str(_e))
+
+    had_contact = bool(str((st.get("data") or {}).get("contact") or "").strip())
+    out = _R166_BASE_PROCESS(self, user_message, user_id, referral=referral, platform=platform,
+                             page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+    # ---- ข) เพิ่งได้เบอร์รอบนี้ -> คำถามสุดท้าย = เวลา (หรือชื่อถ้ารู้เวลาแล้ว) ----
+    try:
+        if _R166_OFF:
+            return out
+        reply, grade = out
+        st = _lead_states.get(skey) or {}
+        d = st.get("data") or {}
+        if not reply or had_contact or not str(d.get("contact") or "").strip():
+            return out
+        parts = [p for p in str(reply).split(MSG_SPLIT)]
+        had_ask_name = any(_R166_NAME_MARK in p for p in parts)
+        parts = [p for p in parts if _R166_NAME_MARK not in p]
+        will_call = _r156_will_call(st) if "_r156_will_call" in globals() else True
+        ask = ""
+        if will_call and not d.get("callback_req"):
+            ask, st["r166_await"] = R166_TIME_Q, "time"
+        elif will_call and not st.get("chat_name"):
+            ask, st["r166_await"] = R166_NAME_Q, "name"
+        elif had_ask_name:
+            parts.append(_r166_say(st, R166_NAME_Q, gender))  # เคสไม่แจก: คงคำถามชื่อเดิมไว้ท้ายสุด
+        if ask:
+            st["r166_at"] = time.time()
+            st["awaiting_name"] = False                  # คำตอบรอบหน้า r166 รับเอง (กันชื่อเพี้ยน)
+            parts.append(_r166_say(st, ask, gender))
+            print("[R166] " + _mask(str(user_id)) + " ได้เบอร์แล้ว -> ถาม" + ("เวลาสะดวก" if ask == R166_TIME_Q else "ชื่อ"))
+        new = MSG_SPLIT.join(p for p in parts if p.strip())
+        return (new or reply), grade
+    except Exception as _e:
+        print("[R166 ERROR out] " + str(_e))
+        return out
+
+
+CalmBotEngine.process = _process_r166
+print("[R166] ชั้นนอกสุด: ถามเวลาสะดวกแยก · รับคำตอบเวลา/ชื่อหลังปิดแชท")
+
+
+def _r166_selftest(which):
+    eng = CalmBotEngine()
+    eng._send_to_sheets = lambda *a, **k: None
+    eng._get_fb_name = lambda *a, **k: ""
+    P = "102444118935634"
+    U = "__R166_" + which + "__"
+    sk = P + ":" + U
+    D = {"objective": "ปล่อยเช่า", "income": "เงินเดือน 45,000", "income_n": 45000,
+         "debt": "ไม่มีหนี้", "debt_baht": 0, "co_borrower": "ไม่มี"}
+    _lead_states[sk] = {"data": dict(D), "signals": [], "asked": {}, "awaiting": "contact", "page_id": P,
+                        "chat_name": "", "last_seen": int(time.time()), "psid": U}
+
+    def say(t):
+        o = eng.process(t, U, page_id=P)
+        return str(o[0] if isinstance(o, tuple) else o)
+
+    def st():
+        return _lead_states.get(sk) or {}
+    try:
+        if which == "ask_text":
+            return (_bl166.QUALIFY_QUESTIONS[3] == R166_ASK and "ชื่อ" in R166_ASK and "เบอร์" in R166_ASK
+                    and "เวลา" not in R166_ASK)
+        if which == "phone_then_time_then_name":
+            r1 = say("0812345678")
+            last = r1.split(MSG_SPLIT)[-1]
+            r2 = say("ขอเป็นช่วงเวลา หลัง 6 โมงเย็นค่ะ")
+            r3 = say("มิ้นค่ะ")
+            s = st()
+            return ("ช่วงเวลาไหน" in last and _R166_NAME_MARK not in r1
+                    and "6 โมงเย็น" in str((s.get("data") or {}).get("callback_req"))
+                    and "บันทึกเวลา" in r2 and _R166_NAME_MARK in r2
+                    and s.get("chat_name") == "มิ้น" and "มิ้น" in r3)
+        if which == "loose_time":
+            say("0812345678")
+            r2 = say("ช่วงเย็นๆ")
+            s = st()
+            return "บันทึกเวลา" in r2 and "เย็น" in str((s.get("data") or {}).get("callback_req"))
+        if which == "name_with_phone":
+            r1 = say("สมชาย 0812345678")
+            r2 = say("หลังเลิกงานครับ")
+            s = st()
+            return (s.get("chat_name") == "สมชาย" and "ช่วงเวลาไหน" in r1.split(MSG_SPLIT)[-1]
+                    and "บันทึกเวลา" in r2 and _R166_NAME_MARK not in r2
+                    and "เลิกงาน" in str((s.get("data") or {}).get("callback_req")))
+        if which == "phone_with_time_asks_name":
+            r1 = say("0812345678 โทรหลัง 6 โมงเย็น")
+            r2 = say("มิ้นค่ะ")
+            s = st()
+            return (r1.split(MSG_SPLIT)[-1].startswith("ขอชื่อ") and "ช่วงเวลาไหน" not in r1
+                    and s.get("chat_name") == "มิ้น")
+        if which == "time_not_name":
+            say("0812345678")
+            say("ขอเป็นช่วงเวลา")
+            s = st()
+            return s.get("chat_name") in ("", None) and s.get("r166_await") == "name"
+        if which == "other_msg_falls_through":
+            say("0812345678")
+            r2 = say("ห้องแถวไหนบ้างคะ?")
+            s = st()
+            return s.get("r166_await") is None and "บันทึกเวลา" not in r2
+        return False
+    except Exception as _e:
+        print("[R166 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _lead_states.pop(sk, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RH1", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("ask_text",), ("truthy", ""),
+         "Gift 26 ต.ค.: 'ขอ ชื่อและเบอร์ติดต่อกลับ เพื่อให้ที่ปรึกษาโทรให้รายละเอียดเพิ่มเติม' ไม่พ่วงเวลา"),
+        ("RH2", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("phone_then_time_then_name",), ("truthy", ""),
+         "ได้เบอร์ -> ถามเวลา · ตอบเวลา -> เก็บเวลา + ถามชื่อ · ตอบชื่อ -> เก็บชื่อ (แชทปิดแล้วก็ต้องเก็บได้)"),
+        ("RH3", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("loose_time",), ("truthy", ""),
+         "'ช่วงเย็นๆ' ต้องนับเป็นเวลาสะดวก"),
+        ("RH4", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("name_with_phone",), ("truthy", ""),
+         "'สมชาย 081…' ได้ชื่อพร้อมเบอร์ -> ถามเวลาอย่างเดียว ไม่ถามชื่อซ้ำ"),
+        ("RH5", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("phone_with_time_asks_name",), ("truthy", ""),
+         "เบอร์+เวลามาพร้อมกัน -> ไม่ถามเวลาซ้ำ ถามชื่อแทน แล้วเก็บชื่อได้"),
+        ("RH6", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("time_not_name",), ("truthy", ""),
+         "เคสจริง CEO Dashboard: 'ขอเป็นช่วงเวลา' ห้ามกลายเป็นชื่อลูกค้า"),
+        ("RH7", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("other_msg_falls_through",), ("truthy", ""),
+         "ลูกค้าถามเรื่องอื่น -> ปล่อยทางเดิม ไม่ยัดเป็นเวลา"),
+    ])
+    print("[R166] ข้อสอบ 7 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R166 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
