@@ -13850,6 +13850,405 @@ except Exception as _e:
     print("[R166 EXAM ERROR] " + str(_e))
 
 
+# ---------- r164 (20 ต.ค. 69 · Growth Loop): ลีดโฆษณาข้อความแรกส่งไม่ออก (#10) -> ลองใหม่เอง + เลิกทักแชทที่ส่งไม่ถึง ----------
+# อาการ (log 19->20 ต.ค. 24 ชม.): [FB SEND ERROR] code=10/2018278 "ส่งนอกช่วงเวลา" 8 ครั้ง
+#   6 ครั้ง = คำตอบแรกของลีดคลิกโฆษณา (ลูกค้าเพิ่งพิมพ์ 1-3 วิ) -> [SEND ABORT] ลูกค้าไม่ได้อะไรเลย
+#     เพจ …209 ×3 · …793 ×2 · …091 ×1 · 2 คนพิมพ์ต่อเองแล้วบอทคุยได้ปกติ (= หน้าต่างเปิดทีหลัง) · 4 คนเงียบหาย
+#   2 ครั้ง = ทักกลับ 20 ชม. ไปหาคนเดิมที่ส่งไม่ถึงตั้งแต่ข้อความแรก แต่ log ยังขึ้น [FOLLOWUP SENT]
+# แก้ (ไม่แตะถ้อยคำ/เกรด/กฎแจก):
+#   1) #10/2018278 ภายใน 120 วิ หลังลูกค้าพิมพ์ -> ส่งบับเบิลที่ค้างใหม่ใน 30 วิ / 2 นาที
+#      ยกเลิกถ้าลูกค้าพิมพ์มาใหม่ (รอบใหม่ตอบเอง) หรือแชทถูกปิดบอท/เซลรับช่วง
+#   2) จำแชทที่ส่งไม่ถึง (#10/#551) -> ทักกลับรอบถัดไปไม่ยิง (ขึ้น FOLLOWUP SEND ERROR แทน SENT)
+#      ลูกค้าพิมพ์มาใหม่ / ส่งสำเร็จ = ล้างทันที
+# ปิด: R164_RETRY_DELAYS="" (ไม่ลองใหม่) · R164_SKIP_DEAD=0 (ทักกลับตามเดิม)
+# ย้อนกลับ: อัปโหลด main.py ของ 81aeecb (r166)
+import threading as _th164
+
+_R164_TL = _th164.local()
+_R164_IN = {}      # psid -> เวลาที่ลูกค้าพิมพ์ล่าสุด
+_R164_DEAD = {}    # psid -> {"t", "code", "sub"} ส่งไม่ถึงล่าสุด
+_R164_FRESH_SEC = 120
+try:
+    _R164_DELAYS = [float(x) for x in os.environ.get("R164_RETRY_DELAYS", "30,120").split(",") if x.strip()]
+except Exception:
+    _R164_DELAYS = [30.0, 120.0]
+_R164_SKIP_DEAD = os.environ.get("R164_SKIP_DEAD", "1") != "0"
+_R164_BASE_UNREACH = _is_unreachable
+_R164_BASE_SEND_MSG = send_message
+_R164_BASE_BLOCKING = _send_reply_blocking
+_R164_BASE_SEND_REPLY = send_reply
+_R164_BASE_PROCESS_EVENT = process_event
+
+
+def _r164_prune(d, keep=4000):
+    if len(d) > keep:
+        for k in sorted(d, key=lambda k: (d[k] if isinstance(d[k], (int, float)) else d[k].get("t", 0)))[:len(d) - keep // 2]:
+            d.pop(k, None)
+
+
+def _is_unreachable(resp):                                   # noqa: F811
+    try:
+        e = ((resp.json() or {}).get("error") or {})
+        _R164_TL.err = (e.get("code"), e.get("error_subcode"))
+    except Exception:
+        pass
+    return _R164_BASE_UNREACH(resp)
+
+
+def send_message(recipient_id, text, page_id=""):           # noqa: F811
+    _R164_TL.err = None
+    ok = _R164_BASE_SEND_MSG(recipient_id, text, page_id)
+    try:
+        rid = str(recipient_id)
+        if ok:
+            _R164_TL.ok = getattr(_R164_TL, "ok", 0) + 1
+            _R164_DEAD.pop(rid, None)
+        else:
+            code, sub = getattr(_R164_TL, "err", None) or (None, None)
+            _R164_TL.fail = (code, sub, time.time())
+            _R164_DEAD[rid] = {"t": time.time(), "code": code, "sub": sub}
+            _r164_prune(_R164_DEAD)
+    except Exception as _e:
+        print("[R164 ERROR] send " + str(_e))
+    return ok
+
+
+def _r164_should_retry(code, sub, t_in, t_fail):
+    return bool(_R164_DELAYS) and code == 10 and sub == 2018278 and t_in > 0 and 0 <= (t_fail - t_in) <= _R164_FRESH_SEC
+
+
+def _r164_blocked(rid, page_id):
+    for k in ((str(page_id) + ":" + rid) if page_id else rid, rid):
+        st = _lead_states.get(k) or {}
+        if st.get("bot_off") or st.get("handover"):
+            return True
+    return False
+
+
+def _r164_retry_run(rid, text, page_id, t_fail, delays=None):
+    """ลองส่งบับเบิลที่ค้างใหม่ — คืน 'ok' / 'cancel' / 'fail'"""
+    for i, dl in enumerate(delays if delays is not None else _R164_DELAYS):
+        time.sleep(max(0.0, dl))
+        if _R164_IN.get(rid, 0) > t_fail:
+            print("[R164 CANCEL] " + _mask(rid) + " ลูกค้าพิมพ์มาใหม่แล้ว — รอบใหม่ตอบเอง ไม่ส่งซ้ำ")
+            return "cancel"
+        if _r164_blocked(rid, page_id):
+            print("[R164 CANCEL] " + _mask(rid) + " แชทถูกปิดบอท/เซลรับช่วง — ไม่ส่ง")
+            return "cancel"
+        _R164_TL.fail = None
+        _R164_TL.ok = 0
+        _R164_BASE_BLOCKING(rid, text, page_id)
+        if not getattr(_R164_TL, "fail", None):
+            print("[R164 RECOVERED] " + _mask(rid) + " ส่งคำตอบแรกสำเร็จ (ลองใหม่ครั้งที่ " + str(i + 1)
+                  + " หลังพลาด " + str(int(time.time() - t_fail)) + " วิ)")
+            return "ok"
+    print("[R164 GAVE UP] " + _mask(rid) + " ลองใหม่ครบแล้วยังส่งไม่ออก (#10) — ลีดอยู่ในระบบ รอลูกค้าพิมพ์มาเอง")
+    return "fail"
+
+
+def _send_reply_blocking(recipient_id, text, page_id=""):   # noqa: F811
+    _R164_TL.fail = None
+    _R164_TL.ok = 0
+    _R164_BASE_BLOCKING(recipient_id, text, page_id)
+    try:
+        f = getattr(_R164_TL, "fail", None)
+        rid = str(recipient_id)
+        if f and _r164_should_retry(f[0], f[1], _R164_IN.get(rid, 0), f[2]):
+            parts = [p.strip() for p in str(text or "").split(MSG_SPLIT) if p.strip()]
+            rest = MSG_SPLIT.join(parts[int(getattr(_R164_TL, "ok", 0) or 0):])
+            if rest:
+                print("[R164 RETRY] " + _mask(rid) + " ลีดใหม่ส่งไม่ออก (#10) — จะลองใหม่ใน "
+                      + "/".join(str(int(x)) for x in _R164_DELAYS) + " วิ")
+                _th164.Thread(target=_r164_retry_run, args=(rid, rest, page_id, f[2]),
+                              daemon=True, name="wec-r164-retry").start()
+    except Exception as _e:
+        print("[R164 ERROR] retry " + str(_e))
+
+
+def send_reply(recipient_id, text, page_id="", force=False):  # noqa: F811
+    try:
+        rid = str(recipient_id)
+        dead = _R164_DEAD.get(rid)
+        if (_R164_SKIP_DEAD and dead and _th164.current_thread().name == "wec-followup"
+                and _R164_IN.get(rid, 0) <= dead["t"]):
+            print("[R164 SKIP] " + _mask(rid) + " ทักกลับไม่ยิง — ส่งไม่ถึงตั้งแต่รอบก่อน (#"
+                  + str(dead.get("code")) + ") และลูกค้ายังไม่พิมพ์มาใหม่")
+            raise RuntimeError("R164 ส่งไม่ถึงแชทนี้ (#" + str(dead.get("code")) + ") — ข้ามทักกลับ")
+    except RuntimeError:
+        raise
+    except Exception as _e:
+        print("[R164 ERROR] skip " + str(_e))
+    return _R164_BASE_SEND_REPLY(recipient_id, text, page_id, force)
+
+
+def process_event(event, platform="facebook", page_id=""):  # noqa: F811
+    try:
+        ev = event or {}
+        m = ev.get("message") or {}
+        if (m and not m.get("is_echo")) or ev.get("postback"):
+            snd = str((ev.get("sender") or {}).get("id") or "")
+            if snd:
+                _R164_IN[snd] = time.time()
+                _R164_DEAD.pop(snd, None)
+                _r164_prune(_R164_IN)
+    except Exception as _e:
+        print("[R164 ERROR] in " + str(_e))
+    return _R164_BASE_PROCESS_EVENT(event, platform, page_id)
+
+
+print("[R164] ลีดโฆษณาข้อความแรกส่งไม่ออก (#10) -> ลองใหม่ " + ",".join(str(int(x)) for x in _R164_DELAYS)
+      + " วิ · ทักกลับข้ามแชทที่ส่งไม่ถึง")
+
+
+def _r164_selftest(which):
+    import requests as _rq
+    calls = []
+    U = "990000000164" + str(abs(hash(which)) % 1000)
+    g = globals()
+    saved = (_rq.post, g.get("TYPING_ENABLED"), g.get("FB_PAGE_ACCESS_TOKEN"))
+    plan = {"fail_left": 1, "code": 10, "sub": 2018278}
+
+    class _R:
+        def __init__(self, ok, code=None, sub=None):
+            self.status_code = 200 if ok else 400
+            self._j = {"message_id": "m_t", "recipient_id": U} if ok else {"error": {"code": code, "error_subcode": sub, "type": "OAuthException", "message": "t"}}
+            self.content = b"x"
+            self.text = str(self._j)
+
+        def json(self):
+            return self._j
+
+    def fake_post(url, params=None, json=None, timeout=None, **k):
+        if (json or {}).get("sender_action"):
+            return _R(True)
+        calls.append((json or {}).get("message", {}).get("text"))
+        if plan["fail_left"] > 0:
+            plan["fail_left"] -= 1
+            return _R(False, plan["code"], plan["sub"])
+        return _R(True)
+
+    try:
+        _rq.post = fake_post
+        g["TYPING_ENABLED"] = False
+        g["FB_PAGE_ACCESS_TOKEN"] = "t"
+        _R164_IN.pop(U, None)
+        _R164_DEAD.pop(U, None)
+        A, B = "สวัสดีครับ", "สนใจซื้ออยู่เองหรือลงทุนครับ"
+        if which in ("fresh_retry_recovers", "typed_again_cancels"):
+            _R164_IN[U] = time.time()                    # ลูกค้าเพิ่งพิมพ์
+            _R164_TL.fail = None
+            _R164_TL.ok = 0
+            _R164_BASE_BLOCKING(U, A + MSG_SPLIT + B, "")
+            f = _R164_TL.fail
+            if not (f and _r164_should_retry(f[0], f[1], _R164_IN.get(U, 0), f[2])):
+                return False
+            if which == "typed_again_cancels":
+                _R164_IN[U] = time.time() + 1
+                n = len(calls)
+                return _r164_retry_run(U, A + MSG_SPLIT + B, "", f[2], delays=[0]) == "cancel" and len(calls) == n
+            r = _r164_retry_run(U, A + MSG_SPLIT + B, "", f[2], delays=[0])
+            return r == "ok" and calls[-2:] == [A, B] and U not in _R164_DEAD
+        if which == "old_or_551_no_retry":
+            now = time.time()
+            return (not _r164_should_retry(10, 2018278, now - 20 * 3600, now)
+                    and not _r164_should_retry(551, 1545041, now - 2, now)
+                    and _r164_should_retry(10, 2018278, now - 3, now))
+        if which == "followup_skips_dead":
+            _R164_IN[U] = time.time() - 72000
+            send_message(U, A, "")                       # #10 -> จำว่าส่งไม่ถึง
+            n = len(calls)
+            box = {}
+
+            def _fu():
+                try:
+                    send_reply(U, B, "")
+                    box["r"] = "sent"
+                except RuntimeError:
+                    box["r"] = "skip"
+            t = _th164.Thread(target=_fu, name="wec-followup")
+            t.start()
+            t.join(5)
+            return box.get("r") == "skip" and len(calls) == n
+        if which == "new_message_clears_dead":
+            send_message(U, A, "")
+            had = U in _R164_DEAD
+            _R164_BASE_PROCESS_EVENT_SAVE = g["_R164_BASE_PROCESS_EVENT"]
+            g["_R164_BASE_PROCESS_EVENT"] = lambda *a, **k: None
+            try:
+                process_event({"sender": {"id": U}, "message": {"text": "ลงทุน"}}, "facebook", "")
+            finally:
+                g["_R164_BASE_PROCESS_EVENT"] = _R164_BASE_PROCESS_EVENT_SAVE
+            return had and U not in _R164_DEAD and _R164_IN.get(U, 0) > 0
+        return False
+    except Exception as _e:
+        print("[R164 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _rq.post, g["TYPING_ENABLED"], g["FB_PAGE_ACCESS_TOKEN"] = saved
+        _R164_IN.pop(U, None)
+        _R164_DEAD.pop(U, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RF1", "ลีดโฆษณาส่งไม่ออก (r164)", "_r164_selftest", ("fresh_retry_recovers",), ("truthy", ""),
+         "log 19 ต.ค. 08:51 เพจ …209: ลูกค้าพิมพ์ 1 วิ ตอบกลับได้ #10 -> ต้องลองใหม่แล้วส่งครบทุกบับเบิล"),
+        ("RF2", "ลีดโฆษณาส่งไม่ออก (r164)", "_r164_selftest", ("typed_again_cancels",), ("truthy", ""),
+         "log 19 ต.ค. 01:31 เพจ …793: ลูกค้าพิมพ์ต่อเองใน 30 วิ -> ยกเลิกลองใหม่ ไม่ส่งซ้ำ"),
+        ("RF3", "ลีดโฆษณาส่งไม่ออก (r164)", "_r164_selftest", ("old_or_551_no_retry",), ("truthy", ""),
+         "#551 (บล็อกเพจ) และ #10 ของแชทเงียบ 20 ชม. ห้ามลองใหม่ · #10 ของลีดสด = ลองใหม่"),
+        ("RF4", "ลีดโฆษณาส่งไม่ออก (r164)", "_r164_selftest", ("followup_skips_dead",), ("truthy", ""),
+         "log 19 ต.ค. 23:09 เพจ …209: ส่งไม่ถึงตั้งแต่ 03:09 แล้วทักกลับ 20 ชม. ยิงซ้ำ #10 -> ต้องข้าม ไม่ยิง"),
+        ("RF5", "ลีดโฆษณาส่งไม่ออก (r164)", "_r164_selftest", ("new_message_clears_dead",), ("truthy", ""),
+         "ลูกค้าพิมพ์มาใหม่ = หน้าต่างเปิด ต้องล้างธงส่งไม่ถึง"),
+    ])
+    print("[R164] ข้อสอบ 5 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R164 EXAM ERROR] " + str(_e))
+
+
+
+# ---------- r165 (21 ต.ค. 69 · Growth Loop): ส่งข้อความหาลูกค้าแล้วเน็ตหลุด (Connection reset) -> บับเบิลหายเงียบ -> ลองใหม่เอง ----------
+# อาการ (log 20->21 ต.ค. 24 ชม.): [FB SEND EXCEPTION] 23 ครั้ง (รอบก่อน ~0) · [TYPING ERROR] 40 (รอบก่อน 2)
+#   14 = ('Connection aborted.', ConnectionResetError(104)) · 9 = Read timed out (10 วิ) · กระจุก 17:30-21:45 น. (ช่วงลีดเข้าเยอะ)
+#   ของเดิม: send_message จับ exception แล้ว "คืน True" -> ถือว่าส่งแล้ว ไปบับเบิลถัดไป = ลูกค้าไม่ได้บับเบิลนั้นเลย ไม่มีลองใหม่
+# แก้ (ไม่แตะถ้อยคำ/เกรด/กฎแจก/ตัวแปร): เฉพาะ POST ข้อความไป Graph me/messages
+#   เน็ตหลุด/ต่อไม่ติด (requests ConnectionError) -> ลองใหม่ 1.5 วิ / 4 วิ · ยังไม่ได้ = โยน exception เดิม (log FB SEND EXCEPTION เหมือนเดิม)
+#   Read timeout = ไม่ลองใหม่ (Meta อาจรับไปแล้ว -> กันลูกค้าได้ข้อความซ้ำ) แค่ติดป้าย [R165 TIMEOUT]
+#   typing/mark_seen/อื่นๆ ไม่ลองใหม่ (ไม่ใช่ข้อความ) · log ใหม่ [R165 RETRY|RECOVERED|GAVE UP|TIMEOUT]
+# ปิด: R165_SEND_RETRY="" (ไม่ลองใหม่) · ย้อนกลับ: อัปโหลด main.py ของ commit ก่อนหน้า
+import requests as _rq165
+
+try:
+    _R165_DELAYS = [float(x) for x in os.environ.get("R165_SEND_RETRY", "1.5,4").split(",") if x.strip()]
+except Exception:
+    _R165_DELAYS = [1.5, 4.0]
+_R165_STATS = {"retry": 0, "recovered": 0, "gave_up": 0, "timeout": 0}
+
+
+def _r165_is_msg_send(url, json_body):
+    try:
+        return (str(url) == str(GRAPH_API_URL) and isinstance(json_body, dict)
+                and "message" in json_body and not json_body.get("sender_action"))
+    except Exception:
+        return False
+
+
+class _R165Requests(object):
+    """ตัวห่อ requests — เหมือนเดิมทุกอย่าง ยกเว้น POST ข้อความไป Graph ที่เน็ตหลุด = ลองใหม่"""
+
+    def __getattr__(self, name):
+        return getattr(_rq165, name)
+
+    def post(self, url, *a, **kw):
+        if not (_R165_DELAYS and _r165_is_msg_send(url, kw.get("json"))):
+            return _rq165.post(url, *a, **kw)
+        rid = ""
+        try:
+            rid = _mask(str(((kw.get("json") or {}).get("recipient") or {}).get("id") or ""))
+        except Exception:
+            pass
+        for i in range(len(_R165_DELAYS) + 1):
+            try:
+                r = _rq165.post(url, *a, **kw)
+                if i:
+                    _R165_STATS["recovered"] += 1
+                    print("[R165 RECOVERED] " + rid + " ส่งบับเบิลสำเร็จหลังเน็ตหลุด (ลองใหม่ครั้งที่ " + str(i) + ")")
+                return r
+            except _rq165.exceptions.ConnectionError as e:
+                if i >= len(_R165_DELAYS):
+                    _R165_STATS["gave_up"] += 1
+                    print("[R165 GAVE UP] " + rid + " ลองใหม่ครบ " + str(i) + " ครั้งแล้วยังส่งไม่ออก: " + str(e)[:120])
+                    raise
+                _R165_STATS["retry"] += 1
+                print("[R165 RETRY] " + rid + " เน็ตหลุดตอนส่งบับเบิล -> ลองใหม่ใน " + str(_R165_DELAYS[i]) + " วิ ("
+                      + str(e)[:80] + ")")
+                time.sleep(max(0.0, _R165_DELAYS[i]))
+            except _rq165.exceptions.Timeout:
+                _R165_STATS["timeout"] += 1
+                print("[R165 TIMEOUT] " + rid + " Meta ตอบช้า (อาจส่งถึงแล้ว) — ไม่ลองใหม่ กันข้อความซ้ำ")
+                raise
+
+
+try:
+    requests = _R165Requests()                               # noqa: F811
+    print("[R165] ส่งบับเบิลแล้วเน็ตหลุด -> ลองใหม่ " + "/".join(str(x) for x in _R165_DELAYS) + " วิ (timeout ไม่ลองใหม่)")
+except Exception as _e:
+    print("[R165 ERROR] " + str(_e))
+
+
+def _r165_selftest(which):
+    calls = []
+    U = "990000000165" + str(abs(hash(which)) % 1000)
+    g = globals()
+    saved = (_rq165.post, g.get("TYPING_ENABLED"), g.get("FB_PAGE_ACCESS_TOKEN"), g.get("_R165_DELAYS"))
+    plan = {"left": 0, "exc": None}
+
+    class _R:
+        status_code = 200
+        content = b"x"
+        text = "{}"
+
+        def json(self):
+            return {"message_id": "m_t165", "recipient_id": U}
+
+    def fake_post(url, params=None, json=None, timeout=None, **k):
+        if (json or {}).get("sender_action"):
+            raise _rq165.exceptions.ConnectionError("('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))")
+        calls.append((json or {}).get("message", {}).get("text"))
+        if plan["left"] > 0:
+            plan["left"] -= 1
+            raise plan["exc"]
+        return _R()
+
+    try:
+        _rq165.post = fake_post
+        g["TYPING_ENABLED"] = False
+        g["FB_PAGE_ACCESS_TOKEN"] = "t"
+        g["_R165_DELAYS"] = [0.0, 0.0]
+        A, B = "สวัสดีครับ", "สนใจซื้ออยู่เองหรือลงทุนครับ"
+        reset = _rq165.exceptions.ConnectionError(
+            "('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))")
+        if which == "reset_then_ok":
+            plan.update(left=1, exc=reset)
+            _send_reply_blocking(U, A + MSG_SPLIT + B, "")
+            return calls == [A, A, B]                     # บับเบิลแรกลองใหม่แล้วไปต่อครบ
+        if which == "reset_forever_no_crash":
+            plan.update(left=99, exc=reset)
+            _send_reply_blocking(U, A, "")
+            return calls == [A, A, A]                     # 1 + ลองใหม่ 2 แล้วยอมแพ้ ไม่พัง
+        if which == "timeout_no_retry":
+            plan.update(left=1, exc=_rq165.exceptions.ReadTimeout("Read timed out. (read timeout=10)"))
+            _send_reply_blocking(U, A + MSG_SPLIT + B, "")
+            return calls == [A, B]                        # timeout ไม่ยิงซ้ำ
+        if which == "typing_untouched":
+            n = len(calls)
+            send_sender_action(U, "typing_on", "")       # ต้องไม่ลองใหม่/ไม่พัง
+            return len(calls) == n and not _r165_is_msg_send(GRAPH_API_URL, {"sender_action": "typing_on"})
+        return False
+    except Exception as _e:
+        print("[R165 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _rq165.post, g["TYPING_ENABLED"], g["FB_PAGE_ACCESS_TOKEN"], g["_R165_DELAYS"] = saved
+
+
+try:
+    _R124_EXAM.extend([
+        ("RN1", "ส่งแล้วเน็ตหลุด (r165)", "_r165_selftest", ("reset_then_ok",), ("truthy", ""),
+         "log 20 ต.ค. 12:04 [FB SEND EXCEPTION] Connection reset -> ต้องลองใหม่แล้วลูกค้าได้ครบทุกบับเบิล"),
+        ("RN2", "ส่งแล้วเน็ตหลุด (r165)", "_r165_selftest", ("reset_forever_no_crash",), ("truthy", ""),
+         "log 20 ต.ค. 12:09 reset ติดกัน 2 ครั้ง -> ลองใหม่ครบแล้วยอมแพ้ บอทไม่พัง"),
+        ("RN3", "ส่งแล้วเน็ตหลุด (r165)", "_r165_selftest", ("timeout_no_retry",), ("truthy", ""),
+         "log 20 ต.ค. 11:11 Read timed out -> ห้ามยิงซ้ำ (Meta อาจรับไปแล้ว)"),
+        ("RN4", "ส่งแล้วเน็ตหลุด (r165)", "_r165_selftest", ("typing_untouched",), ("truthy", ""),
+         "TYPING ERROR 40 ครั้ง -> จุดไข่ปลาไม่ลองใหม่ ไม่หน่วงคำตอบเพิ่ม"),
+    ])
+    print("[R165] ข้อสอบ 4 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R165 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
