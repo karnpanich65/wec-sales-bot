@@ -12602,6 +12602,7 @@ def _r159_selftest(which):
         eng = CalmBotEngine()
         eng._send_to_sheets = lambda *a, **k: sent.append((a, k))
         eng._get_fb_name = lambda *a, **k: ""
+        eng._upsert_lead = lambda *a, **k: None   # r166.2: ข้อสอบห้ามเขียนแถว "คุณเอ" ลงชีตจริง
         if which == "missing_fields":
             code, out = _r159_intake({"page": "rs"}, eng, fake_pages)
             return code == 400 and "เบอร์หรือไลน์" in out["missing"] and not sent
@@ -12932,6 +12933,8 @@ def _r161_post(payload):
 def _r161_enqueue(payload):
     if not (_bl9.FEATURE_PERSIST and _bl9.APPS_SCRIPT_URL):
         return
+    if str((payload or {}).get("psid") or (payload or {}).get("facebook_psid") or "").startswith("__"):
+        return      # r166.2: ไอดีข้อสอบ (__R…__) ห้ามลงชีต
     k = _r161_key(payload)
     with _R161_LOCK:
         seq = _R161_SEQ.get(k, 0) + 1
@@ -14251,6 +14254,51 @@ try:
     print("[R165] ข้อสอบ 4 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
     print("[R165 EXAM ERROR] " + str(_e))
+
+
+# ---------- r166.2 (26 ต.ค. 69): ข้อสอบ /exam ห้ามทิ้งขยะลง Postgres/ชีต ----------
+# r166.1 ให้ selftest ใช้ไอดีใหม่ทุกรอบ (กันค่าค้าง) -> ต้องกันไม่ให้ไอดีข้อสอบ (__…__) ถูกเขียนลง
+# Postgres sessions/messages และคิวชีต (Chat_Log/lead_partial) ทุกครั้งที่กด /exam
+# ไอดีลูกค้าจริงเป็นตัวเลข (FB/IG) หรือ c:/MANUAL- ไม่ขึ้นต้นด้วย __ จึงไม่โดน
+# ย้อนกลับ: ลบบล็อกนี้ + 2 บรรทัด r166.2 ใน _r161_enqueue / _r159_selftest
+try:
+    import pg_store as _pg1662
+    _R1662_SAVE_TURN = _pg1662.save_turn
+    _R1662_SAVE_HUMAN = _pg1662.save_human
+
+    def _r1662_save_turn(page_id, psid, *a, **k):
+        if str(psid or "").startswith("__"):
+            return None
+        return _R1662_SAVE_TURN(page_id, psid, *a, **k)
+
+    def _r1662_save_human(page_id, psid, *a, **k):
+        if str(psid or "").startswith("__"):
+            return None
+        return _R1662_SAVE_HUMAN(page_id, psid, *a, **k)
+
+    _pg1662.save_turn = _r1662_save_turn
+    _pg1662.save_human = _r1662_save_human
+    print("[R166.2] ไอดีข้อสอบไม่ลง Postgres/ชีต")
+except Exception as _e:
+    print("[R166.2 INSTALL ERROR] " + str(_e))
+
+
+def _r1662_selftest(_=None):
+    try:
+        import pg_store as _p
+        return (_p.save_turn is _r1662_save_turn and _p.save_human is _r1662_save_human
+                and _r1662_save_turn("p", "__T__", {}, "", "", "x") is None)
+    except Exception:
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RH8", "ข้อสอบไม่ทิ้งขยะ (r166.2)", "_r1662_selftest", ("x",), ("truthy", ""),
+         "ไอดีข้อสอบ __…__ ห้ามลง Postgres/ชีต (r166.1 ใช้ไอดีใหม่ทุกรอบ)"),
+    ])
+except Exception as _e:
+    print("[R166.2 EXAM ERROR] " + str(_e))
 
 
 if __name__ == "__main__":
