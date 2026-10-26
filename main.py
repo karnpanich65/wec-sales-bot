@@ -13505,7 +13505,7 @@ def _r163_selftest(which):
     eng._send_to_sheets = lambda *a, **k: None
     eng._get_fb_name = lambda *a, **k: ""
     P = "102444118935634"
-    U = "__R163_" + which + "__"
+    U = "__R163_" + which + "_" + str(time.time_ns() % 10**12) + "__"   # ไอดีใหม่ทุกรอบ: /exam รันซ้ำได้ไม่ติดค่าค้าง
     sk = P + ":" + U
 
     def fresh():
@@ -13552,6 +13552,8 @@ def _r163_selftest(which):
         return False
     finally:
         _lead_states.pop(sk, None)
+        _conversations.pop(U, None)
+        _conversations.pop(sk, None)
 
 
 try:
@@ -13765,7 +13767,7 @@ def _r166_selftest(which):
     eng._send_to_sheets = lambda *a, **k: None
     eng._get_fb_name = lambda *a, **k: ""
     P = "102444118935634"
-    U = "__R166_" + which + "__"
+    U = "__R166_" + which + "_" + str(time.time_ns() % 10**12) + "__"   # ไอดีใหม่ทุกรอบ: /exam รันซ้ำได้ไม่ติดค่าค้าง
     sk = P + ":" + U
     D = {"objective": "ปล่อยเช่า", "income": "เงินเดือน 45,000", "income_n": 45000,
          "debt": "ไม่มีหนี้", "debt_baht": 0, "co_borrower": "ไม่มี"}
@@ -13826,6 +13828,8 @@ def _r166_selftest(which):
         return False
     finally:
         _lead_states.pop(sk, None)
+        _conversations.pop(U, None)
+        _conversations.pop(sk, None)
 
 
 try:
