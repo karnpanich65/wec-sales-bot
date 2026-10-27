@@ -13605,7 +13605,12 @@ _R166_NAME_MARK = "ขอชื่อที่ให้ที่ปรึกษ�
 _R166_TIMEISH = ("เวลา", "โมง", "ทุ่ม", "ตี ", "เช้า", "สาย", "บ่าย", "เย็น", "ค่ำ", "ดึก", "กลางวัน",
                  "เที่ยง", "ว่าง", "สะดวก", "ได้ตลอด", "ตลอด", "เลิกงาน", "พักเที่ยง", "วันหยุด",
                  "เสาร์", "อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "พรุ่งนี้", "วันนี้",
-                 "ตอนนี้", "เดี๋ยว", "หลัง", "ก่อน", "ช่วง", "นาฬิกา", "น.")
+                 "ตอนนี้", "เดี๋ยว", "หลัง", "ก่อน", "ช่วง", "นาฬิกา", "น.",
+                 # r166.3 (เคสจริง 27 ต.ค. 10:11 "โทรได้เลยค่ะ" หลุด)
+                 "โทรได้", "โทรมาได้", "ทุกเวลา", "ทั้งวัน", "ได้หมด", "ก็ได้")
+_R166_NOT_NAME = ("มี", "แถว", "ไหม", "มั้ย", "มัย", "หรือ", "อยาก", "ขอ", "ต้องการ", "สนใจ", "ห้อง",
+                  "คอนโด", "บ้าน", "โครงการ", "ทำงาน", "ไม่", "ได้", "รอ", "ส่ง", "โทร", "ดู", "ราคา")
+_R166_MAX_MISS = 3
 _R166_MONEY = ("บาท", "หมื่น", "พัน", "แสน", "ล้าน", "ผ่อน", "เงินเดือน", "รายได้", "หนี้")
 
 try:
@@ -13650,6 +13655,11 @@ def _r166_name_of(msg):
     except Exception:
         n = ""
     if n and any(k in n for k in _R166_TIMEISH):
+        return ""
+    # r166.3: "มีแถวระยองชล มัเย" เคยหลุดเป็นชื่อ -> ชื่อต้องสั้น และไม่ขึ้นต้น/มีคำบอกความต้องการ
+    if n and (len(t) > 25 or any(len(w) > 12 for w in n.split())
+              or any(n.startswith(k) or (" " + k) in (" " + n) for k in _R166_NOT_NAME)
+              or any(k in n for k in ("แถว", "ไหม", "มั้ย", "ห้อง", "คอนโด", "โครงการ"))):
         return ""
     return n
 
@@ -13722,7 +13732,12 @@ def _process_r166(self, user_message, user_id, referral=None, platform="facebook
                     print("[R166 PERSIST ERROR] " + str(_pe))
                 print("[R166] " + _mask(str(user_id)) + " รับคำตอบหลังปิดแชท: " + note)
                 return reply, None
-            st["r166_await"] = None                      # ไม่ใช่คำตอบ -> ทางเดิม ไม่ถามซ้ำ
+            # r166.3: ไม่ใช่คำตอบ -> ทางเดิม แต่ยังรอคำตอบต่ออีก (เคสจริง: ตอบเรื่องหนี้ก่อน แล้วค่อย "โทรได้เลยค่ะ")
+            st["r166_miss"] = int(st.get("r166_miss") or 0) + 1
+            lim = 2 if st.get("r166_quiet") else _R166_MAX_MISS
+            if st["r166_miss"] >= lim:
+                st["r166_await"] = None
+            print("[R166] " + _mask(str(user_id)) + " ยังไม่ใช่คำตอบ" + want + " (" + str(st["r166_miss"]) + "/" + str(lim) + ")")
     except Exception as _e:
         print("[R166 ERROR in] " + str(_e))
 
@@ -13749,7 +13764,15 @@ def _process_r166(self, user_message, user_id, referral=None, platform="facebook
             ask, st["r166_await"] = R166_NAME_Q, "name"
         elif had_ask_name:
             parts.append(_r166_say(st, R166_NAME_Q, gender))  # เคสไม่แจก: คงคำถามชื่อเดิมไว้ท้ายสุด
+        if not ask and not st.get("chat_name"):
+            # r166.3 (เคสจริง 27 ต.ค. 00:47 เกรด C ตอบ "อิมมี่" หลังเบอร์ แต่แชทปิดไปแล้ว -> ชื่อหาย)
+            # ไม่ถามเพิ่ม แต่รอรับชื่อเงียบๆ 2 ข้อความถัดไป (ประโยคขอเบอร์ขอชื่อไปแล้ว)
+            st["r166_await"], st["r166_at"], st["r166_miss"] = "name", time.time(), 0
+            st["r166_quiet"] = not had_ask_name
+            st["awaiting_name"] = False
+            print("[R166] " + _mask(str(user_id)) + " ได้เบอร์แล้ว -> รอรับชื่อ (ไม่แจก/ไม่ถามเพิ่ม)")
         if ask:
+            st["r166_miss"], st["r166_quiet"] = 0, False
             st["r166_at"] = time.time()
             st["awaiting_name"] = False                  # คำตอบรอบหน้า r166 รับเอง (กันชื่อเพี้ยน)
             parts.append(_r166_say(st, ask, gender))
@@ -13820,11 +13843,32 @@ def _r166_selftest(which):
             say("ขอเป็นช่วงเวลา")
             s = st()
             return s.get("chat_name") in ("", None) and s.get("r166_await") == "name"
+        if which == "debt_then_anytime":           # r166.3 เคสจริง 27 ต.ค. 10:11
+            say("0812345678")
+            say("ผ่อนอยู่เกิน 10000 บาทค่ะ")
+            say("ต้องการปิดหนี้สินเชื่ออื่นๆ")
+            r = say("โทรได้เลยค่ะ")
+            return "บันทึกเวลา" in r and "โทรได้" in str((st().get("data") or {}).get("callback_req"))
+        if which in ("quiet_name", "quiet_not_name"):   # r166.3 เคสจริง 27 ต.ค. 00:47 (เกรด C ไม่แจก)
+            g = globals()
+            old = g.get("_r156_will_call")
+            g["_r156_will_call"] = lambda _s: False
+            try:
+                r1 = say("0812345678")
+                r2 = say("อิมมี่" if which == "quiet_name" else "มีแถวระยองชล มัเยครับ")
+            finally:
+                if old is not None:
+                    g["_r156_will_call"] = old
+            s = st()
+            if which == "quiet_name":
+                return ("ช่วงเวลาไหน" not in r1 and s.get("chat_name") == "อิมมี่" and "อิมมี่" in r2)
+            return not s.get("chat_name")
         if which == "other_msg_falls_through":
             say("0812345678")
             r2 = say("ห้องแถวไหนบ้างคะ?")
             s = st()
-            return s.get("r166_await") is None and "บันทึกเวลา" not in r2
+            return (s.get("r166_await") == "time" and s.get("r166_miss") == 1   # r166.3: ยังรอเวลาต่อ
+                    and "บันทึกเวลา" not in r2)
         return False
     except Exception as _e:
         print("[R166 SELFTEST ERROR] " + which + " " + str(_e))
@@ -13851,6 +13895,12 @@ try:
          "เคสจริง CEO Dashboard: 'ขอเป็นช่วงเวลา' ห้ามกลายเป็นชื่อลูกค้า"),
         ("RH7", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166)", "_r166_selftest", ("other_msg_falls_through",), ("truthy", ""),
          "ลูกค้าถามเรื่องอื่น -> ปล่อยทางเดิม ไม่ยัดเป็นเวลา"),
+        ("RH9", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166.3)", "_r166_selftest", ("debt_then_anytime",), ("truthy", ""),
+         "เคสจริง 27 ต.ค.: ตอบเรื่องหนี้ 2 ข้อความก่อน แล้ว 'โทรได้เลยค่ะ' ต้องเก็บเป็นเวลาสะดวก"),
+        ("RH10", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166.3)", "_r166_selftest", ("quiet_name",), ("truthy", ""),
+         "เคสจริง 27 ต.ค.: เกรด C ส่งชื่อ 'อิมมี่' ตามหลังเบอร์ (แชทปิดแล้ว) ต้องเก็บชื่อได้"),
+        ("RH11", "ขอชื่อ+เบอร์ แล้วถามเวลา (r166.3)", "_r166_selftest", ("quiet_not_name",), ("truthy", ""),
+         "'มีแถวระยองชล มัเยครับ' ห้ามกลายเป็นชื่อ"),
     ])
     print("[R166] ข้อสอบ 7 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
 except Exception as _e:
