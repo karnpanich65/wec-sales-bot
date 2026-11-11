@@ -14351,6 +14351,342 @@ except Exception as _e:
     print("[R166.2 EXAM ERROR] " + str(_e))
 
 
+# ---------- r167 (10 พ.ย. 69 · ทีมแอดมินเพจแจ้ง 3 ข้อ) ----------
+# ตรวจกับ Chat_Log จริง 20 ต.ค.–10 พ.ย.:
+#  1) ลูกค้ากลับมาข้ามวันด้วยข้อความสำเร็จรูปของแอด ("ขอข้อมูลเพิ่มเติมเกี่ยวกับธุรกิจของคุณ...")
+#     115 จาก 163 ครั้งที่ทักกลับข้ามวัน · บอทแนะนำตัวใหม่ + ถาม "ปล่อยเช่าหรืออยู่เอง" ซ้ำ
+#     ทั้งที่ตอบไปแล้ว (เจอ 13 ครั้ง) · ทวนความจำโชว์ขยะ "ไม่ตอบ (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"
+#     -> แก้: ข้อความสำเร็จรูป/ทักสั้นๆ ระหว่างเคสยังคุยค้าง = ทวนสั้นๆ แล้วถามข้อที่ค้างต่อ
+#  2) บูโร: "ไม่ติดเครดิตบูโร" / "ไม่มีแบล็คลิส" / "ไม่มีหนี้เสีย" ถูกอ่านเป็นติดบูโร
+#     (เคสจริง 20 ต.ค. แม่ขอกู้ร่วม "ไม่มีแบล็คลิส" โดนปิดเคสว่าธนาคารไม่รับ)
+#     และ "กำลังจะเข้าคลินิกแก้หนี้" / ปรับโครงสร้างยังผ่อนตามแผน -> บอทขอเบอร์ต่อ (17 ต.ค.)
+#     -> แก้: ตัดประโยคปฏิเสธออกก่อนอ่าน · ปรับโครงสร้าง/ติดบูโรที่ "ยังอยู่ในแผน/กำลังเข้า" = ปิดสุภาพทันที
+#  3) ถามรายได้ ลูกค้าตอบแค่อาชีพ ("ธุรกิจส่วนตัว") -> บอทข้ามไปถามภาระ / เก็บข้อความอาชีพเป็นรายได้
+#     -> แก้: ตอบแค่อาชีพ = รับทราบอาชีพ แล้วถามตัวเลขรายได้ต่อ (สูงสุด 2 ครั้ง แล้วปล่อยทางเดิม)
+# ปิด: R167_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ 6c58c03 (r166.3)
+_R167_OFF = os.environ.get("R167_OFF", "") == "1"
+
+_R167_AD_PREFILL = ("ขอข้อมูลเพิ่มเติมเกี่ยวกับธุรกิจ", "ฉันขอข้อมูลเพิ่มเติม", "ขอข้อมูลเพิ่มเติมเกี่ยวกับเรื่องนี้",
+                    "can i get more info", "สนใจรายละเอียด", "ขอรายละเอียดเพิ่มเติม", "สอบถามรายละเอียด")
+_R167_SHORT_HI = ("สนใจ", "สอบถาม", "สวัสดี", "ขอรายละเอียด", "รายละเอียด", "ขอข้อมูล", "ทักมา", "hello", "hi")
+_R167_RETURN_MSG = "ยินดีต้อนรับกลับมาครับ 🙏"
+_R167_RECAP_MSG = "จากที่คุยกันไว้ {recap} นะครับ"
+_R167_JUNK = ("บอทถาม", "ไม่ตอบ (", "เซลถามตอนโทร", "(ยังไม่ได้ชื่อ)")
+
+
+def _r167_clean(v):
+    s = str(v or "")
+    return "" if any(j in s for j in _R167_JUNK) or s.strip() in ("-", "") else v
+
+
+# ---- (1ข) ทวนความจำ: ห้ามโชว์โน้ตภายใน ----
+try:
+    _R167_BASE_RECAP = _bl166.BotEngine._recap
+    _R167_BASE_RECAP_SHORT = _bl166.BotEngine._recap_short
+
+    def _r167_recap(self, data):
+        d = dict(data or {})
+        for k in ("objective", "income"):
+            d[k] = _r167_clean(d.get(k))
+        return _R167_BASE_RECAP(self, d)
+
+    def _r167_recap_short(self, data):
+        d = dict(data or {})
+        for k in ("objective", "income"):
+            d[k] = _r167_clean(d.get(k))
+        return _R167_BASE_RECAP_SHORT(self, d)
+
+    if not _R167_OFF:
+        _bl166.BotEngine._recap = _r167_recap
+        _bl166.BotEngine._recap_short = _r167_recap_short
+except Exception as _e:
+    print("[R167 RECAP INSTALL ERROR] " + str(_e))
+
+
+# ---- (2) บูโร: ตัดประโยคปฏิเสธ + "ยังอยู่ในแผน/กำลังเข้า" = ยังติด ----
+def _r167_n(t):
+    return _bl166._norm_th(str(t or "").replace("ใม่", "ไม่"))
+
+
+_R167_NCB_TERMS = [_r167_n(w) for w in (
+    "เครดิตบูโร", "บูโร", "บูโล", "บุโร", "แบล็คลิสต์", "แบล็คลิส", "แบล็ค", "แบลค", "แบคลิส", "แบค",
+    "blacklist", "backlist", "หนี้เสีย", "npl", "ค้างชำระ", "ฟ้อง", "บัญชีดำ",
+    "ปรับปรุงโครงสร้างหนี้", "ปรับโครงสร้างหนี้", "ปรับปรุงโครงสร้าง", "ปรับโครงสร้าง", "ปรับหนี้",
+    "ประนอมหนี้", "พักชำระหนี้", "พักหนี้", "คลินิกแก้หนี้")]
+_R167_TERM_RE = "(?:" + "|".join(re.escape(t) for t in sorted(set(_R167_NCB_TERMS), key=len, reverse=True)) + ")"
+_R167_NEG_RE = re.compile(r"(?:ไม|ไมเคย|ไมมี|ไมได)(?:เคย|มี|ได|ติด|โดน|ถูก|เป็น|อะไร|เรือง|ปัญหา|ประวัติ|เครดิต)*" + _R167_TERM_RE)
+_R167_OK_RE = re.compile(_R167_TERM_RE + r"(?:ก็|ของ\S{0,6})?(?:ปกติ|สวย|ผ่าน|ดี|โอเค|ok|ไมมีปัญหา|ไมติด|เคลียร|ขาว)")
+_R167_ONGOING = [_r167_n(w) for w in (
+    "กำลังจะเข้า", "กำลังเข้า", "กำลังทำ", "กำลังปรับ", "กำลังยื่น", "อยู่ระหว่าง", "ยังผ่อนตามแผน", "ผ่อนตามแผน",
+    "ยังอยู่ในแผน", "เพิ่งปรับ", "เพิ่งเข้า", "เพิ่งทำ", "เข้าคลินิก", "เข้าคลีนิก", "จะเข้าคลินิก", "จะเข้าคลีนิก",
+    "ยังไม่ครบ", "ยังไม่จบ", "ยังปรับอยู่", "ปรับอยู่")]
+
+
+def _r167_strip_neg(msg):
+    n = _r167_n(msg)
+    n = _R167_NEG_RE.sub(" ", n)
+    n = _R167_OK_RE.sub(" ", n)
+    return n
+
+
+def _r167_ongoing(msg):
+    n = _r167_n(msg)
+    return any(w in n for w in _R167_ONGOING)
+
+
+try:
+    _R167_BASE_NCB_KIND = _bl166._ncb_kind
+    _R167_BASE_HARD = _bl166._is_hard_ncb
+    _R167_BASE_STILL = _bl166._ncb_still_stuck
+
+    def _r167_ncb_kind(msg):
+        return _R167_BASE_NCB_KIND(_r167_strip_neg(msg))
+
+    def _r167_is_hard(msg):
+        return _R167_BASE_HARD(_r167_strip_neg(msg))
+
+    def _r167_still(msg):
+        r = _R167_BASE_STILL(msg)
+        if r is None and _r167_ongoing(msg):
+            return True
+        return r
+
+    if not _R167_OFF:
+        # "คลีนิก" (สระอี) — เคสจริง 17 ต.ค. พิมพ์แบบนี้ ตัวเดิมรู้จักแค่ "คลินิก"
+        _bl166._NCB_RESTRUCT_WORDS = tuple(_bl166._NCB_RESTRUCT_WORDS) + (
+            "คลีนิกแก้หนี้", "คลีนิกแก้หนี", "เข้าคลินิก", "เข้าคลีนิก")
+        _bl166._ncb_kind = _r167_ncb_kind
+        _bl166._is_hard_ncb = _r167_is_hard
+        _bl166._ncb_still_stuck = _r167_still
+        print("[R167] บูโร: ตัดประโยคปฏิเสธ ('ไม่ติดบูโร') · ยังอยู่ในแผน/กำลังเข้าคลินิก = ยังติด")
+except Exception as _e:
+    print("[R167 NCB INSTALL ERROR] " + str(_e))
+
+
+# ---- (3) ตอบแค่อาชีพตอนถามรายได้ ----
+_R167_SELF = ("ธุรกิจ", "กิจการ", "ค้าขาย", "ขายของ", "ขายออนไลน์", "อาชีพอิสระ", "อิสระ", "ฟรีแลนซ์", "freelance",
+              "รับจ้าง", "ไม่ประจำ", "ไม่ได้ทำงานประจำ", "ไม่ได้ประจำ", "เปิดร้าน", "มีร้าน", "เจ้าของ", "ค้าขาย",
+              "แม่ค้า", "พ่อค้า", "นายหน้า", "ทำเอง", "ส่วนตัว")
+_R167_SALARY = ("พนักงาน", "งานประจำ", "ทำงานประจำ", "ประจำ", "ข้าราชการ", "รับราชการ", "รัฐวิสาหกิจ", "ลูกจ้าง",
+                "บริษัทเอกชน", "มนุษย์เงินเดือน")
+_R167_AMOUNT = re.compile(r"\d|หมื่น|พัน|แสน|ล้าน|k\b|เค\b")
+_R167_REFUSE = ("ไม่สะดวกบอก", "ขอไม่บอก", "ไม่อยากบอก", "ไม่ขอบอก", "ไม่บอก", "เป็นความลับ", "ไม่มีรายได้", "ว่างงาน")
+_R167_Q_SELF = ("รับทราบครับ 🙏 ขอตัวเลขอีกนิดครับ รายได้เข้าบัญชี (หรือกำไร) เดือนละประมาณเท่าไหร่ครับ "
+                "บอกเป็นช่วงก็ได้ เช่น 3-4 หมื่น ไม่ต้องเป๊ะครับ")
+_R167_Q_SAL = ("รับทราบครับ งานประจำ 🙏 แล้วเงินเดือนประมาณเท่าไหร่ครับ "
+               "บอกเป็นช่วงก็ได้ เช่น 3-4 หมื่น ยอดก่อนหักก็ได้ครับ")
+
+
+def _r167_job_only(msg):
+    """คืน ('self'|'salary', ข้อความอาชีพ) ถ้าข้อความบอกแค่อาชีพ ไม่มีตัวเลขรายได้"""
+    t = re.sub(r"\s+", " ", str(msg or "")).strip()
+    if not t or len(t) > 60 or "?" in t or _R167_AMOUNT.search(t.lower()):
+        return None
+    if any(w in t for w in _R167_REFUSE) and "ธุรกิจส่วนตัว" not in t:
+        return None
+    if re.search(r"(ไหม|มั้ย|มัย|หรือเปล่า|ได้ไหม|ใช่ไหม|อย่างเดียว|ไหมคะ|ไหมครับ)\s*(คะ|ครับ|ค่ะ)?$", t):
+        return None
+    job = t
+    for tail in ("ครับผม", "ครับ", "ค่ะ", "คะ", "ค่า", "จ้า", "นะ"):
+        while job.endswith(tail):
+            job = job[:-len(tail)].strip()
+    if any(w in t for w in _R167_SELF) and not re.search(r"(พนักงาน|ข้าราชการ|รับราชการ)", t):
+        return "self", job
+    if any(w in t for w in _R167_SALARY):
+        return "salary", job
+    return None
+
+
+def _r167_has_income_n(data):
+    if data.get("income_n"):
+        return True
+    return bool(re.search(r"\d|หมื่น|พัน|แสน", str(data.get("income") or "")))
+
+
+def _r167_is_prefill(msg):
+    t = re.sub(r"\s+", " ", str(msg or "")).strip().lower()
+    if any(p in t for p in _R167_AD_PREFILL):
+        return True
+    if len(t) <= 25 and not re.search(r"\d", t) and "?" not in t:
+        core = t
+        for tail in ("ครับผม", "ครับ", "ค่ะ", "คะ", "ค่า", "จ้า", "นะ", "!", "."):
+            while core.endswith(tail):
+                core = core[:-len(tail)].strip()
+        return core in _R167_SHORT_HI
+    return False
+
+
+def _r167_pre(self, st, msg, user_id, gender):
+    """คืน (reply, grade, note) ถ้า r167 ตอบเอง · None = ปล่อยทางเดิม"""
+    if not st or st.get("handover") or st.get("bot_off") or st.get("closed"):
+        return None
+    data = st.setdefault("data", {})
+    done = bool(st.get("done"))
+    # (2) บูโร/ปรับโครงสร้างที่ยังอยู่ในแผน = ปิดสุภาพ (ทุกจังหวะของบทสนทนา ยกเว้นซื้อสด)
+    kind = _r167_ncb_kind(msg)
+    if (kind in ("restruct", "blacklist") and not done and not data.get("cash")
+            and (_R167_BASE_STILL(msg) is True or _r167_ongoing(msg))):
+        st["ncb_kind"] = kind
+        data["ncb_raw"] = str(msg)[:200]
+        data["ncb_still"] = True
+        self._ncb_hard_close(st, user_id)
+        grade = self._finish(user_id, st, "-", calendar=False)
+        return _bl166.NCB_SOFT_CLOSE, grade, "บูโร/ปรับโครงสร้างยังอยู่ในแผน -> ปิดสุภาพ ไม่ขอเบอร์"
+    if done or st.get("soft_close"):
+        return None
+    pending_flags = any(st.get(k) for k in ("awaiting_ncb", "awaiting_age", "ncb_pending", "r163_pending", "r166_await"))
+    aw = st.get("awaiting")
+    # (3) ตอบแค่อาชีพตอนรอรายได้
+    if aw == "income" and not pending_flags and not _r167_has_income_n(data) and not data.get("cash"):
+        j = _r167_job_only(msg)
+        n = int(st.get("r167_job_asks") or 0)
+        if j and n < 2:
+            kind_j, job = j
+            st["r167_job_asks"] = n + 1
+            data["job"] = job[:60]
+            if kind_j == "self":
+                st["self_employed"] = True
+            st.setdefault("asked", {})["income"] = int(st.get("asked", {}).get("income", 0)) + 1
+            q = (_R167_Q_SELF if kind_j == "self" else _R167_Q_SAL).format(job=job[:40])
+            return q, None, "ตอบแค่อาชีพ (" + kind_j + ") -> ถามตัวเลขรายได้ต่อ"
+    # (1) ทักกลับด้วยข้อความแอด/ทักสั้นๆ ระหว่างเคสยังค้าง -> ทวน + ถามข้อที่ค้าง
+    if (_r167_is_prefill(msg) and not pending_flags and _r167_clean(data.get("objective"))
+            and aw and aw != "objective"):
+        f, q = self._next_missing(data, st)
+        if f and q and f != "objective":
+            parts = [_R167_RETURN_MSG]
+            try:
+                rc = self._recap(data)
+            except Exception:
+                rc = ""
+            if rc:
+                parts[0] = _R167_RETURN_MSG + " " + _R167_RECAP_MSG.format(recap=rc)
+            parts.append(q)
+            st["awaiting"] = f
+            st.setdefault("asked", {})[f] = int(st.get("asked", {}).get(f, 0)) + 1
+            return MSG_SPLIT.join(parts), None, "ทักกลับด้วยข้อความแอด -> ทวน + ถามข้อค้าง (" + f + ")"
+    return None
+
+
+_R167_BASE_PROCESS = CalmBotEngine.process
+
+
+def _process_r167(self, user_message, user_id, referral=None, platform="facebook",
+                  page_id="", brand="", sheet_tab="", gender=""):
+    if not _R167_OFF:
+        skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+        st = _lead_states.get(skey)
+        try:
+            got = _r167_pre(self, st, str(user_message or ""), user_id, gender) if st else None
+        except Exception as _e:
+            print("[R167 ERROR] " + str(_e))
+            got = None
+        if got:
+            reply, grade, note = got
+            reply = MSG_SPLIT.join(_r166_say(st, p, gender) for p in str(reply).split(MSG_SPLIT))
+            st["last_seen"] = int(time.time())
+            try:
+                self._log(user_id, user_message, reply)
+                self._persist(user_id, st, user_message, reply, "r167")
+            except Exception as _pe:
+                print("[R167 PERSIST ERROR] " + str(_pe))
+            print("[R167] " + _mask(str(user_id)) + " " + note)
+            return reply, grade
+    return _R167_BASE_PROCESS(self, user_message, user_id, referral=referral, platform=platform,
+                              page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+
+
+CalmBotEngine.process = _process_r167
+print("[R167] ชั้นนอกสุด: ทักกลับด้วยข้อความแอด = ถามข้อค้างต่อ · ตอบแค่อาชีพ = ถามรายได้ต่อ · บูโรปฏิเสธ/ยังอยู่ในแผน")
+
+
+def _r167_selftest(which):
+    eng = CalmBotEngine()
+    eng._send_to_sheets = lambda *a, **k: None
+    eng._get_fb_name = lambda *a, **k: ""
+    P = "102444118935634"
+    U = "__R167_" + which + "_" + str(time.time_ns() % 10**12) + "__"
+    sk = P + ":" + U
+
+    def say(t):
+        o = eng.process(t, U, page_id=P)
+        return str(o[0] if isinstance(o, tuple) else o)
+
+    def st():
+        return _lead_states.get(sk) or {}
+    try:
+        if which == "neg_kind":
+            return (_bl166._ncb_kind("ไม่ติดเครดิตบูโร") == "" and _bl166._ncb_kind("ใม่มีหนี้เสียค่ะ") == ""
+                    and not _bl166._is_hard_ncb("ไม่มีแบล็คลิส มี statement")
+                    and _bl166._ncb_kind("เช็คเครดิตบูโรแล้วปกติดี") == ""
+                    and _bl166._ncb_kind("ติดบูโรค่ะ") == "blacklist"
+                    and _bl166._ncb_kind("เคยปรับโครงสร้างหนี้") == "restruct"
+                    and _bl166._is_hard_ncb("ติดแบล็คลิสต์ค่ะ"))
+        if which == "ongoing_close":
+            _lead_states[sk] = {"data": {"objective": "ปล่อยเช่า", "income": "50,000", "income_n": 50000},
+                                "signals": [], "asked": {}, "awaiting": "debt", "page_id": P,
+                                "last_seen": int(time.time()), "psid": U}
+            r = say("กำลังจะเข้าคลีนิกแก้หนี้อีก 2 ธนาคารครับ")
+            s = st()
+            return ("ยังไม่รับ" in r and "เบอร์" not in r and (s.get("data") or {}).get("ncb_still") is True
+                    and s.get("contact_refused"))
+        if which == "job_only":
+            _lead_states[sk] = {"data": {"objective": "ปล่อยเช่า"}, "signals": [], "asked": {"income": 1},
+                                "awaiting": "income", "page_id": P, "last_seen": int(time.time()), "psid": U}
+            r1 = say("ธุรกิจส่วนตัวค่ะ")
+            s = st()
+            ok1 = ("รายได้" in r1 and "ผ่อน" not in r1 and s.get("awaiting") == "income"
+                   and s.get("self_employed") and not (s.get("data") or {}).get("income"))
+            r2 = say("ประมาณ 50,000 ค่ะ")
+            return ok1 and bool((st().get("data") or {}).get("income")) and "รายได้เดือนละ" not in r2
+        if which == "job_salary":
+            _lead_states[sk] = {"data": {"objective": "อยู่เอง"}, "signals": [], "asked": {"income": 1},
+                                "awaiting": "income", "page_id": P, "last_seen": int(time.time()), "psid": U}
+            r1 = say("พนักงานประจำค่ะ")
+            return "เงินเดือน" in r1 and st().get("awaiting") == "income" and not st().get("self_employed")
+        if which == "job_question_passes":
+            return _r167_job_only("ต้องเป็นพนักงานประจำอย่างเดียวใช่ไหมค่ะ") is None and _r167_job_only("30,000 ประจำ") is None
+        if which == "ad_return":
+            _lead_states[sk] = {"data": {"objective": "ปล่อยเช่า", "income": "ไม่ตอบ (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"},
+                                "signals": [], "asked": {"contact": 1}, "awaiting": "debt", "page_id": P,
+                                "last_seen": int(time.time()) - 3 * 86400, "psid": U}
+            r = say("ขอข้อมูลเพิ่มเติมเกี่ยวกับธุรกิจของคุณหน่อยได้ไหมครับ")
+            return ("ยินดีต้อนรับกลับ" in r and "บอทถาม" not in r and "อยู่เอง" not in r
+                    and "ผ่อน" in r and "เราช่วย" not in r)
+        if which == "recap_clean":
+            return "บอทถาม" not in eng._recap({"objective": "ปล่อยเช่า", "income": "ไม่ตอบ (บอทถาม 3 ครั้ง — เซลถามตอนโทร)"})
+        return False
+    except Exception as _e:
+        print("[R167 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _lead_states.pop(sk, None)
+        _conversations.pop(U, None)
+        _conversations.pop(sk, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RJ1", "บูโร (r167)", "_r167_selftest", ("neg_kind",), ("truthy", ""),
+         "เคสจริง 17-22 ต.ค.: 'ไม่ติดเครดิตบูโร' / 'ไม่มีหนี้เสีย' / 'ไม่มีแบล็คลิส' ห้ามนับเป็นติดบูโร"),
+        ("RJ2", "บูโร (r167)", "_r167_selftest", ("ongoing_close",), ("truthy", ""),
+         "เคสจริง 17 ต.ค.: 'กำลังจะเข้าคลินิกแก้หนี้' = ยังอยู่ในแผน -> ปิดสุภาพ ห้ามขอเบอร์"),
+        ("RJ3", "รายได้ (r167)", "_r167_selftest", ("job_only",), ("truthy", ""),
+         "แอดมินแจ้ง: ตอบ 'ธุรกิจส่วนตัว' อย่างเดียว ต้องถามตัวเลขรายได้ต่อ ไม่ข้ามไปถามภาระ"),
+        ("RJ4", "รายได้ (r167)", "_r167_selftest", ("job_salary",), ("truthy", ""),
+         "ตอบ 'พนักงานประจำ' อย่างเดียว -> ถามเงินเดือน"),
+        ("RJ5", "รายได้ (r167)", "_r167_selftest", ("job_question_passes",), ("truthy", ""),
+         "คำถามกลับ / มีตัวเลขแล้ว -> ไม่ใช่ 'ตอบแค่อาชีพ'"),
+        ("RJ6", "ทักกลับ (r167)", "_r167_selftest", ("ad_return",), ("truthy", ""),
+         "เคสจริง: ทักกลับข้ามวันด้วยข้อความแอด -> ห้ามแนะนำตัว/ถามวัตถุประสงค์ซ้ำ ต้องถามข้อค้าง"),
+        ("RJ7", "ทักกลับ (r167)", "_r167_selftest", ("recap_clean",), ("truthy", ""),
+         "ทวนความจำห้ามโชว์โน้ตภายใน 'ไม่ตอบ (บอทถาม 3 ครั้ง…)'"),
+    ])
+    print("[R167] ข้อสอบ 7 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R167 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
