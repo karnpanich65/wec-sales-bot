@@ -14687,6 +14687,175 @@ except Exception as _e:
     print("[R167 EXAM ERROR] " + str(_e))
 
 
+# ======================================================================
+# r168 (13 พ.ย. 69) — บับเบิลเดิมเป๊ะห้ามส่งซ้ำภายใน 5 บับเบิล
+# อาการ (Bot_Health 12 พ.ย. = วันเต็มวันแรกหลัง r167): "บอทถามซ้ำข้อเดิม" 40 ครั้ง
+#   (10 พ.ย. 12 · 11 พ.ย. 23) · ตัวหลัก 14/40 = บับเบิลเปิด
+#   "เราช่วยดูว่าลงทุนคอนโดปล่อยเช่าไหวไหม แล้วหาห้องที่เหมาะกับงบ..." (ตัวอย่างใน faq_data.py)
+#   ลูกค้าใหม่ส่งข้อความแอดซ้ำ -> AI แต่งบับเบิลเปิดเดิมอีกรอบ
+#   r151/r152 จับได้เฉพาะ "ประโยคคำถาม" -> บับเบิลเปิด (บอกเล่า) หลุดทุกครั้ง · r167 ครอบแค่เคสค้าง
+# วิธีแก้: ชั้นนอกสุด ตัดเฉพาะบับเบิลที่ "ตรงกับบับเบิลที่ส่งไปแล้ว" (60 ตัวแรก ตัดช่องว่าง
+#   แบบเดียวกับตัวสแกน Bot_Health) ใน 5 บับเบิลล่าสุดของแชทนี้ · ไม่แต่งถ้อยคำใหม่
+#   ไม่ยุ่งบับเบิลสั้น (<20 ตัว) · ถ้าตัดแล้วไม่เหลือเลย = ส่งของเดิม (ห้ามเงียบ)
+# ปิด: R168_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ 610fad7 (r167)
+# ======================================================================
+_R168_OFF = os.environ.get("R168_OFF", "") == "1"
+R168_WINDOW = 5
+R168_MIN_LEN = 20
+
+
+def _r168_norm(s):
+    t = re.sub("[​-‍﻿ ]", "", str(s or ""))
+    return re.sub(r"\s+", " ", t).strip()[:60]
+
+
+def _r168_prior_bubbles(user_id, n=R168_WINDOW):
+    """บับเบิลที่บอทส่งไปแล้วในแชทนี้ (ใหม่ -> เก่า) · ประวัติเก็บบับเบิลคั่นด้วย \\n"""
+    out = []
+    try:
+        for m in _recent_bot_msgs(user_id, 6):
+            lines = [x for x in str(m or "").split("\n") if x.strip()]
+            for ln in reversed(lines):
+                out.append(ln)
+                if len(out) >= n:
+                    return out
+    except Exception as _e:
+        print("[R168 PRIOR ERROR] " + str(_e))
+    return out
+
+
+def _r168_dedupe(reply, prior):
+    """คืน (reply ใหม่, จำนวนบับเบิลที่ตัด) · ห้ามคืนข้อความว่าง"""
+    try:
+        if not reply or not str(reply).strip() or not prior:
+            return reply, 0
+        seen = set(_r168_norm(p) for p in prior if len(_r168_norm(p)) >= R168_MIN_LEN)
+        parts = str(reply).split(MSG_SPLIT)
+        keep, cut = [], 0
+        for p in parts:
+            k = _r168_norm(p)
+            if len(k) >= R168_MIN_LEN and k in seen:
+                cut += 1
+                continue
+            keep.append(p)
+            if len(k) >= R168_MIN_LEN:
+                seen.add(k)
+        if cut == 0 or not any(x.strip() for x in keep):
+            return reply, 0
+        return MSG_SPLIT.join(keep), cut
+    except Exception as _e:
+        print("[R168 DEDUPE ERROR] " + str(_e))
+        return reply, 0
+
+
+def _r168_fix_history(user_id, old, new):
+    """แก้ประวัติในหน่วยความจำให้ตรงกับที่ส่งจริง (กันรอบหน้าเทียบผิด)"""
+    try:
+        h = _conversations.get(user_id) or []
+        o = str(old).replace(MSG_SPLIT, "\n")
+        for turn in reversed(h):
+            if turn.get("role") == "assistant":
+                if turn.get("content") == o:
+                    turn["content"] = str(new).replace(MSG_SPLIT, "\n")
+                break
+    except Exception as _e:
+        print("[R168 HISTORY ERROR] " + str(_e))
+
+
+_R168_BASE_PROCESS = CalmBotEngine.process
+
+
+def _process_r168(self, user_message, user_id, referral=None, platform="facebook",
+                  page_id="", brand="", sheet_tab="", gender=""):
+    prior = []
+    if not _R168_OFF:
+        prior = _r168_prior_bubbles(user_id)
+    reply, grade = _R168_BASE_PROCESS(self, user_message, user_id, referral=referral,
+                                      platform=platform, page_id=page_id, brand=brand,
+                                      sheet_tab=sheet_tab, gender=gender)
+    if _R168_OFF or not prior:
+        return reply, grade
+    try:
+        new, cut = _r168_dedupe(reply, prior)
+        if cut:
+            _r168_fix_history(user_id, reply, new)
+            print("[R168] " + _mask(str(user_id)) + " ตัดบับเบิลที่ส่งซ้ำ " + str(cut) + " บับเบิล")
+            reply = new
+    except Exception as _e:
+        print("[R168 ERROR] " + str(_e) + " — ใช้คำตอบเดิม")
+    return reply, grade
+
+
+CalmBotEngine.process = _process_r168
+print("[R168] ชั้นนอกสุด: บับเบิลเดิมเป๊ะห้ามส่งซ้ำภายใน 5 บับเบิล (ไม่แต่งคำใหม่ ไม่เงียบ)")
+
+_R168_INTRO = "เราช่วยดูว่าลงทุนคอนโดปล่อยเช่าไหวไหม แล้วหาห้องที่เหมาะกับงบครับ"
+_R168_Q = "ลูกค้าสนใจลงทุนปล่อยเช่า หรืออยู่เองครับ"
+
+
+def _r168_selftest(which):
+    U = "__r168_selftest_" + which + "_" + str(int(time.time() * 1000)) + "__"
+    try:
+        if which == "intro_cut":
+            # เคสจริง 12 พ.ย.: ส่งข้อความแอดซ้ำ -> บับเบิลเปิดเดิมต้องถูกตัด เหลือบับเบิลคำถาม
+            r, c = _r168_dedupe(_R168_INTRO + MSG_SPLIT + "ตอบสั้นๆ ได้เลยครับ ซื้อไว้ปล่อยเช่า หรือซื้อไว้อยู่เองครับ",
+                                [_R168_Q, _R168_INTRO])
+            return c == 1 and _R168_INTRO not in r and "ตอบสั้นๆ" in r
+        if which == "never_silent":
+            r, c = _r168_dedupe(_R168_INTRO, [_R168_INTRO])
+            return c == 0 and r == _R168_INTRO
+        if which == "short_kept":
+            r, c = _r168_dedupe("ขอบคุณครับ" + MSG_SPLIT + _R168_Q, ["ขอบคุณครับ", "อย่างอื่น"])
+            return c == 0 and "ขอบคุณครับ" in r
+        if which == "spacing_same":
+            # ตัวสแกนตัดช่องว่างซ้ำ/ตัวล่องหน -> ต้องนับว่าเป็นบับเบิลเดียวกัน
+            r, c = _r168_dedupe(_R168_INTRO.replace(" ", "  ") + "​" + MSG_SPLIT + "อีกข้อนะครับ งบประมาณที่มองไว้ประมาณเท่าไหร่ครับ",
+                                [_R168_INTRO])
+            return c == 1 and "งบประมาณ" in r
+        if which == "history_window":
+            # ประวัติเก็บบับเบิลคั่นด้วย \n -> ต้องแตกเป็นบับเบิลได้ และดูแค่ 5 บับเบิลล่าสุด
+            _conversations[U] = [
+                {"role": "user", "content": "ขอข้อมูลเพิ่มเติม"},
+                {"role": "assistant", "content": _R168_INTRO + "\n" + _R168_Q},
+            ]
+            p = _r168_prior_bubbles(U)
+            ok1 = (_R168_INTRO in p and _R168_Q in p)
+            _conversations[U] = [{"role": "assistant", "content": _R168_INTRO}] + [
+                {"role": "assistant", "content": "บับเบิลอื่นข้อที่ " + str(i) + " ยาวพอให้นับนะครับ"} for i in range(5)]
+            p2 = _r168_prior_bubbles(U)
+            return ok1 and _R168_INTRO not in p2 and len(p2) == 5
+        if which == "fix_history":
+            _conversations[U] = [{"role": "assistant", "content": _R168_INTRO + "\n" + _R168_Q}]
+            _r168_fix_history(U, _R168_INTRO + MSG_SPLIT + _R168_Q, _R168_Q)
+            return _conversations[U][-1]["content"] == _R168_Q
+        return False
+    except Exception as _e:
+        print("[R168 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _conversations.pop(U, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RK1", "ส่งซ้ำ (r168)", "_r168_selftest", ("intro_cut",), ("truthy", ""),
+         "เคสจริง Bot_Health 12 พ.ย. (14/40): บับเบิลเปิด 'เราช่วยดูว่าลงทุนคอนโด…' ส่งซ้ำ -> ต้องตัด เหลือคำถาม"),
+        ("RK2", "ส่งซ้ำ (r168)", "_r168_selftest", ("never_silent",), ("truthy", ""),
+         "ตัดแล้วไม่เหลือ -> ต้องส่งของเดิม ห้ามเงียบ"),
+        ("RK3", "ส่งซ้ำ (r168)", "_r168_selftest", ("short_kept",), ("truthy", ""),
+         "บับเบิลสั้น (ขอบคุณครับ) ไม่ใช่การถามซ้ำ ห้ามตัด"),
+        ("RK4", "ส่งซ้ำ (r168)", "_r168_selftest", ("spacing_same",), ("truthy", ""),
+         "ช่องว่าง/ตัวล่องหนต่างกัน ต้องนับเป็นบับเบิลเดียวกันแบบตัวสแกน"),
+        ("RK5", "ส่งซ้ำ (r168)", "_r168_selftest", ("history_window",), ("truthy", ""),
+         "ประวัติคั่น \\n ต้องแตกเป็นบับเบิล และดูแค่ 5 บับเบิลล่าสุด"),
+        ("RK6", "ส่งซ้ำ (r168)", "_r168_selftest", ("fix_history",), ("truthy", ""),
+         "ประวัติในหน่วยความจำต้องตรงกับที่ส่งจริง"),
+    ])
+    print("[R168] ข้อสอบ 6 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R168 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
