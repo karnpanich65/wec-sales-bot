@@ -14933,6 +14933,230 @@ except Exception as _e:
     print("[R169 EXAM ERROR] " + str(_e))
 
 
+# ---------- r170 (14 พ.ย. 69 · Gift: "ต้องเก็บ แจกทุกกรณี ไม่เน้นคน") ----------
+# log 13–14 พ.ย.:
+#  1) แชทที่บอทปิดเอง (รายได้ไม่ถึง / ปิดเคส = closed ไม่ใช่ bot_off) -> ลูกค้าให้เบอร์ทีหลัง
+#     (เช่น ทีมพิมพ์ขอเบอร์ 14 พ.ย. เพจ Millionaire Asset) บอทเงียบ ไม่เก็บ ไม่แจก
+#     r158 ครอบเฉพาะ bot_off -> r170 ครอบ closed ด้วย: เบอร์ใหม่ = แจกทันที (ให้เซลตัดสิน)
+#  2) ข้อความที่ลูกค้าพิมพ์หลังปิดแชท (เช่น "คนกู้เป็นหลาน", "มีปิดหนี้ให้ก่อนไหม") ไม่ลงชีต
+#     -> เก็บเป็นสัญญาณให้เซล (สูงสุด 3 ข้อความ/แชท) + อัปเดตแถวเดิม
+#  3) "ขอบคุณค่ะที่สละเวลา" ถูกเก็บเป็นเวลาสะดวกโทร (ทับ "หลัง 6 โมง") · "คุณตาลคะ" ไม่ได้เป็นชื่อ
+# ไม่แตะถ้อยคำที่ส่งลูกค้า / เกรด / กฎแจก · ปิด R170_OFF=1 · ย้อน: main.py ของ a4b8e8b (r169)
+_R170_OFF = os.environ.get("R170_OFF", "") == "1"
+_R170_NOTE_MAX = 3
+_R170_TRIVIAL = ("ครับ", "ค่ะ", "คะ", "ค่า", "ขอบคุณ", "โอเค", "ok", "ได้ครับ", "ได้ค่ะ", "จ้า", "จ้ะ", "รับทราบ",
+                 "สวัสดี", "👍", "🙏", "ค่ะๆ", "ครับๆ")
+_R170_SIG_CONTACT = ("📞 ลูกค้าให้เบอร์หลังบอทปิดแชท (รายได้ไม่ถึงเกณฑ์/ปิดเคสไปแล้ว) "
+                     "— บอทเก็บและแจกให้เซลตัดสินเอง (r170)")
+_R170_SIG_INCOME = "📝 ลูกค้าให้รายได้หลังบอทปิดแชท — อัปเดตแถวให้ (r170)"
+
+
+def _r170_substantive(msg):
+    t = re.sub(r"\s+", " ", str(msg or "")).strip()
+    if len(t) < 6:
+        return False
+    core = t.lower()
+    for w in _R170_TRIVIAL:
+        core = core.replace(w, "")
+    return len(re.sub(r"[\s\.\!\?,]", "", core)) >= 5
+
+
+def _r170_absorb(self, user_id, st, msg):
+    """แชทที่ปิดแล้ว (closed / bot_off) -> เก็บทุกอย่าง แจก/อัปเดตแถว คืนชนิดที่ทำ"""
+    d = st.setdefault("data", {})
+    if st.get("lead_sent") and d.get("contact"):
+        st["handover_lead_contact"] = True
+    had_c, had_i = bool(d.get("contact")), bool(d.get("income"))
+    try:
+        will = self._handover_absorb(user_id, st, msg, dispatch=False)
+    except Exception as _e:
+        print("[R170 ABSORB ERROR] " + str(_e))
+        will = False
+    kind = ""
+    if d.get("contact") and not had_c:
+        kind = "contact"
+    elif will and not d.get("contact") and not st.get("lead_sent"):
+        kind = "partial"
+    elif d.get("income") and not had_i and not st.get("r158_income_upd"):
+        kind = "income"
+    elif _r170_substantive(msg) and int(st.get("r170_notes") or 0) < _R170_NOTE_MAX:
+        kind = "note"
+    if not kind:
+        return ""
+    if kind == "contact":
+        st["contact_refused"] = False          # ให้เบอร์เอง = ยอมให้โทร
+        st["below_threshold"] = False          # Gift: แจกทุกกรณี ให้เซลตัดสิน
+        self._add_signal(st, _R170_SIG_CONTACT)
+    elif kind == "income":
+        st["r158_income_upd"] = True
+        self._add_signal(st, _R170_SIG_INCOME)
+    elif kind == "note":
+        st["r170_notes"] = int(st.get("r170_notes") or 0) + 1
+        self._add_signal(st, "💬 หลังปิดแชท ลูกค้าพิมพ์: " + re.sub(r"\s+", " ", str(msg)).strip()[:100])
+    g = d.get("grade", "-")
+    try:
+        if kind in ("contact", "partial"):
+            g = self._finish(user_id, st, d.get("contact", ""), calendar=(kind == "contact"))
+        else:
+            self._upsert_lead(st)           # อัปเดตแถวเดิม (รวมสัญญาณ) ไม่แจกซ้ำ ไม่นัดซ้ำ
+    except Exception as _e:
+        print("[R170 FINISH ERROR] " + str(_e))
+        return ""
+    print("[R170] " + _mask(str(user_id)) + " แชทปิดแล้ว -> " + kind + " · เกรด " + str(g)
+          + " · เบอร์ " + ("มี" if d.get("contact") else "ยังไม่มี"))
+    return kind
+
+
+# ---- (3) เวลาสะดวกโทร / ชื่อ ----
+_R170_THANKS = ("ขอบคุณ", "สละเวลา", "เสียเวลา", "ขอโทษ", "รบกวน")
+try:
+    _R170_BASE_TIME_OF = _r166_time_of
+    _R170_BASE_NAME_OF = _r166_name_of
+
+    def _r170_time_of(msg):
+        t = str(msg or "")
+        if any(w in t for w in _R170_THANKS) and not re.search(r"\d", t):
+            return ""
+        return _R170_BASE_TIME_OF(msg)
+
+    def _r170_name_of(msg):
+        n = _R170_BASE_NAME_OF(msg)
+        if n:
+            return n
+        t = str(msg or "").strip()
+        if any(w in t for w in _R170_THANKS):
+            return ""
+        t2 = re.sub(r"^(คุณ|ชื่อ|ผม|ดิฉัน|หนู|พี่)\s*", "", t)
+        if t2 != t and t2:
+            n2 = _R170_BASE_NAME_OF(t2)
+            if n2 and len(n2) <= 15:
+                return n2
+        return ""
+
+    if not _R170_OFF:
+        _r166_time_of = _r170_time_of
+        _r166_name_of = _r170_name_of
+except Exception as _e:
+    print("[R170 R166-FIX ERROR] " + str(_e))
+
+
+_R170_BASE_PROCESS = CalmBotEngine.process
+
+
+def _process_r170(self, user_message, user_id, referral=None, platform="facebook",
+                  page_id="", brand="", sheet_tab="", gender=""):
+    skey = (str(page_id) + ":" + str(user_id)) if page_id else str(user_id)
+    st0 = _lead_states.get(skey) or {}
+    was_closed = bool(st0.get("closed")) and not st0.get("handover")
+    was_off = bool(st0.get("bot_off"))
+    n_sig0 = len(st0.get("signals") or [])
+    _d0 = st0.get("data") or {}
+    snap0 = (str(_d0.get("contact") or ""), str(_d0.get("income") or ""), str(_d0.get("callback_req") or ""),
+             str(st0.get("chat_name") or ""), str(st0.get("r166_await") or ""), int(st0.get("r166_miss") or 0))
+    out = _R170_BASE_PROCESS(self, user_message, user_id, referral=referral, platform=platform,
+                             page_id=page_id, brand=brand, sheet_tab=sheet_tab, gender=gender)
+    if _R170_OFF or not (was_closed or was_off):
+        return out
+    try:
+        st = _lead_states.get(skey)
+        if not st:
+            return out
+        # bot_off: r158 จัดการเบอร์/รายได้แล้ว (ถ้ามีสัญญาณ r158 ใหม่ = ทำแล้ว) -> r170 เก็บเฉพาะโน้ต
+        sigs = st.get("signals") or []
+        r158_did = any("(r158)" in str(s) for s in sigs[n_sig0:])
+        if was_off and r158_did:
+            return out
+        _d1 = st.get("data") or {}
+        snap1 = (str(_d1.get("contact") or ""), str(_d1.get("income") or ""), str(_d1.get("callback_req") or ""),
+                 str(st.get("chat_name") or ""), str(st.get("r166_await") or ""), int(st.get("r166_miss") or 0))
+        if snap1 != snap0:
+            return out                      # ชั้นอื่นเก็บข้อความนี้ไปแล้วในเทิร์นนี้ (เบอร์/เวลา/ชื่อ) — ไม่ทำซ้ำ
+        _r170_absorb(self, user_id, st, str(user_message or ""))
+    except Exception as _e:
+        print("[R170 ERROR] " + str(_e))
+    return out
+
+
+if not _R170_OFF:
+    CalmBotEngine.process = _process_r170
+    print("[R170] ชั้นนอกสุด: แชทที่ปิดแล้ว (closed/bot_off) เก็บเบอร์/รายได้/โน้ต + แจกทุกกรณี "
+          "· เวลาสะดวกไม่รับคำขอบคุณ · ชื่อ 'คุณ…'")
+
+
+def _r170_selftest(which):
+    eng = CalmBotEngine()
+    sent = []
+    eng._send_to_sheets = lambda *a, **k: sent.append((a, k))
+    eng._get_fb_name = lambda *a, **k: ""
+    P = "102444118935634"
+    U = "__R170_" + which + "_" + str(time.time_ns() % 10**12) + "__"
+    sk = P + ":" + U
+
+    def say(t):
+        o = eng.process(t, U, page_id=P)
+        return str(o[0] if isinstance(o, tuple) else o)
+
+    def st():
+        return _lead_states.get(sk) or {}
+    base = {"objective": "ปล่อยเช่า", "income": "18,000", "income_n": 18000, "debt": "ไม่มี", "debt_baht": 0}
+    try:
+        if which == "closed_phone":
+            _lead_states[sk] = {"data": dict(base), "signals": [], "asked": {}, "awaiting": None, "page_id": P,
+                                "closed": True, "closed_at": int(time.time()), "below_threshold": True,
+                                "contact_refused": True, "last_seen": int(time.time()), "psid": U}
+            r = say("0891234567 ค่ะ")
+            s = st()
+            d = s.get("data") or {}
+            return ("0891234567" in str(d.get("contact")) and len(sent) >= 1
+                    and not s.get("contact_refused") and any("(r170)" in str(x) for x in s.get("signals") or []))
+        if which == "closed_note":
+            _lead_states[sk] = {"data": dict(base, contact="0891234567"), "signals": [], "asked": {},
+                                "awaiting": None, "page_id": P, "bot_off": True, "lead_sent": True,
+                                "last_seen": int(time.time()), "psid": U}
+            ups = []
+            eng._upsert_lead = lambda *a, **k: ups.append(1)
+            say("คนกู้เป็นหลานนะครับ")
+            say("ครับ")
+            s = st()
+            notes = [x for x in s.get("signals") or [] if "หลังปิดแชท ลูกค้าพิมพ์" in str(x)]
+            return len(notes) == 1 and "หลาน" in notes[0] and len(ups) == 1 and not sent
+        if which == "thanks_not_time":
+            return _r166_time_of("ขอบคุณคะที่สละเวลา") == "" and bool(_r166_time_of("หลัง 6 โมงเย็นค่ะ"))
+        if which == "name_khun":
+            return _r166_name_of("คุณตาลคะ") == "ตาล" and _r166_name_of("ขอบคุณค่ะ") == ""
+        if which == "open_untouched":
+            _lead_states[sk] = {"data": {"objective": "ปล่อยเช่า"}, "signals": [], "asked": {}, "awaiting": "income",
+                                "page_id": P, "last_seen": int(time.time()), "psid": U}
+            say("คนกู้เป็นหลานนะครับ")
+            return not any("หลังปิดแชท" in str(x) for x in st().get("signals") or [])
+        return False
+    except Exception as _e:
+        print("[R170 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _lead_states.pop(sk, None)
+        _conversations.pop(U, None)
+        _conversations.pop(sk, None)
+
+
+try:
+    _R124_EXAM.extend([
+        ("RM1", "แชทปิดแล้ว (r170)", "_r170_selftest", ("closed_phone",), ("truthy", ""),
+         "14 พ.ย.: แชทปิดเพราะรายได้ไม่ถึง ทีมขอเบอร์ ลูกค้าให้เบอร์ -> ต้องเก็บ + แจก"),
+        ("RM2", "แชทปิดแล้ว (r170)", "_r170_selftest", ("closed_note",), ("truthy", ""),
+         "หลังปิดแชท 'คนกู้เป็นหลาน' ต้องลงสัญญาณให้เซล · 'ครับ' ไม่นับ"),
+        ("RM3", "เวลาสะดวก (r170)", "_r170_selftest", ("thanks_not_time",), ("truthy", ""),
+         "14 พ.ย.: 'ขอบคุณคะที่สละเวลา' ห้ามเป็นเวลาสะดวกโทร"),
+        ("RM4", "ชื่อ (r170)", "_r170_selftest", ("name_khun",), ("truthy", ""),
+         "14 พ.ย.: 'คุณตาลคะ' = ชื่อ ตาล"),
+        ("RM5", "แชทปิดแล้ว (r170)", "_r170_selftest", ("open_untouched",), ("truthy", ""),
+         "แชทที่ยังคุยอยู่ ไม่โดน r170"),
+    ])
+    print("[R170] ข้อสอบ 5 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R170 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
