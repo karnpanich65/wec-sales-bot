@@ -14856,6 +14856,83 @@ except Exception as _e:
     print("[R168 EXAM ERROR] " + str(_e))
 
 
+
+# ===== r169 : ต่อ r146 กลับเข้าสาย requests — 14 พ.ย. 2569 =====
+# อาการจริงจาก log 13-14 พ.ย.: [CLAUDE EXCEPTION] 'text' ~15 ครั้ง/วัน ทุกครั้งตามหลัง
+#   [CLAUDE $] claude-sonnet-5 smart=1 ... out=400  -> ลูกค้าได้ข้อความสำรองแทนคำตอบรุ่นฉลาด
+# ต้นเหตุ: r146 ห่อ requests (อ่านคำตอบให้ทน + เพดาน 1500) แต่ r165 (26 ต.ค.) แทน requests ทั้งก้อน
+#          ด้วยตัวห่อใหม่ที่ชี้ไป requests ดิบ -> ตัวห่อ r146 หลุด เงียบ (out=400 = ไม่ถูกขยายเพดาน)
+# แก้: ห่อ r146 ทับ r165 อีกชั้น (r146 -> r165 -> requests) · ไม่แตะถ้อยคำ/เกรด/กฎแจก/ตัวแปร
+#      ส่งข้อความ FB ยังผ่าน r165 ลองใหม่เหมือนเดิม · ปิด: R169_OFF=1
+# ย้อนกลับ: อัปโหลด main.py ของ commit c601570 (r168)
+try:
+    if os.environ.get("R169_OFF", "") != "1" and "_R146Requests" in globals() \
+            and not isinstance(requests, _R146Requests):
+        requests = _R146Requests(requests)                   # noqa: F811
+        print("[R169] ต่อ r146 กลับแล้ว: r146 -> " + type(requests._base).__name__
+              + " -> requests (รุ่นฉลาดอ่านคำตอบทน + เพดาน " + str(R146_SMART_MAX) + ")")
+    else:
+        print("[R169] ข้าม (ปิดไว้ หรือ r146 อยู่ชั้นนอกแล้ว)")
+except Exception as _e169:
+    print("[R169 ERROR] ต่อไม่ติด — ทำงานแบบเดิม: " + str(_e169))
+
+
+def _r169_selftest(which):
+    try:
+        if which == "chain":
+            return (isinstance(requests, _R146Requests)
+                    and type(requests._base).__name__ == "_R165Requests")
+        if which in ("smart_thinking", "fb_untouched"):
+            sent = {}
+
+            class _FakeResp(object):
+                status_code = 200
+
+                def __init__(self, d):
+                    self._d = d
+
+                def json(self, **kw):
+                    return self._d
+
+            _orig = _rq165.post
+
+            def _fake(url, *a, **kw):
+                sent["url"] = url
+                sent["json"] = kw.get("json")
+                return _FakeResp({"content": [{"type": "thinking", "thinking": "ก"},
+                                              {"type": "text", "text": "ตอบจริงครับ"}],
+                                  "stop_reason": "end_turn"})
+            _rq165.post = _fake
+            try:
+                if which == "smart_thinking":
+                    r = requests.post(_R146_URL, json={"model": str(_bl131.CLAUDE_MODEL_SMART),
+                                                       "max_tokens": 400})
+                    txt = r.json()["content"][0]["text"]
+                    return txt == "ตอบจริงครับ" and sent["json"]["max_tokens"] == R146_SMART_MAX
+                r = requests.post("https://example.invalid/x", json={"a": 1})
+                return "text" not in str(r.json()["content"][0]) or r.json()["content"][0].get("type") == "thinking"
+            finally:
+                _rq165.post = _orig
+        return False
+    except Exception as _e:
+        print("[R169 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RL1", "รุ่นฉลาดตอบหาย (r169)", "_r169_selftest", ("chain",), ("truthy", ""),
+         "ต้องเรียงชั้น r146 -> r165 -> requests (ก่อนแก้ r146 หลุด)"),
+        ("RL2", "รุ่นฉลาดตอบหาย (r169)", "_r169_selftest", ("smart_thinking",), ("truthy", ""),
+         "เคสจริง 14 พ.ย. 07:48: sonnet out=400 แล้ว 'text' -> ต้องได้ข้อความจริง + เพดาน 1500"),
+        ("RL3", "รุ่นฉลาดตอบหาย (r169)", "_r169_selftest", ("fb_untouched",), ("truthy", ""),
+         "URL อื่นที่ไม่ใช่ Claude ต้องไม่ถูกแตะคำตอบ"),
+    ])
+    print("[R169] ข้อสอบ 3 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R169 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
