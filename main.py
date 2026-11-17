@@ -15157,6 +15157,430 @@ except Exception as _e:
     print("[R170 EXAM ERROR] " + str(_e))
 
 
+
+# ======================================================================
+# r171 (15 พ.ย. 69) — ข้อสอบ /exam ห้ามแตะของจริง (แจ้งเตือน + คิวชีต + พักชื่อ)
+# อาการ (Railway log 14 พ.ย. 09:57 UTC ×2 = ตอนรัน /exam บน production หลังขึ้น r170):
+#   1) "[TOKEN WATCH ALERT] 🔴 ลีดเขียนลงชีตไม่ได้ ลองครบ 6 รอบ … __R160__…" — แจ้งเตือนหลอกจากข้อสอบ
+#      ตอนนี้ GIFT_FB_PSID ว่างเลยยังไม่ถึงใคร แต่พอ Gift ตั้งค่า = ได้ 🔴 หลอกทุกครั้งที่รัน /exam
+#   2) _r160_selftest ใช้คิวชีตตัวจริง: _R160_Q.clear() + tick ด้วยตัวส่งปลอม
+#      -> ลีดจริงที่ค้างคิวลองใหม่ (Sheets timeout) ตอนรันข้อสอบ หาย/ถูกนับว่าส่งสำเร็จทั้งที่ไม่ได้ส่ง
+#      + /health/sheets นับ lost/recovered ปลอมเพิ่มทุกรอบ
+#   3) ข้อสอบ name_cooldown ล้าง _R160_NAME_COOL ตัวจริง -> NAME ERROR พุ่งหลังรันข้อสอบ
+#      (log 14 พ.ย. ชั่วโมง 09 UTC = 14 บรรทัด เทียบปกติ 4–8)
+# วิธีแก้ (ชั้นนอกสุด ไม่แตะถ้อยคำ/เกรด/กฎแจก):
+#   - ห่อ _r157_alert: ข้อความที่มีไอดีข้อสอบ (__R…__) = ไม่ส่ง Messenger · log [EXAM ALERT] แทน
+#   - ห่อ _r160_selftest: ย้ายของจริงในคิว/สถิติ/พักชื่อออกก่อนสอบ แล้วคืนหลังสอบ
+# ปิด: R171_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ d2887c3 (r170)
+# ======================================================================
+_R171_OFF = os.environ.get("R171_OFF", "") == "1"
+_R171_EXAM_RE = re.compile(r"__[A-Z0-9][A-Za-z0-9]*__")
+
+
+def _r171_is_exam(text):
+    try:
+        return bool(_R171_EXAM_RE.search(str(text or "")))
+    except Exception:
+        return False
+
+
+try:
+    _R171_BASE_ALERT = _r157_alert
+
+    def _r171_alert(text):
+        try:
+            if not _R171_OFF and _r171_is_exam(text):
+                print("[EXAM ALERT] (ข้อสอบ — ไม่ส่งจริง) " + str(text).replace("\n", " | ")[:200])
+                return
+        except Exception as _e:
+            print("[R171 ALERT ERROR] " + str(_e))
+        return _R171_BASE_ALERT(text)
+
+    _r157_alert = _r171_alert
+except Exception as _e:
+    print("[R171 ALERT INSTALL ERROR] " + str(_e))
+
+try:
+    _R171_BASE_R160_SELFTEST = _r160_selftest
+
+    def _r171_r160_selftest(which):
+        if _R171_OFF:
+            return _R171_BASE_R160_SELFTEST(which)
+        saved_q, saved_cool, saved_stats = {}, {}, None
+        try:
+            with _R160_LOCK:
+                for k in [k for k in list(_R160_Q) if not str(k).startswith("__")]:
+                    saved_q[k] = _R160_Q.pop(k)
+            saved_cool = dict(_R160_NAME_COOL)
+            saved_stats = dict(_R160_STATS)
+        except Exception as _e:
+            print("[R171 SNAPSHOT ERROR] " + str(_e))
+        try:
+            return _R171_BASE_R160_SELFTEST(which)
+        finally:
+            try:
+                with _R160_LOCK:
+                    for k, v in saved_q.items():
+                        if k not in _R160_Q:          # ของใหม่กว่าเข้ามาระหว่างสอบ -> ใช้ของใหม่
+                            _R160_Q[k] = v
+                for k, v in saved_cool.items():
+                    _R160_NAME_COOL.setdefault(k, v)
+                if saved_stats is not None:
+                    _R160_STATS.clear()
+                    _R160_STATS.update(saved_stats)
+            except Exception as _e:
+                print("[R171 RESTORE ERROR] " + str(_e))
+
+    _r160_selftest = _r171_r160_selftest
+    print("[R171] /exam ไม่แตะของจริง: แจ้งเตือนข้อสอบไม่ส่ง · คิวชีต/สถิติ/พักชื่อ คืนหลังสอบ")
+except Exception as _e:
+    print("[R171 INSTALL ERROR] " + str(_e))
+
+
+def _r171_selftest(which):
+    global GIFT_FB_PSID, send_message
+    real_psid, real_send = GIFT_FB_PSID, send_message
+    sent = []
+    T = "__R171GIFT__"
+    REAL_T = "🔴 บอทเพจ Wealth Owner ตอบแชทไม่ได้\nสาเหตุ: x (code 190) [R171 ทดสอบ]"
+
+    def fake_send(to, text, page_id=""):
+        if to == T:
+            sent.append(text)
+            # แจ้งเตือนจริงที่บังเอิญเข้ามาช่วงสอบ -> ส่งต่อของจริง (ข้อความทดสอบเองห้ามหลุดถึง Gift)
+            if real_psid and text != REAL_T and not _r171_is_exam(text):
+                return real_send(real_psid, text, page_id)
+            return True
+        return real_send(to, text, page_id)
+
+    try:
+        if which in ("exam_alert_silent", "real_alert_sent"):
+            GIFT_FB_PSID, send_message = T, fake_send
+            try:
+                if which == "exam_alert_silent":
+                    _r157_alert("🔴 ลีดเขียนลงชีตไม่ได้ ลองครบ 6 รอบ (~1.5 ชม.) __R160__… เกรด C · เพจ Leads_RealtySmart")
+                    return sent == []
+                _r157_alert(REAL_T)
+                return sent == [REAL_T]
+            finally:
+                GIFT_FB_PSID, send_message = real_psid, real_send
+        if which == "queue_kept":
+            K = "R171REAL"
+            e = {"p": {"facebook_psid": "__R171__", "grade": "A", "tab": "Leads_RealtySmart"},
+                 "n": 0, "at": time.time() + 3600, "first": time.time()}
+            with _R160_LOCK:
+                _R160_Q[K] = e
+            try:
+                _r160_selftest("fail_then_recover")
+                with _R160_LOCK:
+                    return _R160_Q.get(K) is e and e["n"] == 0
+            finally:
+                with _R160_LOCK:
+                    _R160_Q.pop(K, None)
+        if which == "stats_kept":
+            before = dict(_R160_STATS)
+            _r160_selftest("gives_up_and_counts")
+            return dict(_R160_STATS) == before
+        if which == "name_cool_kept":
+            K = "R171:facebook:P9"
+            _R160_NAME_COOL[K] = time.time() + 3600
+            try:
+                _r160_selftest("name_cooldown")
+                return K in _R160_NAME_COOL
+            finally:
+                _R160_NAME_COOL.pop(K, None)
+        return False
+    except Exception as _e:
+        print("[R171 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("SA1", "ข้อสอบไม่แตะของจริง (r171)", "_r171_selftest", ("exam_alert_silent",), ("truthy", ""),
+         "log 14 พ.ย. 09:57: รัน /exam แล้วยิง 🔴 'ลีดเขียนลงชีตไม่ได้ __R160__' -> ต้องไม่ส่งถึง Gift"),
+        ("SA2", "ข้อสอบไม่แตะของจริง (r171)", "_r171_selftest", ("real_alert_sent",), ("truthy", ""),
+         "แจ้งเตือนจริง (token เพจตาย) ต้องส่งเหมือนเดิม"),
+        ("SA3", "ข้อสอบไม่แตะของจริง (r171)", "_r171_selftest", ("queue_kept",), ("truthy", ""),
+         "ลีดจริงที่ค้างคิวลองใหม่ ต้องอยู่ครบหลังรัน /exam (เดิมโดน clear/ส่งปลอม)"),
+        ("SA4", "ข้อสอบไม่แตะของจริง (r171)", "_r171_selftest", ("stats_kept",), ("truthy", ""),
+         "/health/sheets ห้ามนับ lost/recovered ปลอมจากข้อสอบ"),
+        ("SA5", "ข้อสอบไม่แตะของจริง (r171)", "_r171_selftest", ("name_cool_kept",), ("truthy", ""),
+         "log 14 พ.ย. 09 UTC: NAME ERROR พุ่งหลังสอบ -> พักชื่อของจริงต้องไม่ถูกล้าง"),
+    ])
+    print("[R171] ข้อสอบ 5 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R171 EXAM ERROR] " + str(_e))
+
+# ======================================================================
+# r172 (16 พ.ย. 69) — R129 "ภาระเท่ารายได้" ทำให้ตัวเก็บช่อง R100 พัง -> ภาระผิดถูกเก็บอยู่ดี
+# อาการ (Railway log 15 พ.ย. 11:52:07 UTC ลูกค้าจริง):
+#   "[R129 HOLD] 20000 เท่ารายได้ 20000 ไม่ใช่ภาระ : 20000 นิดๆครับ"
+#   ตามด้วย "[R100 CAPTURE ERROR] cannot unpack non-iterable NoneType object — ใช้ทางเดิม"
+# สาเหตุ: r129 คืน None เปล่าๆ แต่ _capture_r100 ต้องการ (ช่องใหม่, เหตุผล) -> แตก
+#   -> ตกไปทางเดิม = เก็บ 20000 เป็นยอดผ่อน (สิ่งที่ r129 ตั้งใจกัน) · ข้อสอบ A11 ไม่จับ
+#   เพราะเรียก _r100_reroute ตรงๆ ไม่ผ่านตัวเก็บช่องจริง
+# วิธีแก้ (ชั้นนอกสุด ไม่แตะถ้อยคำ/เกรด/กฎแจก):
+#   - ห่อ _r100_reroute: None เปล่า -> (None, เหตุผล) ตามสัญญาเดิม
+#   - ถามซ้ำได้ 1 ครั้ง/แชท: ลูกค้าตอบเลขเดิมรอบสอง = เก็บตามที่ตอบ (กันวนถามไม่จบ)
+# ปิด: R172_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ r171 (หรือ d2887c3 = r170)
+# ======================================================================
+_R172_OFF = os.environ.get("R172_OFF", "") == "1"
+
+try:
+    _R172_BASE_REROUTE = _r100_reroute
+
+    def _r100_reroute_r172(field, msg, data, state):
+        out = _R172_BASE_REROUTE(field, msg, data, state)
+        if _R172_OFF or out is not None:
+            return out
+        try:
+            st = state if isinstance(state, dict) else {}
+            if st.get("_r172_held"):
+                print("[R172] ภาระเท่ารายได้ซ้ำรอบสอง -> เก็บตามที่ลูกค้าตอบ ไม่ถามวน")
+                return False
+            st["_r172_held"] = True
+            return (None, "ภาระเท่ารายได้ — ไม่เก็บ ถามภาระใหม่ (r129)")
+        except Exception as _e:
+            print("[R172 ERROR] " + str(_e)[:80])
+            return False
+
+    _r100_reroute = _r100_reroute_r172
+    globals()["_r100_reroute"] = _r100_reroute_r172
+    print("[R172] r129 ภาระเท่ารายได้ -> คืนตามสัญญา (None, เหตุผล) ไม่ทำตัวเก็บช่องพัง · ถามซ้ำได้ 1 ครั้ง")
+except Exception as _e:
+    print("[R172 INSTALL ERROR] " + str(_e))
+
+
+def _r172_selftest(which):
+    global _R100_ORIG_CAPTURE
+    real_orig = _R100_ORIG_CAPTURE
+    called = []
+    try:
+        if which == "drop_is_tuple":
+            r = _r100_reroute("debt", "20000 นิดๆครับ", {"income_baht": 20000}, {})
+            return isinstance(r, (tuple, list)) and len(r) == 2 and r[0] is None
+        if which in ("capture_no_fallback", "second_time_stored"):
+            _R100_ORIG_CAPTURE = lambda self, state, field, msg: called.append(field) or "orig"
+            st = {"awaiting": "debt", "data": {"income_baht": 20000}}
+            r1 = _capture_r100(None, st, "debt", "20000 นิดๆครับ")
+            if which == "capture_no_fallback":
+                return r1 is None and called == [] and st.get("awaiting") is None
+            st["awaiting"] = "debt"
+            r2 = _capture_r100(None, st, "debt", "20000 ครับ")
+            return r2 == "orig" and called == ["debt"]
+        if which == "normal_debt_kept":
+            return _r100_reroute("debt", "ผ่อนรถ 8,500 บาท", {"income_baht": 50000}, {}) is False
+        return False
+    except Exception as _e:
+        print("[R172 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        _R100_ORIG_CAPTURE = real_orig
+
+
+try:
+    _R124_EXAM.extend([
+        ("SB1", "ภาระเท่ารายได้ (r172)", "_r172_selftest", ("drop_is_tuple",), ("truthy", ""),
+         "log 15 พ.ย. 11:52: r129 คืน None เปล่า -> ต้องเป็น (None, เหตุผล)"),
+        ("SB2", "ภาระเท่ารายได้ (r172)", "_r172_selftest", ("capture_no_fallback",), ("truthy", ""),
+         "log 15 พ.ย. 11:52: [R100 CAPTURE ERROR] แล้วเก็บ 20000 เป็นภาระ -> ต้องไม่เก็บ และไม่แตก"),
+        ("SB3", "ภาระเท่ารายได้ (r172)", "_r172_selftest", ("second_time_stored",), ("truthy", ""),
+         "ลูกค้ายืนยันเลขเดิมรอบสอง -> เก็บตามที่ตอบ ห้ามถามวน"),
+        ("SB4", "ภาระเท่ารายได้ (r172)", "_r172_selftest", ("normal_debt_kept",), ("truthy", ""),
+         "ยอดผ่อนปกติ (ไม่ใกล้รายได้) ต้องเก็บเหมือนเดิม"),
+    ])
+    print("[R172] ข้อสอบ 4 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R172 EXAM ERROR] " + str(_e))
+
+
+# ======================================================================
+# r173 (17 พ.ย. 69 · Growth Loop · กอง A) — ลูกค้ากดข้อความเดิมรัวๆ ในไม่กี่วินาที = นับเป็นเทิร์นเดียว
+# อาการ (Railway log 16 พ.ย. ลูกค้าจริง 2 ราย):
+#   09:25:44–48 UTC ข้อความแอด "ขอข้อมูลเพิ่มเติมเกี่ยวกับโฆษณาของคุณ…" เข้ามา 5 ครั้งใน 4 วิ (mid ต่างกัน)
+#     -> [R98 REPEAT] ×5 แต่ทุกครั้งถูกนับเป็นเทิร์นใหม่: R152 "ถาม objective 2 ครั้ง -> เลิกถาม"
+#     -> [R153] เติม objective = ไม่ตอบ ใน 2 วิ ทั้งที่ลูกค้ายังไม่เคยเห็นคำถาม · ส่งออก 7 บับเบิลใน 35 วิ
+#   05:57:28–54 UTC ข้อความแอดเดิม 10 ครั้งใน 26 วิ -> income = ไม่ตอบ · [HARVEST] เก็บ debt เป็น
+#     "ขอข้อมูลเพิ่มเติมเ" (ข้อความแอด) · ถามอายุครบโควตา 2/2 · ส่งออก ~10 บับเบิลใน 1 นาที
+#   7 วันย้อนหลังมีแบบนี้ทุกวัน (12 พ.ย. แชทเดียว R98 REPEAT ~40 ครั้งใน 2.5 นาที)
+# สาเหตุ: กัน mid ซ้ำ (_already_handled) จับไม่ได้เพราะ Meta ให้ mid ใหม่ทุกครั้ง · R98 กันแค่ "ไม่ยิง API"
+#   แต่ตัวนับคำถาม/ตัวเก็บช่องข้างนอกยังเดินทุกครั้ง
+# วิธีแก้ (ชั้นนอกสุด ครอบ process_event · ไม่แตะถ้อยคำ/เกรด/กฎแจก/ชีต):
+#   ข้อความ text ตรงเป๊ะกับข้อความก่อนหน้าของแชทเดียวกัน และห่างจากครั้งก่อน <= R173_BURST_SEC (10 วิ)
+#   = ข้าม (ข้อความแรกของชุดตอบตามปกติเสมอ -> บอทไม่เงียบ) · ข้อความต่าง/postback/echo/ไฟล์ = ผ่านตามเดิม
+#   ต่างจาก r73 (ที่พัง): r73 บล็อก "คำตอบของบอท" · r173 ข้ามแค่ "ข้อความลูกค้าที่ซ้ำเป๊ะใน 10 วิ"
+# log: [R173 BURST] · ปิด: R173_OFF=1 · ปรับเวลา: R173_BURST_SEC · ย้อนกลับ: อัปโหลด main.py ของ r172
+# ======================================================================
+_R173_OFF = os.environ.get("R173_OFF", "") == "1"
+try:
+    _R173_SEC = float(os.environ.get("R173_BURST_SEC", "10") or 10)
+except Exception:
+    _R173_SEC = 10.0
+_R173_LAST = {}
+_R173_LOCK = threading.Lock()
+_R173_STATS = {"skipped": 0}
+_r173_clock = time.time
+
+
+def _r173_norm(t):
+    try:
+        return re.sub(r"\s+", "", str(t or "")).lower()
+    except Exception:
+        return ""
+
+
+def _r173_is_burst(key, text, now=None):
+    """True = ข้อความเดิมเป๊ะซ้ำภายใน R173_SEC วิ จากครั้งก่อน (ให้ข้าม) · พังเมื่อไหร่ = False (ประมวลผลตามปกติ)"""
+    try:
+        if _R173_OFF or _R173_SEC <= 0:
+            return False, 0, 0
+        n = _r173_norm(text)
+        if not n:
+            return False, 0, 0
+        now = _r173_clock() if now is None else now
+        with _R173_LOCK:
+            prev = _R173_LAST.get(key)
+            if prev and prev[0] == n and 0 <= now - prev[1] <= _R173_SEC:
+                cnt = prev[2] + 1
+                _R173_LAST[key] = (n, now, cnt)
+                return True, int(now - prev[1]), cnt
+            _R173_LAST[key] = (n, now, 1)
+            if len(_R173_LAST) > 3000:
+                for k, v in list(_R173_LAST.items()):
+                    if now - v[1] > 600:
+                        _R173_LAST.pop(k, None)
+        return False, 0, 1
+    except Exception as _e:
+        print("[R173 ERROR] " + str(_e)[:80])
+        return False, 0, 0
+
+
+try:
+    _R173_BASE_PROCESS_EVENT = process_event
+
+    def process_event(event, platform="facebook", page_id=""):  # noqa: F811
+        try:
+            ev = event or {}
+            m = ev.get("message") or {}
+            txt = m.get("text") if isinstance(m, dict) else None
+            if (txt and not m.get("is_echo") and not m.get("attachments")
+                    and not ev.get("postback")):
+                snd = str((ev.get("sender") or {}).get("id") or "")
+                if snd:
+                    hit, gap, cnt = _r173_is_burst(str(page_id or "") + ":" + snd, txt)
+                    if hit:
+                        _R173_STATS["skipped"] += 1
+                        try:   # ลูกค้าพิมพ์จริง = หน้าต่าง 24 ชม. เปิด -> ทำบัญชีของ r164 ต่อเหมือนเดิม
+                            _R164_IN[snd] = time.time()
+                            _R164_DEAD.pop(snd, None)
+                        except Exception:
+                            pass
+                        _show = re.sub(r"\d", "x", str(txt))[:30]
+                        print(f"[R173 BURST] {snd[:8]}… ข้อความเดิมซ้ำใน {gap} วิ (ครั้งที่ {cnt}) "
+                              f"— ข้าม ไม่นับเป็นเทิร์นใหม่ | {_show!r}")
+                        return None
+        except Exception as _e:
+            print("[R173 ERROR] in " + str(_e)[:80])
+        return _R173_BASE_PROCESS_EVENT(event, platform, page_id)
+
+    print(f"[R173] ข้อความลูกค้าซ้ำเป๊ะใน {_R173_SEC:g} วิ = เทิร์นเดียว (ข้อความแรกตอบปกติ)"
+          + (" · ปิดอยู่ (R173_OFF=1)" if _R173_OFF else ""))
+except Exception as _e:
+    print("[R173 INSTALL ERROR] " + str(_e))
+
+
+def _r173_selftest(which):
+    """ยิงผ่านทางเข้าจริง (process_event) · ตัด bot.process / send_reply เป็นตัวนับ ไม่ส่งจริง ไม่ลงชีต"""
+    global _r173_clock
+    g = globals()
+    calls = []
+    real_proc, real_send, real_clock = bot.process, g.get("send_reply"), _r173_clock
+    seq = [0]
+    tag = str(int(time.time() * 1000) % 10 ** 9)
+
+    def fake_proc(text, uid, **kw):
+        calls.append((uid, text))
+        return "รับทราบครับ", "-"
+
+    def ev(uid, text, postback=False):
+        seq[0] += 1
+        mid = "__R173__" + which[:8] + tag + "_" + str(seq[0]) + "_" + os.urandom(4).hex()
+        if postback:
+            return {"sender": {"id": uid}, "postback": {"payload": "GET_STARTED", "mid": mid}}
+        return {"sender": {"id": uid}, "message": {"mid": mid, "text": text}}
+
+    t = [1000.0]
+    AD = "ขอข้อมูลเพิ่มเติมเกี่ยวกับโฆษณาของคุณหน่อยได้ไหม"
+    try:
+        bot.process = fake_proc
+        g["send_reply"] = lambda *a, **k: True
+        _r173_clock = lambda: t[0]
+        U = "__R173U" + tag + which[:6] + "__"
+        if which == "burst_5_in_4s":          # log 16 พ.ย. 09:25:44–48 (5 ครั้ง)
+            for dt in (0, 2, 0.3, 0.7, 0.9):
+                t[0] += dt
+                process_event(ev(U, AD), "facebook", "R173P")
+            return len(calls) == 1
+        if which == "burst_10_in_26s":        # log 16 พ.ย. 05:57:28–54 (เว้น 14 วิ กลางชุด)
+            for dt in (0, 3, 0.3, 1.8, 14, 5, 1, 0.3, 0.9, 0.3):
+                t[0] += dt
+                process_event(ev(U, AD), "facebook", "R173P")
+            return len(calls) == 2
+        if which == "different_text_both":
+            process_event(ev(U, "สนใจครับ"), "facebook", "R173P")
+            t[0] += 1
+            process_event(ev(U, "เงินเดือน 30000"), "facebook", "R173P")
+            return len(calls) == 2
+        if which == "after_window_ok":
+            process_event(ev(U, "ค่ะ"), "facebook", "R173P")
+            t[0] += _R173_SEC + 1
+            process_event(ev(U, "ค่ะ"), "facebook", "R173P")
+            return len(calls) == 2
+        if which == "two_users_both":
+            process_event(ev(U[:-2] + "a__", AD), "facebook", "R173P")
+            process_event(ev(U[:-2] + "b__", AD), "facebook", "R173P")
+            return len(calls) == 2
+        if which == "postback_untouched":
+            process_event(ev(U, "", postback=True), "facebook", "R173P")
+            process_event(ev(U, "", postback=True), "facebook", "R173P")
+            return len(calls) == 2
+        return False
+    except Exception as _e:
+        print("[R173 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        bot.process = real_proc
+        g["send_reply"] = real_send
+        _r173_clock = real_clock
+        try:
+            with _R173_LOCK:
+                for k in [k for k in _R173_LAST if "__R173" in k]:
+                    _R173_LAST.pop(k, None)
+        except Exception:
+            pass
+
+
+try:
+    _R124_EXAM.extend([
+        ("BU1", "ข้อความซ้ำรัว (r173)", "_r173_selftest", ("burst_5_in_4s",), ("truthy", ""),
+         "log 16 พ.ย. 09:25: ข้อความแอด 5 ครั้งใน 4 วิ -> objective=ไม่ตอบ ใน 2 วิ · ต้องนับเป็นเทิร์นเดียว"),
+        ("BU2", "ข้อความซ้ำรัว (r173)", "_r173_selftest", ("burst_10_in_26s",), ("truthy", ""),
+         "log 16 พ.ย. 05:57: 10 ครั้ง (เว้น 14 วิ กลางชุด) -> เก็บ debt เป็นข้อความแอด · ต้องประมวลผล 2 ครั้ง"),
+        ("BU3", "ข้อความซ้ำรัว (r173)", "_r173_selftest", ("different_text_both",), ("truthy", ""),
+         "ข้อความต่างกันติดกัน ต้องตอบทั้งคู่ (ห้ามเงียบ)"),
+        ("BU4", "ข้อความซ้ำรัว (r173)", "_r173_selftest", ("after_window_ok",), ("truthy", ""),
+         "ข้อความเดิมแต่ห่างเกิน 10 วิ = ตอบตามปกติ"),
+        ("BU5", "ข้อความซ้ำรัว (r173)", "_r173_selftest", ("two_users_both",), ("truthy", ""),
+         "ข้อความเดียวกันคนละแชท ต้องตอบทั้งคู่"),
+        ("BU6", "ข้อความซ้ำรัว (r173)", "_r173_selftest", ("postback_untouched",), ("truthy", ""),
+         "postback (Get Started) ไม่อยู่ในขอบเขต ต้องผ่านเหมือนเดิม"),
+    ])
+    print("[R173] ข้อสอบ 6 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R173 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
