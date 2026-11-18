@@ -15581,6 +15581,149 @@ except Exception as _e:
     print("[R173 EXAM ERROR] " + str(_e))
 
 
+# ======================================================================
+# r174 (2026-11-19 · Growth Loop อัตโนมัติ) — ข้อความปุ่มแอดซ้ำ: ขยายหน้าต่าง "เทิร์นเดียว" 10 -> 60 วิ
+# อาการ (Railway log 18 พ.ย. หลัง r173 ขึ้น):
+#   แชท …165 09:12:20–40 UTC กดปุ่มแอด "ขอข้อมูลเพิ่มเติมเกี่ยวกับโฆษณา…" 3 ครั้ง · ครั้งที่ 3 ห่าง 15 วิ
+#     -> หลุดหน้าต่าง 10 วิ ถูกนับเป็นเทิร์นใหม่ (log [R173 BURST] "ครั้งที่ 2" ซ้ำ 2 ชุด)
+#   17 พ.ย. แชท …053 แบบเดียวกัน (2 ชุดห่าง 17 วิ) -> R152 เลิกถาม objective ใน ~1.5 นาที
+# วิธีแก้: เฉพาะข้อความที่ขึ้นต้น "ขอข้อมูลเพิ่มเติมเกี่ยวกับ" (ข้อความสำเร็จรูปของปุ่มแอด Meta)
+#   ซ้ำเป๊ะจากครั้งก่อนภายใน R174_AD_SEC (60 วิ) = ข้ามแบบ r173 · ข้อความอื่นใช้ 10 วิ ตามเดิม
+#   ข้อความแรกของชุดตอบปกติเสมอ (บอทไม่เงียบ) · ไม่แตะถ้อยคำ/เกรด/กฎแจก/ชีต
+#   ข้อสอบ BU2 เดิม (คาด 2 รอบเพราะเว้น 14 วิ) = อาการเดียวกัน -> เปลี่ยนเป็นคาด 1 รอบ
+# log: [R173 BURST] (เหมือนเดิม) · ปิด: R174_OFF=1 · ปรับเวลา: R174_AD_SEC · ย้อนกลับ: อัปโหลด main.py ของ 6f7c71e
+# ======================================================================
+_R174_OFF = os.environ.get("R174_OFF", "") == "1"
+try:
+    _R174_AD_SEC = float(os.environ.get("R174_AD_SEC", "60") or 60)
+except Exception:
+    _R174_AD_SEC = 60.0
+_R174_AD_PREFIX = "ขอข้อมูลเพิ่มเติมเกี่ยวกับ"
+
+
+def _r174_is_ad(text):
+    try:
+        return _r173_norm(text).startswith(_R174_AD_PREFIX)
+    except Exception:
+        return False
+
+
+try:
+    _R174_BASE_IS_BURST = _r173_is_burst
+
+    def _r173_is_burst(key, text, now=None):  # noqa: F811
+        try:
+            if (not _R174_OFF and not _R173_OFF and _R174_AD_SEC > _R173_SEC
+                    and _r174_is_ad(text)):
+                n = _r173_norm(text)
+                t_now = _r173_clock() if now is None else now
+                with _R173_LOCK:
+                    prev = _R173_LAST.get(key)
+                    if prev and prev[0] == n and _R173_SEC < t_now - prev[1] <= _R174_AD_SEC:
+                        cnt = prev[2] + 1
+                        gap = int(t_now - prev[1])
+                        _R173_LAST[key] = (n, t_now, cnt)
+                        return True, gap, cnt
+        except Exception as _e:
+            print("[R174 ERROR] " + str(_e)[:80])
+        return _R174_BASE_IS_BURST(key, text, now)
+
+    print(f"[R174] ข้อความปุ่มแอดซ้ำใน {_R174_AD_SEC:g} วิ = เทิร์นเดียว"
+          + (" · ปิดอยู่ (R174_OFF=1)" if _R174_OFF else ""))
+except Exception as _e:
+    print("[R174 INSTALL ERROR] " + str(_e))
+
+
+def _r174_selftest(which):
+    """ยิงผ่าน process_event จริง · ตัด bot.process / send_reply เป็นตัวนับ ไม่ส่งจริง ไม่ลงชีต"""
+    global _r173_clock
+    g = globals()
+    calls = []
+    real_proc, real_send, real_clock = bot.process, g.get("send_reply"), _r173_clock
+    seq = [0]
+    tag = str(int(time.time() * 1000) % 10 ** 9) + os.urandom(2).hex()
+
+    def fake_proc(text, uid, **kw):
+        calls.append((uid, text))
+        return "รับทราบครับ", "-"
+
+    def ev(uid, text):
+        seq[0] += 1
+        mid = "__R174__" + which[:8] + tag + "_" + str(seq[0]) + "_" + os.urandom(4).hex()
+        return {"sender": {"id": uid}, "message": {"mid": mid, "text": text}}
+
+    t = [5000.0]
+    AD = "ขอข้อมูลเพิ่มเติมเกี่ยวกับโฆษณาของคุณหน่อยได้ไหม"
+    try:
+        bot.process = fake_proc
+        g["send_reply"] = lambda *a, **k: True
+        _r173_clock = lambda: t[0]
+        U = "__R174U" + tag + which[:6] + "__"
+        if which == "ad_gap_15s":            # log 18 พ.ย. 09:12:20/25/40 แชท …165
+            for dt in (0, 5, 15):
+                t[0] += dt
+                process_event(ev(U, AD), "facebook", "R174P")
+            return len(calls) == 1
+        if which == "ad_two_sets_17s":       # log 17 พ.ย. แชท …053 (2 ชุดห่าง 17 วิ)
+            for dt in (0, 1, 0.5, 17, 1, 0.4):
+                t[0] += dt
+                process_event(ev(U, AD), "facebook", "R174P")
+            return len(calls) == 1
+        if which == "ad_after_11min":        # log 18 พ.ย. 19:04 -> 19:15 แชท …072 = รอบใหม่จริง
+            process_event(ev(U, AD), "facebook", "R174P")
+            t[0] += 660
+            process_event(ev(U, AD), "facebook", "R174P")
+            return len(calls) == 2
+        if which == "bu2_ad_10_in_26s_one":  # ชุดเดียวกับ BU2 (log 16 พ.ย. 05:57) · เว้น 14 วิ ไม่ตัดเป็นเทิร์นใหม่แล้ว
+            for dt in (0, 3, 0.3, 1.8, 14, 5, 1, 0.3, 0.9, 0.3):
+                t[0] += dt
+                process_event(ev(U, AD), "facebook", "R174P")
+            return len(calls) == 1
+        if which == "plain_15s_still_new":   # ข้อความทั่วไป ใช้ 10 วิ ตามเดิม
+            process_event(ev(U, "ค่ะ"), "facebook", "R174P")
+            t[0] += 15
+            process_event(ev(U, "ค่ะ"), "facebook", "R174P")
+            return len(calls) == 2
+        return False
+    except Exception as _e:
+        print("[R174 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        bot.process = real_proc
+        g["send_reply"] = real_send
+        _r173_clock = real_clock
+        try:
+            with _R173_LOCK:
+                for k in [k for k in _R173_LAST if "__R174" in k]:
+                    _R173_LAST.pop(k, None)
+        except Exception:
+            pass
+
+
+try:
+    if not _R174_OFF:   # BU2 เดิมคาด 2 รอบ เพราะช่องว่าง 14 วิ (หน้าต่าง 10 วิ) = อาการที่ r174 แก้ -> เปลี่ยนคำตอบที่ถูกเป็น 1 รอบ
+        for _i, _row in enumerate(_R124_EXAM):
+            if _row[0] == "BU2":
+                _R124_EXAM[_i] = ("BU2", "ข้อความซ้ำรัว (r173→r174)", "_r174_selftest", ("bu2_ad_10_in_26s_one",),
+                                  ("truthy", ""), "log 16 พ.ย. 05:57: ปุ่มแอด 10 ครั้งใน 26 วิ (เว้น 14 วิ) · r174 = เทิร์นเดียว")
+except Exception as _e:
+    print("[R174 EXAM ERROR] BU2 " + str(_e))
+try:
+    _R124_EXAM.extend([
+        ("BU7", "ข้อความซ้ำรัว (r174)", "_r174_selftest", ("ad_gap_15s",), ("truthy", ""),
+         "log 18 พ.ย. 09:12 แชท …165: ปุ่มแอดซ้ำห่าง 15 วิ ถูกนับเทิร์นใหม่ · ต้องนับเป็นเทิร์นเดียว"),
+        ("BU8", "ข้อความซ้ำรัว (r174)", "_r174_selftest", ("ad_two_sets_17s",), ("truthy", ""),
+         "log 17 พ.ย. แชท …053: 2 ชุดห่าง 17 วิ -> R152 เลิกถาม · ต้องประมวลผลครั้งเดียว"),
+        ("BU9", "ข้อความซ้ำรัว (r174)", "_r174_selftest", ("ad_after_11min",), ("truthy", ""),
+         "log 18 พ.ย. 19:04->19:15: กดปุ่มแอดอีกรอบหลัง 11 นาที = ตอบใหม่ตามปกติ (ห้ามเงียบ)"),
+        ("BU10", "ข้อความซ้ำรัว (r174)", "_r174_selftest", ("plain_15s_still_new",), ("truthy", ""),
+         "ข้อความทั่วไปซ้ำห่าง 15 วิ ยังเป็นเทิร์นใหม่ (คง 10 วิ ของ r173)"),
+    ])
+    print("[R174] ข้อสอบ 4 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R174 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
