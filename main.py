@@ -15724,6 +15724,101 @@ except Exception as _e:
     print("[R174 EXAM ERROR] " + str(_e))
 
 
+# ════════════════════════════════════════════════════════════════════
+# r175 (20 พ.ย. 69 · Growth Loop) — ปิดเบอร์ลูกค้าใน log [BOT OFF]
+# อาการ: bot_logic.py พิมพ์ "[BOT OFF] <id>... ไม่ตอบ | '<ข้อความลูกค้า 40 ตัว>'" ตรงๆ
+#   แชทที่ปิดบอทแล้วลูกค้ามักพิมพ์เบอร์/รายได้ต่อ (log 19 พ.ย. เช่น '07:00-09:00', 'ชื่อไนน์ครับ')
+#   -> ถ้าพิมพ์เบอร์ เบอร์เต็มจะค้างใน Railway log (ค้างจากรอบ 17–19 พ.ย.)
+# วิธีแก้: ใส่ตัวกรอง print ในโมดูล bot_logic เฉพาะบรรทัดที่ขึ้นต้น "[BOT OFF]"
+#   เบอร์ไทย (0x/+66 9–10 หลัก มีขีด/เว้นวรรคได้) -> "xxx-xxx-<3 ตัวท้าย>" · ตัวเลขเงิน/เวลาไม่แตะ
+#   ไม่เปลี่ยนการตอบ/การเก็บเบอร์ลงชีต (แตะแค่ข้อความ log)
+# ปิด: R175_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ 36ad757
+# ════════════════════════════════════════════════════════════════════
+import re as _r175_re
+_R175_OFF = os.environ.get("R175_OFF", "") == "1"
+_R175_PHONE = _r175_re.compile(r"(?<![\d.,])(?:\+?66[-\s]?|0)(?:\d[-\s]?){7,8}\d(?![\d,])")
+
+
+def _r175_mask_text(text):
+    try:
+        def _rep(mo):
+            digits = _r175_re.sub(r"\D", "", mo.group(0))
+            return "xxx-xxx-" + digits[-3:]
+        return _R175_PHONE.sub(_rep, str(text))
+    except Exception:
+        return text
+
+
+def _r175_print(*args, **kwargs):
+    try:
+        if (not _R175_OFF and args and isinstance(args[0], str)
+                and args[0].startswith("[BOT OFF]")):
+            args = (_r175_mask_text(args[0]),) + tuple(args[1:])
+    except Exception:
+        pass
+    return __builtins__["print"](*args, **kwargs) if isinstance(__builtins__, dict) \
+        else __builtins__.print(*args, **kwargs)
+
+
+try:
+    import bot_logic as _bl175
+    _bl175.print = _r175_print
+    print("[R175] ปิดเบอร์ลูกค้าใน log [BOT OFF]" + (" · ปิดอยู่ (R175_OFF=1)" if _R175_OFF else ""))
+except Exception as _e:
+    print("[R175 INSTALL ERROR] " + str(_e))
+
+
+def _r175_selftest(which):
+    """เรียก print ของโมดูล bot_logic จริง แล้วจับข้อความที่ออก (ไม่ส่งอะไรออกนอก)"""
+    import io, contextlib
+    cases = {
+        # log 19 พ.ย. รูปแบบเดียวกับ '[BOT OFF] 40612444... ไม่ตอบ | ...' แต่ลูกค้าพิมพ์เบอร์
+        "phone_plain": ("เบอร์ 0812345678 ค่ะ", "0812345678", "678"),
+        "phone_dash": ("โทร 081-234-5678 ได้เลย", "081-234-5678", "678"),
+        "phone_66": ("+66 81 234 5678", "81 234 5678", "678"),
+    }
+    keep = {   # ตัวเลขเงิน/เวลา จาก log จริง 19 พ.ย. ต้องไม่ถูกแตะ
+        "money_time_kept": ["'1,700,000'", "'130000 บาท ถ้าปิดให้ผมก่อน'", "'07:00-09:00'", "'300,000'", "'15,000 คับ'"],
+    }
+    try:
+        buf = io.StringIO()
+        import bot_logic as _b
+        if which in cases:
+            msg, bad, tail = cases[which]
+            with contextlib.redirect_stdout(buf):
+                _b.print(f"[BOT OFF] __R175__... แชทนี้ปิดบอทถาวรแล้ว — ไม่ตอบ | {msg[:40]!r}")
+            out = buf.getvalue()
+            return (bad not in out) and (("xxx-xxx-" + tail) in out)
+        if which in keep:
+            ok = True
+            for m in keep[which]:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    _b.print(f"[BOT OFF] __R175__... ไม่ตอบ | {m}")
+                ok = ok and (m in buf.getvalue()) and ("xxx-" not in buf.getvalue())
+            return ok
+        return False
+    except Exception as _e:
+        print("[R175 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("BO1", "log ไม่หลุดเบอร์ (r175)", "_r175_selftest", ("phone_plain",), ("truthy", ""),
+         "log [BOT OFF] พิมพ์ข้อความลูกค้า 40 ตัวตรงๆ · เบอร์ 0812345678 ต้องเหลือ xxx-xxx-678"),
+        ("BO2", "log ไม่หลุดเบอร์ (r175)", "_r175_selftest", ("phone_dash",), ("truthy", ""),
+         "เบอร์มีขีด 081-234-5678 ต้องถูกปิดเหมือนกัน"),
+        ("BO3", "log ไม่หลุดเบอร์ (r175)", "_r175_selftest", ("phone_66",), ("truthy", ""),
+         "เบอร์ +66 ต้องถูกปิด"),
+        ("BO4", "log ไม่หลุดเบอร์ (r175)", "_r175_selftest", ("money_time_kept",), ("truthy", ""),
+         "log จริง 19 พ.ย.: '1,700,000' '130000 บาท' '07:00-09:00' ต้องคงเดิม (ห้ามปิดตัวเลขเงิน/เวลา)"),
+    ])
+    print("[R175] ข้อสอบ 4 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R175 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
