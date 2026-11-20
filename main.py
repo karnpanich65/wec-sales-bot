@@ -15819,6 +15819,92 @@ except Exception as _e:
     print("[R175 EXAM ERROR] " + str(_e))
 
 
+
+# ════════════════════════════════════════════════════════════════════
+# r176 (21 พ.ย. 69 · Growth Loop) — ปิดเบอร์ต่างประเทศ (+xx) ใน log [BOT OFF]
+# อาการ: log 20 พ.ย. 06:01 UTC "[BOT OFF] 29749157... ไม่ตอบ | 'WhatsApp +44778906…'"
+#   r175 จับเฉพาะเบอร์ไทย (0x / +66) -> เบอร์ต่างประเทศของลูกค้ายังหลุดเต็มใน Railway log
+# วิธีแก้: เพิ่มรูปแบบ "+<รหัสประเทศ> ตัวเลขรวม 8–15 หลัก (มีขีด/เว้นวรรคได้)" -> xxx-xxx-<3 ตัวท้าย>
+#   ทำงานต่อจาก r175 (แทนฟังก์ชัน _r175_mask_text ที่ตัวกรอง print เรียกใช้) · แตะแค่ข้อความ log
+#   ไม่เปลี่ยนการตอบ/การเก็บเบอร์ลงชีต · ตัวเลขเงิน เช่น '+5000 บาท' ไม่แตะ (หลักไม่ถึง 8)
+# ปิด: R176_OFF=1 (กลับไปใช้ของ r175) · ย้อนกลับ: อัปโหลด main.py ของ e0e6dd2
+# ════════════════════════════════════════════════════════════════════
+_R176_OFF = os.environ.get("R176_OFF", "") == "1"
+_R176_INTL = _r175_re.compile(r"(?<![\w+])\+\d(?:[-\s]?\d){7,14}(?!\d)")
+try:
+    _r176_base_mask = _r175_mask_text
+except Exception:
+    _r176_base_mask = None
+
+
+def _r176_mask_text(text):
+    try:
+        out = _r176_base_mask(text) if _r176_base_mask else str(text)
+        if _R176_OFF:
+            return out
+
+        def _rep(mo):
+            digits = _r175_re.sub(r"\D", "", mo.group(0))
+            return "xxx-xxx-" + digits[-3:]
+        return _R176_INTL.sub(_rep, str(out))
+    except Exception:
+        return text
+
+
+try:
+    if _r176_base_mask is not None:
+        _r175_mask_text = _r176_mask_text   # _r175_print เรียกผ่านชื่อนี้ทุกครั้ง
+    print("[R176] ปิดเบอร์ต่างประเทศ (+xx) ใน log [BOT OFF]" + (" · ปิดอยู่ (R176_OFF=1)" if _R176_OFF else ""))
+except Exception as _e:
+    print("[R176 INSTALL ERROR] " + str(_e))
+
+
+def _r176_selftest(which):
+    """เรียก print ของโมดูล bot_logic จริง แล้วจับข้อความที่ออก (ไม่ส่งอะไรออกนอก)"""
+    import io, contextlib
+    cases = {
+        # log จริง 20 พ.ย.: ลูกค้าแชทปิดบอทพิมพ์เบอร์ WhatsApp อังกฤษ (ใช้เบอร์สมมติรูปแบบเดียวกัน)
+        "intl_plain": ("WhatsApp +447700900123", "447700900123", "123"),
+        "intl_space": ("โทร +44 7700 900 456 ค่ะ", "7700 900 456", "456"),
+    }
+    keep = ["'+5000 บาท'", "'รายได้ +20,000'", "'1,700,000'", "'07:00-09:00'"]
+    try:
+        import bot_logic as _b
+        if which in cases:
+            msg, bad, tail = cases[which]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _b.print(f"[BOT OFF] __R176__... แชทนี้ปิดบอทถาวรแล้ว — ไม่ตอบ | {msg[:40]!r}")
+            out = buf.getvalue()
+            return (bad not in out) and (("xxx-xxx-" + tail) in out)
+        if which == "keep":
+            ok = True
+            for m in keep:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    _b.print(f"[BOT OFF] __R176__... ไม่ตอบ | {m}")
+                ok = ok and (m in buf.getvalue()) and ("xxx-" not in buf.getvalue())
+            return ok
+        return False
+    except Exception as _e:
+        print("[R176 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("BO5", "log ไม่หลุดเบอร์ (r176)", "_r176_selftest", ("intl_plain",), ("truthy", ""),
+         "log จริง 20 พ.ย.: 'WhatsApp +44…' หลุดเต็ม · ต้องเหลือ xxx-xxx-<3 ตัวท้าย>"),
+        ("BO6", "log ไม่หลุดเบอร์ (r176)", "_r176_selftest", ("intl_space",), ("truthy", ""),
+         "เบอร์ต่างประเทศเว้นวรรค +44 7700 900 456 ต้องถูกปิด"),
+        ("BO7", "log ไม่หลุดเบอร์ (r176)", "_r176_selftest", ("keep",), ("truthy", ""),
+         "'+5000 บาท' 'รายได้ +20,000' '1,700,000' '07:00-09:00' ต้องคงเดิม"),
+    ])
+    print("[R176] ข้อสอบ 3 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R176 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
