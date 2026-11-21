@@ -15905,6 +15905,91 @@ except Exception as _e:
     print("[R176 EXAM ERROR] " + str(_e))
 
 
+# ════════════════════════════════════════════════════════════════════
+# r177 (22 พ.ย. 69 · Growth Loop) — ปิดเบอร์ที่มีจุด/จุลภาคนำหน้าใน log [BOT OFF]
+# อาการ: log 21 พ.ย. 17:29 UTC "[BOT OFF] 29559686... ไม่ตอบ | 'มนตรี.099-…(เต้)'" เบอร์หลุดเต็ม
+#   r175 กันตัวเลขทศนิยมด้วย (?<![\d.,]) -> เบอร์ที่ติดจุด/จุลภาคหลังตัวอักษร ("ชื่อ.08…", "โทร.08…") ไม่ถูกปิด
+# วิธีแก้: เพิ่มรอบที่ 2 จับเบอร์ไทยที่นำหน้าด้วย . หรือ , เฉพาะเมื่อตัวก่อนหน้านั้นไม่ใช่ตัวเลข
+#   (ทศนิยม/เงิน เช่น '2.5 แสน' '1,700,000' ไม่แตะ) · แตะแค่ข้อความ log ไม่เปลี่ยนการตอบ/การเก็บเบอร์ลงชีต
+# ปิด: R177_OFF=1 (กลับไปใช้ของ r176) · ย้อนกลับ: อัปโหลด main.py ของ 62e758a
+# ════════════════════════════════════════════════════════════════════
+_R177_OFF = os.environ.get("R177_OFF", "") == "1"
+_R177_DOT = _r175_re.compile(r"(?:(?<=\D[.,])|(?<=^[.,]))(?:\+?66[-\s]?|0)(?:\d[-\s]?){7,8}\d(?![\d,])")
+try:
+    _r177_base_mask = _r175_mask_text
+except Exception:
+    _r177_base_mask = None
+
+
+def _r177_mask_text(text):
+    try:
+        out = _r177_base_mask(text) if _r177_base_mask else str(text)
+        if _R177_OFF:
+            return out
+
+        def _rep(mo):
+            digits = _r175_re.sub(r"\D", "", mo.group(0))
+            return "xxx-xxx-" + digits[-3:]
+        return _R177_DOT.sub(_rep, str(out))
+    except Exception:
+        return text
+
+
+try:
+    if _r177_base_mask is not None:
+        _r175_mask_text = _r177_mask_text   # _r175_print เรียกผ่านชื่อนี้ทุกครั้ง
+    print("[R177] ปิดเบอร์ที่มีจุด/จุลภาคนำหน้าใน log [BOT OFF]" + (" · ปิดอยู่ (R177_OFF=1)" if _R177_OFF else ""))
+except Exception as _e:
+    print("[R177 INSTALL ERROR] " + str(_e))
+
+
+def _r177_selftest(which):
+    """เรียก print ของโมดูล bot_logic จริง แล้วจับข้อความที่ออก (ไม่ส่งอะไรออกนอก)"""
+    import io, contextlib
+    cases = {
+        # log จริง 21 พ.ย.: ชื่อ.เบอร์(ชื่อเล่น) (ใช้เบอร์สมมติรูปแบบเดียวกัน)
+        "name_dot": ("มนตรี.081-234-5671(เต้)", "081-234-5671", "671"),
+        "tel_dot": ("โทร.0812345672 ค่ะ", "0812345672", "672"),
+    }
+    keep = ["'2.5 แสน'", "'33,000ครับ'", "'3-4หมื่นต่อเดือนค่ะ'", "'1,700,000'", "'1.0812345678'"]
+    try:
+        import bot_logic as _b
+        if which in cases:
+            msg, bad, tail = cases[which]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _b.print(f"[BOT OFF] __R177__... แชทนี้ปิดบอทถาวรแล้ว — ไม่ตอบ | {msg[:40]!r}")
+            out = buf.getvalue()
+            return (bad not in out) and (("xxx-xxx-" + tail) in out)
+        if which == "keep":
+            ok = True
+            for m in keep:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    _b.print(f"[BOT OFF] __R177__... ไม่ตอบ | {m}")
+                ok = ok and (m in buf.getvalue()) and ("xxx-" not in buf.getvalue())
+            return ok
+        return False
+    except Exception as _e:
+        print("[R177 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("BO8", "log ไม่หลุดเบอร์ (r177)", "_r177_selftest", ("name_dot",), ("truthy", ""),
+         "log จริง 21 พ.ย.: 'ชื่อ.0xx-xxx-xxxx(ชื่อเล่น)' หลุดเต็ม · ต้องเหลือ xxx-xxx-<3 ตัวท้าย>"),
+        ("BO9", "log ไม่หลุดเบอร์ (r177)", "_r177_selftest", ("tel_dot",), ("truthy", ""),
+         "'โทร.08xxxxxxxx' ต้องถูกปิด"),
+        ("BO10", "log ไม่หลุดเบอร์ (r177)", "_r177_selftest", ("keep",), ("truthy", ""),
+         "'2.5 แสน' '33,000ครับ' '3-4หมื่น' '1,700,000' '1.0812345678' (ทศนิยม) ต้องคงเดิม"),
+    ])
+    print("[R177] ข้อสอบ 3 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R177 EXAM ERROR] " + str(_e))
+
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
