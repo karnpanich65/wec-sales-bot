@@ -15989,6 +15989,90 @@ except Exception as _e:
     print("[R177 EXAM ERROR] " + str(_e))
 
 
+# ════════════════════════════════════════════════════════════════════
+# r178 (23 พ.ย. 69 · Growth Loop) — log [COMPLAINT] ที่ไม่มีผู้รับ ต้องบอกชนิด + เพจ
+# อาการ: log 22 พ.ย. 01:11 / 02:58 UTC "[COMPLAINT] ไม่มีผู้รับแจ้งเตือนเลย — ดูในชีต ช่องสัญญาณจะขึ้น 🔴 เคสร้องเรียน"
+#   ×2 แต่ต้นเหตุจริงคือ [STOP] 'ไม่สนใจแล้วค่ะ' (ลูกค้าขอเลิกคุย) ไม่ใช่ร้องเรียน -> รายงานรายวันนับเป็น "ร้องเรียน" ผิด
+#   (บรรทัดเดิมไม่มี kind/page เลย แยก ร้องเรียน / ขอเลิกคุย / บอทตอบไม่ตรง / บอทพูดซ้ำ ไม่ได้)
+# วิธีแก้: ห่อ alert_complaint — กรณีไม่มีผู้รับ พิมพ์ "[COMPLAINT] <kind> page=<id> — ไม่มีผู้รับแจ้งเตือน"
+#   (ไม่พิมพ์ข้อความลูกค้า) · กรณีมีผู้รับ เรียกของเดิมทุกอย่าง · ไม่เปลี่ยนการตอบ/เกรด/การส่งแจ้งเตือน/ชีต
+# ปิด: R178_OFF=1 (กลับไปใช้ของเดิม) · ย้อนกลับ: อัปโหลด main.py ของ 4c152a7
+# ════════════════════════════════════════════════════════════════════
+_R178_OFF = os.environ.get("R178_OFF", "") == "1"
+_r178_base_alert = alert_complaint
+
+
+def _r178_alert_complaint(sender_id, user_text, ad_id="", page_id="",
+                          kind="เคสร้องเรียน",
+                          tail="บอทหยุดขายและส่งต่อให้คนดูแลแล้ว — โทรกลับด่วนครับ",
+                          _target_override=None):
+    if _R178_OFF:
+        return _r178_base_alert(sender_id, user_text, ad_id, page_id, kind=kind, tail=tail)
+    try:
+        if _target_override is not None:
+            target = _target_override
+        else:
+            target = page_alert_psid(page_id) or GIFT_FB_PSID
+        if not target:
+            print(f"[COMPLAINT] {kind} page={page_id or '-'} — ไม่มีผู้รับแจ้งเตือน "
+                  "(alert_psid/GIFT_FB_PSID ว่าง) · ดูในชีต ช่องสัญญาณ")
+            return
+    except Exception as _e:
+        print("[R178 ERROR] " + str(_e)[:80])
+    return _r178_base_alert(sender_id, user_text, ad_id, page_id, kind=kind, tail=tail)
+
+
+try:
+    alert_complaint = _r178_alert_complaint      # handle_event เรียกผ่านชื่อ global นี้
+    print("[R178] log [COMPLAINT] ไม่มีผู้รับ บอกชนิด+เพจ" + (" · ปิดอยู่ (R178_OFF=1)" if _R178_OFF else ""))
+except Exception as _e:
+    print("[R178 INSTALL ERROR] " + str(_e))
+
+
+def _r178_selftest(which):
+    """จับ stdout ของ alert_complaint กรณีไม่มีผู้รับ (ไม่ส่งอะไรออกนอก)"""
+    import io, contextlib
+    cases = {
+        # log จริง 22 พ.ย.: [STOP] 'ไม่สนใจแล้วค่ะ' -> alert kind ขอเลิกคุย
+        "stop": ("ไม่สนใจแล้วค่ะ", "108248514185091", "ลูกค้าขอเลิกคุย"),
+        "default": ("ติดต่อไม่ได้เลย 0812345673", "100899675332209", None),
+    }
+    try:
+        msg, page, kind = cases[which]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            if _R178_OFF:
+                # ของเดิม: เรียกได้เฉพาะเมื่อไม่มีผู้รับจริง (กันส่งแจ้งเตือนจริงตอนสอบ)
+                if page_alert_psid(page) or GIFT_FB_PSID:
+                    return False
+                if kind:
+                    _r178_base_alert("__R178__", msg, "", page, kind=kind)
+                else:
+                    _r178_base_alert("__R178__", msg, "", page)
+            elif kind:
+                _r178_alert_complaint("__R178__", msg, "", page, kind=kind, _target_override="")
+            else:
+                _r178_alert_complaint("__R178__", msg, "", page, _target_override="")
+        out = buf.getvalue()
+        want = "[COMPLAINT] " + (kind or "เคสร้องเรียน") + " page=" + page
+        return (want in out) and ("0812345673" not in out) and (msg not in out)
+    except Exception as _e:
+        print("[R178 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RC1", "log ร้องเรียนบอกชนิด (r178)", "_r178_selftest", ("stop",), ("truthy", ""),
+         "log จริง 22 พ.ย.: STOP 'ไม่สนใจแล้วค่ะ' ขึ้น [COMPLAINT] ไม่บอกชนิด · ต้องเป็น '[COMPLAINT] ลูกค้าขอเลิกคุย page=…'"),
+        ("RC2", "log ร้องเรียนบอกชนิด (r178)", "_r178_selftest", ("default",), ("truthy", ""),
+         "เคสร้องเรียนจริง ต้องขึ้น '[COMPLAINT] เคสร้องเรียน page=…' และไม่พิมพ์ข้อความ/เบอร์ลูกค้า"),
+    ])
+    print("[R178] ข้อสอบ 2 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R178 EXAM ERROR] " + str(_e))
+
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
