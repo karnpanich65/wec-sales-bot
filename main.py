@@ -16366,6 +16366,135 @@ except Exception as _e:
     print("[R179 EXAM ERROR] " + str(_e))
 
 
+# ════════════════════════════════════════════════════════════════════
+# r180 (24 พ.ย. 69 · Growth Loop) — log ระหว่าง /exam ติดป้าย [EXAM] แยกจากของจริง
+# อาการ (Railway log 23 พ.ย. 05:18:56 UTC = รัน /exam หลังขึ้น r179):
+#   "[SHEETS LOST] 🔴 ลีดเขียนลงชีตไม่ได้ … __R160__…" ×4 · "[PERSIST LOST] __R161__…" ×2
+#   "[FB SEND ERROR] … to=99000000…" ×8 · "[R165 GAVE UP]" ×2 — หน้าตาเหมือนเหตุจริงทุกตัว
+#   -> นับสถิติ/เฝ้า log (Growth Loop, Bot_Health) ปน alert ปลอม · r171 กันแค่การส่งแจ้งเตือน ไม่ได้กัน log
+# วิธีแก้ (แตะแค่ข้อความ log · ไม่แตะการตอบ/เกรด/การส่งชีต):
+#   - /exam ตั้งธงรายเธรด -> ทุกบรรทัด print ในเธรดนั้น (main + bot_logic) ขึ้นต้น "[EXAM] "
+#   - บรรทัดที่มีไอดีข้อสอบ (__R…__) จากเธรดอื่น ก็ติดป้ายเหมือนกัน
+#   - เธรดลูกค้าจริงไม่ถูกแตะ (ธงเป็นของเธรดคำขอ /exam เท่านั้น)
+# ปิด: R180_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ c10229a (r179)
+# ════════════════════════════════════════════════════════════════════
+import threading as _r180_th
+_R180_OFF = os.environ.get("R180_OFF", "") == "1"
+_R180_TL = _r180_th.local()
+
+
+def _r180_in_exam():
+    try:
+        return getattr(_R180_TL, "n", 0) > 0
+    except Exception:
+        return False
+
+
+def _r180_tag(args):
+    try:
+        if _R180_OFF or not args or not isinstance(args[0], str):
+            return args
+        a0 = args[0]
+        if a0.startswith("[EXAM"):
+            return args
+        if _r180_in_exam() or _r171_is_exam(a0):
+            return ("[EXAM] " + a0,) + tuple(args[1:])
+    except Exception:
+        pass
+    return args
+
+
+def _r180_builtin_print(*args, **kwargs):
+    return __builtins__["print"](*args, **kwargs) if isinstance(__builtins__, dict) \
+        else __builtins__.print(*args, **kwargs)
+
+
+def _r180_print(*args, **kwargs):
+    return _r180_builtin_print(*_r180_tag(args), **kwargs)
+
+
+try:
+    import bot_logic as _bl180
+    _R180_BL_BASE = getattr(_bl180, "print", None) or _r180_builtin_print
+
+    def _r180_bl_print(*args, **kwargs):
+        try:   # ปิดเบอร์ (r175–r177) ก่อนติดป้าย เพราะตัวปิดเบอร์ดูแค่บรรทัดที่ขึ้นต้น [BOT OFF]
+            if (not _R175_OFF and args and isinstance(args[0], str)
+                    and args[0].startswith("[BOT OFF]")):
+                args = (_r175_mask_text(args[0]),) + tuple(args[1:])
+        except Exception:
+            pass
+        return _R180_BL_BASE(*_r180_tag(args), **kwargs)
+
+    _bl180.print = _r180_bl_print
+    _R180_EXAM_VIEW = app.view_functions.get("r124_exam")
+
+    def _r180_exam_view(*a, **k):
+        try:
+            _R180_TL.n = getattr(_R180_TL, "n", 0) + 1
+        except Exception:
+            pass
+        try:
+            return _R180_EXAM_VIEW(*a, **k)
+        finally:
+            try:
+                _R180_TL.n = max(0, getattr(_R180_TL, "n", 1) - 1)
+            except Exception:
+                pass
+
+    if _R180_EXAM_VIEW is not None and not _R180_OFF:
+        app.view_functions["r124_exam"] = _r180_exam_view
+    print = _r180_print    # print ทุกที่ใน main.py ผ่านตัวติดป้ายนี้ (ค้นชื่อในโมดูลก่อน builtins)
+    print("[R180] log ระหว่าง /exam ติดป้าย [EXAM] แยกจากของจริง" + (" · ปิดอยู่ (R180_OFF=1)" if _R180_OFF else ""))
+except Exception as _e:
+    print("[R180 INSTALL ERROR] " + str(_e))
+
+
+def _r180_selftest(which):
+    import io, contextlib
+    try:
+        if _R180_OFF:
+            return False
+        if which == "exam_alarm_tagged":      # 23 พ.ย. 05:18:56 ระหว่าง /exam
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                print("[SHEETS LOST] 🔴 ลีดเขียนลงชีตไม่ได้ ลองครบ 6 รอบ (~1.5 ชม.) __R160__… เกรด C")
+                print("[FB SEND ERROR] 400 page=- tok=FB_PAGE_ACCESS_TOKEN to=99000000… code=10/2018278")
+                import bot_logic as _b
+                _b.print("[BOT OFF] __R180__... ไม่ตอบ | 'โทร 081-234-5678'")
+            out = buf.getvalue().splitlines()
+            return (len(out) == 3 and all(l.startswith("[EXAM] ") for l in out)
+                    and "5678" not in out[2] and "xxx-xxx-678" in out[2])
+        if which == "real_untouched":          # เธรดลูกค้าจริง (ไม่อยู่ใน /exam) ต้องไม่ถูกแตะ
+            saved = getattr(_R180_TL, "n", 0)
+            _R180_TL.n = 0
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    print("[SHEETS LOST] 🔴 ลีดเขียนลงชีตไม่ได้ 28745269… เกรด C")
+                    print("[PERSIST LOST] __R161__… turn ลองครบ 5 รอบ")
+                out = buf.getvalue().splitlines()
+                return (out[0].startswith("[SHEETS LOST]") and out[1].startswith("[EXAM] [PERSIST LOST]"))
+            finally:
+                _R180_TL.n = saved
+        return False
+    except Exception as _e:
+        _r180_builtin_print("[R180 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("EX1", "ป้ายข้อสอบ (r180)", "_r180_selftest", ("exam_alarm_tagged",), ("truthy", ""),
+         "23 พ.ย. 05:18 UTC: /exam พ่น [SHEETS LOST]🔴/[FB SEND ERROR] ปลอมหน้าตาเหมือนจริง -> ต้องขึ้นต้น [EXAM] · ปิดเบอร์ r175 ยังทำงาน"),
+        ("EX2", "ป้ายข้อสอบ (r180)", "_r180_selftest", ("real_untouched",), ("truthy", ""),
+         "log ลูกค้าจริงนอก /exam ไม่ถูกติดป้าย · ไอดีข้อสอบ __R…__ จากเธรดอื่นติดป้าย"),
+    ])
+    print("[R180] ข้อสอบ 2 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R180 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
