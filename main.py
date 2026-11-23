@@ -16074,6 +16074,298 @@ except Exception as _e:
 
 
 
+# ======================================================================
+# r179 (23 พ.ย. 69 · Gift สั่งในแชท "แก้ 1-5 เลย ของเก่าที่ดีห้ามเพี้ยน")
+# จาก log 20–23 พ.ย. (ลูกค้าจริง):
+#  (1) N1 เพราะ "รายได้ต่ำ" (รู้รายได้แล้ว) ถูกนับเป็น N1 "ไม่รู้รายได้" -> r155/r156 ถามรายได้ใหม่ + ลบรายได้เดิม
+#      -> ข้อความถัดไป (ยอดผ่อน) ถูกเก็บเป็นรายได้  เช่น 23 พ.ย. 02:10 "รายได้ 0 -> 15,000 · ยอดผ่อน -> 15,000"
+#      แก้: N1 ของ r155/r156 = "ยังไม่รู้รายได้" เท่านั้น · รู้รายได้แล้ว = ไม่เปิดเคสถามรายได้ซ้ำ ไม่ลบของเดิม
+#  (2) แชทเดียวโดนถามรายได้ 4–6 รอบ (22 พ.ย. 29809638…) เพราะทุกครั้งที่เปิดเคส N1 ตัวนับถามซ้ำถูกรีเซ็ต
+#      แก้: เปิดเคส N1 ได้ 1 ครั้ง/แชท · ครั้งถัดไปเปิดได้เฉพาะลูกค้าพิมพ์รายได้มาเอง (หรือตอบรายได้ที่เพิ่งถาม)
+#  (3) รายได้อ่านผิดเป็นเลขก้อนใหญ่: "400,000+50,000" (ไม่มีคำว่ารายได้) -> 450,000 แล้วบอทบอกวงเงิน 20.3–23.2 ล้าน
+#      แก้: ก) บวกเลข "x + y" เฉพาะข้อความที่มีคำบอกรายได้  ข) รายได้ > 200,000 ที่ลูกค้าไม่ได้พิมพ์คำว่ารายได้/เงินเดือน
+#      = ไม่บอกวงเงินในแชท + ติดสัญญาณให้เซลเช็คตอนโทร (เกรด/ตัวเลขในชีต/การแจก เหมือนเดิม)
+#  (4) คำถามรายได้ครั้งแรก เติมเหตุผลสั้นๆ (persona: กลัวหนี้ ไม่ไว้ใจเซล) — ยังถามทำงานประจำ+รายได้ในข้อเดียวเหมือนเดิม
+#  (5) เกณฑ์ N2: รายได้ 30,000 พอดี = แจกได้ (เดิมต้องเกิน 30,000)
+# ไม่แตะ: เกณฑ์เกรดอื่น · กฎแจก Apps Script · ถ้อยคำข้ออื่น · ชีต
+# ปิด: R179_OFF=1 (ทั้งชุด) · ย้อนกลับ: อัปโหลด main.py ของ 82a3bee (r178)
+# ======================================================================
+_R179_OFF = os.environ.get("R179_OFF", "") == "1"
+R179_HIGH_INC = 200000
+R179_INC_WORDS = ("เงินเดือน", "รายได้", "รายรับ", "เงินได้", "เดือนละ", "ต่อเดือน", "สลิป",
+                  "แสน", "ล้าน", "โอที", "OT", "ค่าคอม", "คอมมิช", "รับสุทธิ")
+R179_HIGH_SIG = "⚠️ รายได้ {v:,} สูงผิดปกติ (ลูกค้าพิมพ์: {t}) — เช็คตอนโทร บอทไม่ได้บอกวงเงิน"
+
+
+def _r179_known_income(data):
+    try:
+        return _r147_income(data) or None
+    except Exception:
+        return None
+
+
+def _r179_has_inc_word(t):
+    t = str(t or "")
+    return any(w in t for w in R179_INC_WORDS)
+
+
+# ---------- (1) N1 ของ r155/r156 = ยังไม่รู้รายได้เท่านั้น ----------
+try:
+    _R179_BASE_IS_N1 = _r155_is_n1
+
+    def _r155_is_n1(state):
+        if not _R179_BASE_IS_N1(state):
+            return False
+        if _R179_OFF:
+            return True
+        try:
+            if _r179_known_income((state or {}).get("data") or {}):
+                return False          # รู้รายได้แล้ว (ต่ำกว่าเกณฑ์) — ไม่มีอะไรให้ถามรายได้ซ้ำ
+        except Exception as _e:
+            print("[R179 N1 ERROR] " + str(_e))
+        return True
+
+    _R179_BASE_WILL_CALL = _r156_will_call
+
+    def _r156_will_call(state):
+        if not _R179_BASE_WILL_CALL(state):
+            return False
+        try:
+            d = (state or {}).get("data") or {}
+            if (not _R179_OFF and str(d.get("grade") or "").strip() == "N"
+                    and _r147_kind(d) == "N1"):
+                return False          # N รายได้ต่ำ = ไม่แจก -> ห้ามสัญญาว่าจะโทร (เหมือน N1 เดิม)
+        except Exception as _e:
+            print("[R179 CALL ERROR] " + str(_e))
+        return True
+    print("[R179] N1 ไม่รู้รายได้เท่านั้นที่ถามรายได้ซ้ำ · รู้รายได้แล้วไม่ลบ/ไม่ถามใหม่")
+except Exception as _e:
+    print("[R179 N1 INSTALL ERROR] " + str(_e))
+
+
+# ---------- (2) เปิดเคส N1 ได้ 1 ครั้ง/แชท ----------
+try:
+    _R179_BASE_REOPEN_OK = _r155_reopen_ok
+    _R179_BASE_REOPEN = _r155_reopen
+
+    def _r155_reopen_ok(state, msg, now=None):
+        if not _R179_BASE_REOPEN_OK(state, msg, now):
+            return False
+        if _R179_OFF:
+            return True
+        try:
+            if int(state.get("r179_reopens") or 0) < 1:
+                return True
+            if state.get("r156_inc_wait"):
+                return True                       # ตอบรายได้ที่บอทเพิ่งถาม
+            t0 = str(msg or "").replace(" ", "")
+            if any(w in t0 for w in _R154_INC_STRONG) and _bl154._parse_income(str(msg or "")):
+                return True                       # พิมพ์รายได้มาเอง
+            print("[R179] เปิดเคส N1 ไปแล้ว 1 ครั้ง -> ไม่ถามรายได้วนซ้ำ (ข้อความเข้าโน้ตตามเดิม)")
+            return False
+        except Exception as _e:
+            print("[R179 REOPEN ERROR] " + str(_e))
+            return True
+
+    def _r155_reopen(state, user_id):
+        _R179_BASE_REOPEN(state, user_id)
+        try:
+            state["r179_reopens"] = int(state.get("r179_reopens") or 0) + 1
+        except Exception:
+            pass
+    print("[R179] เปิดเคส N1 ถามรายได้ได้ 1 ครั้ง/แชท (เว้นลูกค้าพิมพ์รายได้มาเอง)")
+except Exception as _e:
+    print("[R179 REOPEN INSTALL ERROR] " + str(_e))
+
+
+# ---------- (3ก) บวก "x + y" เฉพาะข้อความที่มีคำบอกรายได้ ----------
+try:
+    _R179_BASE_SCAN = _r125_scan
+    _R179_SUM_RE = re.compile(r"(\d)(\D{0,14}?)(?:บวก|\+|และ|รวม|กับ)(\D{0,14}?)(\d)")
+
+    def _r125_scan(msg):
+        if not _R179_OFF:
+            try:
+                t = str(msg or "")
+                if not any(w in t for w in _R125_INCOME_WORDS) and _R179_SUM_RE.search(t.replace(",", "")):
+                    t2 = _R179_SUM_RE.sub(r"\1\2 ; \3\4", t.replace(",", ""))
+                    return _R179_BASE_SCAN(t2)
+            except Exception as _e:
+                print("[R179 SCAN ERROR] " + str(_e))
+        return _R179_BASE_SCAN(msg)
+    print("[R179] อ่านรายได้: บวกเลข x+y เฉพาะข้อความที่มีคำว่ารายได้/เงินเดือน")
+except Exception as _e:
+    print("[R179 SCAN INSTALL ERROR] " + str(_e))
+
+
+# ---------- (3ข) รายได้สูงผิดปกติ = ไม่บอกวงเงิน + ติดสัญญาณให้เซลเช็ค ----------
+def _r179_suspect_high(data):
+    """คืน (ตัวเลข, ข้อความลูกค้า) ถ้ารายได้ > 200,000 และลูกค้าไม่ได้พิมพ์คำบอกรายได้ · ไม่ใช่ = None"""
+    try:
+        d = data or {}
+        v = int(d.get("income_baht") or 0) or int(_bl147._parse_income(str(d.get("income") or "")) or 0)
+        if v <= R179_HIGH_INC:
+            return None
+        raw = str(d.get("income") or d.get("income_note") or "")
+        if _r179_has_inc_word(raw):
+            return None
+        return v, raw
+    except Exception:
+        return None
+
+
+try:
+    _R179_BASE_QUOTE = _r97_quote
+
+    def _r97_quote(data, state):
+        if not _R179_OFF:
+            try:
+                hit = _r179_suspect_high(data)
+                if hit:
+                    print(f"[R179 HIGH] รายได้ {hit[0]:,} ไม่มีคำบอกรายได้ -> ไม่บอกวงเงิน")
+                    return []
+            except Exception as _e:
+                print("[R179 QUOTE ERROR] " + str(_e))
+        return _R179_BASE_QUOTE(data, state)
+
+    _R179_BASE_GRADE = _bl147.BotEngine._grade
+
+    def _grade_r179(self, data, state=None):
+        g = _R179_BASE_GRADE(self, data, state)
+        if _R179_OFF:
+            return g
+        try:
+            st = state if isinstance(state, dict) else None
+            if st is not None:
+                _sig = st.get("signals") or []
+                _keep = [x for x in _sig if "สูงผิดปกติ (ลูกค้าพิมพ์" not in str(x)]
+                hit = _r179_suspect_high(data)
+                if hit:
+                    _t = re.sub(r"\s+", " ", hit[1])[:40]
+                    _keep.append(R179_HIGH_SIG.format(v=hit[0], t=_t))
+                if len(_keep) != len(_sig) or hit:
+                    st["signals"] = _keep
+        except Exception as _e:
+            print("[R179 GRADE ERROR] " + str(_e))
+        return g
+
+    _bl147.BotEngine._grade = _grade_r179
+    print("[R179] รายได้ > 200,000 ที่ไม่มีคำว่ารายได้ = ไม่บอกวงเงินในแชท + สัญญาณให้เซลเช็ค")
+except Exception as _e:
+    print("[R179 HIGH INSTALL ERROR] " + str(_e))
+
+
+# ---------- (4) คำถามรายได้ครั้งแรก + เหตุผลสั้นๆ ----------
+R179_INC_Q_OLD = ""
+R179_INC_Q = "ทำงานประจำไหมครับ รายได้เดือนละประมาณเท่าไหร่ ไว้เช็ควงเงินที่ไม่ผ่อนหนักเกินไปครับ"
+R179_INC_Q_F = "ทำงานประจำไหมคะ รายได้เดือนละประมาณเท่าไหร่ ไว้เช็ควงเงินที่ไม่ผ่อนหนักเกินไปค่ะ"
+try:
+    import faq_data as _fq179
+    if not _R179_OFF:
+        R179_INC_Q_OLD = str(_fq179.QUALIFY_QUESTIONS[1] or "")
+        _fq179.QUALIFY_QUESTIONS[1] = R179_INC_Q
+        _bl147.QUALIFY_QUESTIONS[1] = R179_INC_Q
+        _bl147._FEMALE_EXACT[R179_INC_Q] = R179_INC_Q_F
+        print("[R179] คำถามรายได้ครั้งแรก + เหตุผล (ไว้เช็ควงเงินที่ไม่ผ่อนหนักเกินไป)")
+except Exception as _e:
+    print("[R179 Q ERROR] ใช้คำถามเดิม: " + str(_e))
+
+
+# ---------- (5) N2: รายได้ 30,000 พอดี = แจกได้ ----------
+try:
+    _R179_BASE_KIND = _r147_kind
+
+    def _r147_kind(data):
+        if _R179_OFF:
+            return _R179_BASE_KIND(data)
+        inc = _r147_income(data)
+        if not inc:
+            return "N1"
+        return "N2" if inc >= R147_N2_INCOME_BAR else "N1"
+    print("[R179] เกรด N: รายได้ตั้งแต่ 30,000 = N2 แจกได้ (เดิมต้องเกิน 30,000)")
+except Exception as _e:
+    print("[R179 KIND ERROR] " + str(_e))
+
+
+def _r179_selftest(which):
+    try:
+        if which == "low_income_no_reopen":     # 23 พ.ย. 02:09 เคสจริง
+            st = {"done": True, "data": {"grade": "N", "income_baht": 25000,
+                                         "income": "ทำงานประจำค่ะ รายได้ประมาณ 25000"},
+                  "last_seen": 0, "signals": []}
+            return (not _r155_reopen_ok(st, "จ่ายต่อเดือนมากกว่า 15,000")
+                    and not _r155_is_n1(st) and not _r156_will_call(st))
+        if which == "unknown_income_reopens":   # ของเดิม r155 ต้องยังทำงาน
+            st = {"done": True, "data": {"grade": "N"}, "last_seen": 0, "signals": []}
+            return _r155_reopen_ok(st, "สนใจค่ะ") and _r155_is_n1(st)
+        if which == "reopen_once":              # 22 พ.ย. แชทเดียวถามรายได้ 6 รอบ
+            st = {"done": True, "data": {"grade": "N"}, "last_seen": 0, "signals": [],
+                  "page_id": "R179P"}
+            ok1 = _r155_reopen_ok(st, "สนใจค่ะ")
+            _r155_reopen(st, "__R179U__")
+            st["done"] = True
+            st["last_seen"] = 0
+            ok2 = _r155_reopen_ok(st, "สนใจค่ะ")
+            ok3 = _r155_reopen_ok(st, "เงินเดือน 35000 ค่ะ")
+            return ok1 and (not ok2) and ok3 and st.get("r179_reopens") == 1
+        if which == "no_sum_without_word":      # 23 พ.ย. 02:04 "400,000+50,000" -> 450000
+            return int(_bl147._parse_income("400,000+50,000") or 0) != 450000
+        if which == "sum_with_word_kept":       # ของเดิม: เงินเดือน x และ y = รวม
+            return int(_bl147._parse_income("เงินเดือน 15000 และ 13000 ค่ะ") or 0) == 28000
+        if which == "high_no_quote":
+            d = {"income_baht": 400000, "income": "400,000+50,000", "debt_baht": 0, "age": 40}
+            st = {"signals": []}
+            q = _r97_quote(d, st)
+            _grade_r179(_bl147.BotEngine, d, st)
+            return q == [] and any("สูงผิดปกติ" in str(x) for x in st["signals"])
+        if which == "high_with_word_ok":        # เงินเดือน 1.3 แสน / รายได้ 3 แสน = ของจริง ไม่ติดธง
+            return (_r179_suspect_high({"income_baht": 300000, "income": "เจ้าของกิจการ รายได้1-3แสน"}) is None
+                    and _r179_suspect_high({"income_baht": 45000, "income": "45000"}) is None)
+        if which == "income_q":
+            q = _bl147.QUALIFY_QUESTIONS[1]
+            return (q == R179_INC_Q and _bl147.to_female(q) == R179_INC_Q_F
+                    and _r151_topic(q) == "income" and "ทำงานประจำ" in q)
+        if which == "bar_30000":
+            return (_r147_kind({"income_baht": 30000}) == "N2"
+                    and _r147_kind({"income_baht": 29999}) == "N1"
+                    and _r147_kind({}) == "N1")
+        return False
+    except Exception as _e:
+        print("[R179 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    # (5) เกณฑ์เปลี่ยนตาม Gift 23 พ.ย. -> ข้อสอบ NA3 เดิม (30,000 = N1) ต้องกลับด้าน
+    for _i, _row in enumerate(_R124_EXAM):
+        if _row[0] == "NA3" and not _R179_OFF:
+            _R124_EXAM[_i] = (_row[0], _row[1], _row[2], _row[3], ("eq", "N2"),
+                              "30,000 พอดี = N2 แจกได้ (Gift เคาะ 23 พ.ย. 69 · r179)")
+    _R124_EXAM.extend([
+        ("RN1", "รายได้ N1 (r179)", "_r179_selftest", ("low_income_no_reopen",), ("truthy", ""),
+         "23 พ.ย. 02:10: รู้รายได้ 25–30k แล้ว ยังถูกถามรายได้ใหม่ + เก็บยอดผ่อน 15,000 เป็นรายได้"),
+        ("RN2", "รายได้ N1 (r179)", "_r179_selftest", ("unknown_income_reopens",), ("truthy", ""),
+         "ของเดิม r155: N1 ไม่รู้รายได้ กลับมาคุย = เปิดเคสถามรายได้"),
+        ("RN3", "รายได้ N1 (r179)", "_r179_selftest", ("reopen_once",), ("truthy", ""),
+         "22 พ.ย.: แชทเดียวโดนถามรายได้ 6 รอบ -> เปิดเคสได้ครั้งเดียว เว้นพิมพ์รายได้มาเอง"),
+        ("RN4", "รายได้สูงผิด (r179)", "_r179_selftest", ("no_sum_without_word",), ("truthy", ""),
+         "23 พ.ย. 02:04: '400,000+50,000' ไม่มีคำว่ารายได้ ห้ามบวกเป็น 450,000"),
+        ("RN5", "รายได้สูงผิด (r179)", "_r179_selftest", ("sum_with_word_kept",), ("truthy", ""),
+         "ของเดิม: 'เงินเดือน 15000 และ 13000' = 28,000"),
+        ("RN6", "รายได้สูงผิด (r179)", "_r179_selftest", ("high_no_quote",), ("truthy", ""),
+         "23 พ.ย. 02:05: บอทบอกวงเงิน 20.3–23.2 ล้าน จากรายได้ที่อ่านผิด -> ห้ามบอก + ติดสัญญาณ"),
+        ("RN7", "รายได้สูงผิด (r179)", "_r179_selftest", ("high_with_word_ok",), ("truthy", ""),
+         "รายได้สูงที่ลูกค้าพิมพ์คำว่ารายได้ชัด = ของจริง ไม่ติดธง"),
+        ("RN8", "คำถามรายได้ (r179)", "_r179_selftest", ("income_q",), ("truthy", ""),
+         "คำถามรายได้ใหม่: มีเหตุผล · เสียงหญิงคู่กัน · ตัวนับถามซ้ำยังจับเป็นหัวข้อรายได้"),
+        ("RN9", "เกณฑ์ N2 (r179)", "_r179_selftest", ("bar_30000",), ("truthy", ""),
+         "Gift 23 พ.ย.: 30,000 พอดี = N2 แจกได้ · 29,999 = N1"),
+    ])
+    print("[R179] ข้อสอบ 9 ข้อ (+NA3 ปรับตามเกณฑ์ใหม่) · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R179 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
