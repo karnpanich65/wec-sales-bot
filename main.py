@@ -16495,6 +16495,209 @@ except Exception as _e:
     print("[R180 EXAM ERROR] " + str(_e))
 
 
+# ======================================================================
+# r181 (26 พ.ย. 69 · Gift สั่ง "ทำ r181") — AI ไม่รู้ว่าลูกค้าบอกอะไรไปแล้ว
+# อาการ: รอบที่ AI ตอบเอง เห็นแค่ 10 ข้อความล่าสุด · ข้อมูลที่บอทเก็บแล้วใน state["data"]
+#   (เป้าหมาย/รายได้/ภาระ/อายุ/ผู้กู้ร่วม/งบ/โซน/ได้เบอร์แล้ว) ไม่เคยถูกส่งให้ AI
+#   -> AI ถามซ้ำ / ลืมสิ่งที่ลูกค้าเล่าช่วงต้น / ลูกค้ากลับมาหลายวันเหมือนเริ่มใหม่
+# วิธีแก้ (ชั้นนอกสุด ไม่แตะ prompt หลัก/ถ้อยคำเทมเพลต/เกรด/กฎแจก/ชีต):
+#   ก่อนเรียก AI แนบกล่อง "สิ่งที่รู้แล้วเกี่ยวกับลูกค้าคนนี้" (~100–150 token) เป็น system block ท้ายสุด
+#   - ต่อท้ายบล็อก cache เดิม -> prompt caching ของ system prompt หลักยังใช้ได้เหมือนเดิม
+#   - ไม่ใส่เบอร์/ชื่อ/เกรด/วงเงิน (บอกแค่ "ได้เบอร์แล้ว") · ไม่มีข้อมูล = ไม่แนบ (เหมือนเดิมเป๊ะ)
+# log: [R181 FACTS] · ปิด: R181_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ 4b94dfb (r180)
+# ======================================================================
+_R181_OFF = os.environ.get("R181_OFF", "") == "1"
+_R181_TL = threading.local()
+_R181_MAXLEN = 700
+
+
+def _r181_money(v):
+    try:
+        v = int(float(v))
+        return f"{v:,} บาท" if v > 0 else ""
+    except Exception:
+        return ""
+
+
+def _r181_short(t, n=50):
+    t = re.sub(r"\s+", " ", str(t or "")).strip()
+    t = re.sub(r"(?<!\d)0\d{1,2}[-\s]?\d{3}[-\s]?\d{3,4}(?!\d)", "", t)   # กันเบอร์หลุดเข้า AI
+    return t[:n]
+
+
+def _r181_facts(state):
+    """คืนข้อความกล่องข้อมูลที่รู้แล้ว · ไม่มีอะไร = '' """
+    try:
+        st = state if isinstance(state, dict) else {}
+        d = st.get("data") or {}
+        if not isinstance(d, dict) or not d:
+            return ""
+        L = []
+        if d.get("objective"):
+            L.append("เป้าหมาย: " + _r181_short(d.get("objective"), 40))
+        if d.get("income_refused"):
+            L.append("รายได้: ลูกค้าไม่สะดวกบอก (อย่าถามซ้ำ)")
+        else:
+            inc = _r181_money(d.get("income_baht")) or (_r181_short(d.get("income")) if d.get("income") else "")
+            if inc:
+                L.append("รายได้ต่อเดือน: " + inc + (" (อาชีพอิสระ/เจ้าของกิจการ)" if st.get("self_employed") else ""))
+        if d.get("debt_baht") is not None and str(d.get("debt_baht")) != "":
+            _db = _r181_money(d.get("debt_baht"))
+            L.append("ภาระผ่อนต่อเดือน: " + (_db or "ไม่มี"))
+        elif d.get("debt"):
+            L.append("ภาระผ่อน: " + _r181_short(d.get("debt")))
+        if d.get("age"):
+            L.append(f"อายุ: {d.get('age')} ปี")
+        if d.get("co_borrower_income") or d.get("co_borrower_yes"):
+            _ci = _r181_money(d.get("co_borrower_income"))
+            L.append("มีผู้กู้ร่วม" + (f" รายได้ {_ci}" if _ci else ""))
+        elif d.get("co_borrower_none"):
+            L.append("ไม่มีผู้กู้ร่วม")
+        if d.get("budget"):
+            L.append("งบที่บอก: " + _r181_short(d.get("budget"), 30))
+        if d.get("zone"):
+            L.append("ย่านที่สนใจ: " + _r181_short(d.get("zone"), 30))
+        if d.get("contact"):
+            L.append("ให้เบอร์/ช่องทางติดต่อแล้ว (ห้ามขอเบอร์ซ้ำ)")
+        if not L:
+            return ""
+        txt = ("ข้อมูลที่ลูกค้าคนนี้ให้ไว้แล้ว (ใช้ประกอบการตอบ ห้ามถามข้อที่รู้แล้วซ้ำ "
+               "ห้ามพูดตัวเลขวงเงินเอง ห้ามอ่านทวนรายการนี้ให้ลูกค้าฟัง):\n- " + "\n- ".join(L))
+        return txt[:_R181_MAXLEN]
+    except Exception as _e:
+        print("[R181 FACTS ERROR] " + str(_e)[:80])
+        return ""
+
+
+try:
+    _R181_BASE_POST = requests.post
+
+    def _r181_post(url, *a, **kw):
+        try:
+            facts = getattr(_R181_TL, "facts", "")
+            if facts and url == _bl9.ANTHROPIC_URL and isinstance(kw.get("json"), dict):
+                body = dict(kw["json"])
+                sys_ = body.get("system")
+                if isinstance(sys_, list):
+                    body["system"] = list(sys_) + [{"type": "text", "text": facts}]
+                elif isinstance(sys_, str):
+                    body["system"] = [{"type": "text", "text": sys_}, {"type": "text", "text": facts}]
+                kw["json"] = body
+                _R181_TL.facts = ""          # ใช้ครั้งเดียวต่อการเรียก
+                print(f"[R181 FACTS] แนบข้อมูลที่รู้แล้ว {facts.count(chr(10))} ข้อ ให้ AI")
+        except Exception as _e:
+            print("[R181 POST ERROR] " + str(_e)[:80])
+        return _R181_BASE_POST(url, *a, **kw)
+
+    requests.post = _r181_post
+
+    _R181_BASE_ASK = _bl9.BotEngine._ask_claude
+
+    def _ask_claude_r181(self, user_message, user_id, gender="", done=False, state=None):
+        if not _R181_OFF:
+            try:
+                _R181_TL.facts = _r181_facts(state)
+            except Exception:
+                _R181_TL.facts = ""
+        try:
+            return _R181_BASE_ASK(self, user_message, user_id, gender, done, state)
+        finally:
+            _R181_TL.facts = ""
+
+    _bl9.BotEngine._ask_claude = _ask_claude_r181
+    print("[R181] AI เห็นข้อมูลที่ลูกค้าให้ไว้แล้ว (กล่องข้อมูล ท้าย system) · ไม่มีข้อมูล = เหมือนเดิม"
+          + (" · ปิดอยู่ (R181_OFF=1)" if _R181_OFF else ""))
+except Exception as _e:
+    print("[R181 INSTALL ERROR] " + str(_e))
+
+
+def _r181_selftest(which):
+    """จับ payload ที่จะส่งไป Anthropic จริง (ไม่ยิงเน็ต) ผ่าน _ask_claude ตัวนอกสุด"""
+    sent = []
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"content": [{"type": "text", "text": "รับทราบครับ"}], "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}
+        text = ""
+
+    real_base, real_key = globals()["_R181_BASE_POST"], _bl9.ANTHROPIC_API_KEY
+    _tid = threading.get_ident()
+
+    def fake_post(url, *a, **kw):
+        # ดักเฉพาะการเรียก AI ของเธรดข้อสอบนี้ · ลีด/ชีต/Messenger ของจริงในเธรดอื่นผ่านตามเดิม
+        if url != _bl9.ANTHROPIC_URL or threading.get_ident() != _tid:
+            return real_base(url, *a, **kw)
+        sent.append((url, kw.get("json")))
+        return _Resp()
+
+    tag = "__R181" + which[:6] + str(int(time.time() * 1000) % 10 ** 6) + "__"
+    try:
+        globals()["_R181_BASE_POST"] = fake_post
+        _bl9.ANTHROPIC_API_KEY = _bl9.ANTHROPIC_API_KEY or "test"
+        if which == "facts_text":
+            f = _r181_facts({"data": {"objective": "ปล่อยเช่า", "income_baht": 45000, "debt_baht": 0,
+                                       "age": 35, "contact": "0812345678"}})
+            return ("45,000 บาท" in f and "ไม่มี" in f and "35 ปี" in f and "ห้ามขอเบอร์ซ้ำ" in f
+                    and "0812345678" not in f and "ห้ามถามข้อที่รู้แล้วซ้ำ" in f)
+        if which == "empty_same":
+            return _r181_facts({"data": {}}) == "" and _r181_facts(None) == ""
+        if which == "no_phone_leak":
+            f = _r181_facts({"data": {"debt": "ผ่อนรถ 8000 โทร 081-234-5678"}})
+            return "081-234-5678" not in f and "ผ่อนรถ 8000" in f
+        if which in ("attached", "cache_kept"):
+            st = {"data": {"objective": "อยู่เอง", "income_baht": 52000}, "page_id": "R181P"}
+            eng = CalmBotEngine()
+            eng._ask_claude("ห้องแถวรัชดามีไหมครับ", tag, state=st)
+            ant = [j for u, j in sent if u == _bl9.ANTHROPIC_URL and isinstance(j, dict)]
+            if not ant:
+                return False
+            sysb = ant[-1].get("system") or []
+            last = sysb[-1].get("text", "") if sysb else ""
+            if which == "attached":
+                return "52,000 บาท" in last and "อยู่เอง" in last
+            return (isinstance(sysb, list) and len(sysb) >= 2
+                    and "cache_control" in sysb[0] and "52,000" not in str(sysb[0]))
+        if which == "nothing_known_untouched":
+            st = {"data": {}, "page_id": "R181P"}
+            CalmBotEngine()._ask_claude("สนใจครับ", tag, state=st)
+            ant = [j for u, j in sent if u == _bl9.ANTHROPIC_URL and isinstance(j, dict)]
+            return bool(ant) and not any("ให้ไว้แล้ว" in str(b) for b in (ant[-1].get("system") or []))
+        return False
+    except Exception as _e:
+        print("[R181 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+    finally:
+        globals()["_R181_BASE_POST"] = real_base
+        _bl9.ANTHROPIC_API_KEY = real_key
+        _R181_TL.facts = ""
+        try:
+            _bl9._conversations.pop(tag, None)
+        except Exception:
+            pass
+
+
+try:
+    _R124_EXAM.extend([
+        ("RK1", "AI รู้ข้อมูลลูกค้า (r181)", "_r181_selftest", ("facts_text",), ("truthy", ""),
+         "กล่องข้อมูล: รายได้/ภาระ/อายุ/ได้เบอร์แล้ว ครบ · ไม่มีเบอร์จริงในกล่อง"),
+        ("RK2", "AI รู้ข้อมูลลูกค้า (r181)", "_r181_selftest", ("empty_same",), ("truthy", ""),
+         "ยังไม่รู้อะไร = ไม่แนบ (เหมือนเดิม)"),
+        ("RK3", "AI รู้ข้อมูลลูกค้า (r181)", "_r181_selftest", ("no_phone_leak",), ("truthy", ""),
+         "เบอร์ที่ปนในข้อความภาระ ห้ามหลุดเข้า AI"),
+        ("RK4", "AI รู้ข้อมูลลูกค้า (r181)", "_r181_selftest", ("attached",), ("truthy", ""),
+         "เรียก AI จริงผ่านตัวนอกสุด -> payload มีกล่องข้อมูลลูกค้า"),
+        ("RK5", "AI รู้ข้อมูลลูกค้า (r181)", "_r181_selftest", ("cache_kept",), ("truthy", ""),
+         "บล็อก system หลักยังมี cache_control และไม่ปนข้อมูลลูกค้า (cache ไม่แตก)"),
+        ("RK6", "AI รู้ข้อมูลลูกค้า (r181)", "_r181_selftest", ("nothing_known_untouched",), ("truthy", ""),
+         "ไม่มีข้อมูล = payload ไม่ถูกแตะ"),
+    ])
+    print("[R181] ข้อสอบ 6 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R181 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
