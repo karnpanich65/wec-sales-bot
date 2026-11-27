@@ -16698,6 +16698,175 @@ except Exception as _e:
     print("[R181 EXAM ERROR] " + str(_e))
 
 
+# ════════════════════════════════════════════════════════════════════
+# r182 (27 พ.ย. 69 · Growth Loop) — ยอด "หนี้ที่ต้องปิด" ห้ามถูกเก็บเป็นรายได้ผันแปร
+# อาการ (Railway log 26 พ.ย. 12:46 และ 17:14 UTC · 2 แชท เพจ …209 และ …194):
+#   บอทถาม R110 "นอกจากเงินเดือน มีรายได้ส่วนอื่นอีกเดือนละประมาณเท่าไหร่" ->
+#   ลูกค้าตอบ "หนี้สินผมรวมที่ต้องปิดตอนนี้คือ 930,000"
+#   -> "[R110] เก็บรายได้ผันแปร 930,000 -> รวม 953690" -> "[R147] N2 รายได้ 953690" (แจกเป็นเคสผ่านรายได้)
+#   -> ติดป้ายเพจ "ผ่านเกณฑ์รายได้" + ชีตได้รายได้ ~9.5 แสน ทั้งที่ลูกค้าบอกฐาน 3–4 หมื่น
+# ต้นเหตุ: R110 (ค) อ่านเลขแรกจากข้อความถัดไปทุกข้อความที่รออยู่ ไม่ดูว่าเป็นคำพูดเรื่องหนี้
+# วิธีแก้ (แตะแค่ "เลขนี้ลงช่องไหน" · ไม่แตะเกณฑ์/ถ้อยคำ/การแจก):
+#   ตอนรอรายได้ผันแปร ถ้าข้อความมีคำเรื่องหนี้ (หนี้/ผ่อน/ปิดบัญชี/สินเชื่อ/บัตร…) และไม่มีคำเรื่องรายได้
+#   -> ไม่เก็บเป็นรายได้ · เลิกรอ (R110 ถามครั้งเดียวอยู่แล้ว ไม่ถามซ้ำ) · ใส่โน้ตให้เซล "ลูกค้าแจ้งหนี้ … ไม่นับเป็นรายได้"
+#   ข้อความที่มีทั้งรายได้และหนี้ ("ค่าคอม 10,000 ผ่อนรถ 5,000") = ทางเดิม
+#   (Gift เคาะ 28 พ.ย. ทาง ก) ยอด ≥100,000 หรือมีคำว่า รวม/ที่ต้องปิด/คงเหลือ -> เก็บเป็น "ยอดหนี้รวม"
+#   (debt_total_baht · ไม่ใช้ตัดเกรด) · ห้ามลงภาระผ่อน/เดือน (debt_baht) · ไม่เขียนทับของเดิม
+# ปิด: R182_OFF=1 · ย้อนกลับ: อัปโหลด main.py ของ 5d2b017 (r181)
+# ════════════════════════════════════════════════════════════════════
+_R182_OFF = os.environ.get("R182_OFF", "") == "1"
+_R182_DEBT_WORDS = ("หนี้", "ผ่อน", "ปิดบัญชี", "ต้องปิด", "ค้างชำระ", "ยอดค้าง", "สินเชื่อ",
+                    "บัตรเครดิต", "บัตรกดเงินสด", "เงินกู้", "กู้มา", "กยศ", "ภาระ")
+_R182_INCOME_WORDS = ("รายได้", "เงินเดือน", "ได้เดือนละ", "ค่าคอม", "คอมมิชชั่น", "คอมมิชชัน",
+                      "commission", "โอที", "ล่วงเวลา", "โบนัส", "bonus", "เบี้ยเลี้ยง",
+                      "ค่าตำแหน่ง", "incentive", "อินเซนทีฟ", "เงินพิเศษ", "ยอดขาย")
+
+
+_R182_TOTAL_MIN = 100_000       # เกณฑ์เดียวกับสหกรณ์ (bot_logic): แสนขึ้นไป = ยอดคงเหลือ ไม่ใช่ค่างวด
+_R182_TOTAL_WORDS = ("รวม", "ที่ต้องปิด", "ยอดปิด", "คงเหลือ", "ค้างอยู่", "เหลืออีก")
+
+
+def _r182_is_debt_answer(msg):
+    try:
+        m = str(msg or "").lower()
+        return (any(w in m for w in _R182_DEBT_WORDS)
+                and not any(w in m for w in _R182_INCOME_WORDS))
+    except Exception:
+        return False
+
+
+def _r182_guard(engine, state, msg):
+    """คืน True ถ้ากันไว้ (ข้อความนี้เป็นเรื่องหนี้ ไม่ใช่รายได้ผันแปร)"""
+    if _R182_OFF:
+        return False
+    try:
+        d = state.get("data") or {}
+        if not (state.get("awaiting_income_var") and d.get("income_var") is None):
+            return False
+        if not _r182_is_debt_answer(msg):
+            return False
+        state["awaiting_income_var"] = False
+        n = None
+        try:
+            n = _bl9._parse_income(str(msg))
+        except Exception:
+            n = None
+        # Gift เคาะ 28 พ.ย. (ทาง ก): ยอดก้อนใหญ่/ยอดที่ต้องปิด = "ยอดหนี้รวม" (debt_total_baht)
+        #   ช่องนี้ไม่ใช้ตัดเกรด (ใช้คิดเคสปิดภาระ/BCR) · ห้ามลง debt_baht (ภาระผ่อน/เดือน = ตัวตัดเกรด)
+        #   บอทยังถามค่าผ่อนต่อเดือนตามทางเดิม
+        _tot_set = False
+        try:
+            _m = str(msg or "").lower()
+            if n and (int(n) >= _R182_TOTAL_MIN or any(w in _m for w in _R182_TOTAL_WORDS)) \
+                    and not d.get("debt_total_baht"):
+                d["debt_total_baht"] = int(n)
+                state["data"] = d
+                _tot_set = True
+        except Exception:
+            _tot_set = False
+        note = ("ลูกค้าแจ้งยอดหนี้/ภาระ" + (f" {int(n):,} บาท" if n else "")
+                + (" (เก็บเป็นยอดหนี้รวม ไม่ใช่ค่าผ่อน/เดือน)" if _tot_set else "")
+                + " ตอนบอทถามรายได้ส่วนอื่น — ไม่นับเป็นรายได้ เซลเช็คภาระอีกครั้ง")
+        try:
+            if engine is not None:
+                engine._add_signal(state, note)
+            else:
+                state.setdefault("signals", []).append(note)
+        except Exception:
+            state.setdefault("signals", []).append(note)
+        print("[R182] ข้อความตอบเรื่องหนี้ ไม่เก็บเป็นรายได้ผันแปร"
+              + (f" (ยอด {int(n):,})" if n else ""))
+        return True
+    except Exception as _e:
+        print("[R182 GUARD ERROR] " + str(_e)[:80])
+        return False
+
+
+try:
+    _R182_PREV_DECIDE = CalmBotEngine._decide
+
+    def _decide_r182(self, msg, user_id, state, bucket, is_new):
+        try:
+            _r182_guard(self, state, msg)
+        except Exception as _e:
+            print("[R182 PRE ERROR] " + str(_e)[:80])
+        return _R182_PREV_DECIDE(self, msg, user_id, state, bucket, is_new)
+
+    CalmBotEngine._decide = _decide_r182
+    print("[R182] ยอดหนี้ที่ลูกค้าตอบตอนถามรายได้ส่วนอื่น ไม่ถูกเก็บเป็นรายได้"
+          + (" · ปิดอยู่ (R182_OFF=1)" if _R182_OFF else ""))
+except Exception as _e:
+    print("[R182 INSTALL ERROR] " + str(_e))
+
+
+def _r182_selftest(which):
+    try:
+        def _st():
+            return {"awaiting_income_var": True, "_r110_asked": True, "signals": [],
+                    "data": {"income_baht": 23690, "income": "รายได้ 23,690"}}
+        if which == "debt_not_income":        # 26 พ.ย. 12:46/17:14 UTC เคสจริง
+            st = _st()
+            _r182_guard(None, st, "หนี้สินผมรวมที่ต้องปิดตอนนี้คือ 930,000 ")
+            return (st.get("awaiting_income_var") is False
+                    and st["data"].get("income_var") is None
+                    and any("930,000" in str(s) and "ไม่นับเป็นรายได้" in str(s) for s in st["signals"]))
+        if which == "total_to_debt_total":    # Gift เคาะ 28 พ.ย. ทาง ก
+            st = _st()
+            _r182_guard(None, st, "หนี้สินผมรวมที่ต้องปิดตอนนี้คือ 930,000 ")
+            d = st["data"]
+            return d.get("debt_total_baht") == 930000 and d.get("debt_baht") is None
+        if which == "installment_not_total":  # ค่าผ่อน/เดือน ห้ามลงยอดหนี้รวม และห้ามลง debt_baht ทางนี้
+            st = _st()
+            _r182_guard(None, st, "ผ่อนรถเดือนละ 12,000 ค่ะ")
+            d = st["data"]
+            return "debt_total_baht" not in d and d.get("debt_baht") is None
+        if which == "total_not_overwritten":
+            st = _st()
+            st["data"]["debt_total_baht"] = 500000
+            _r182_guard(None, st, "หนี้ที่ต้องปิด 930,000")
+            return st["data"]["debt_total_baht"] == 500000
+        if which == "debt_installment":
+            st = _st()
+            _r182_guard(None, st, "ผ่อนรถเดือนละ 12,000 ค่ะ")
+            return st.get("awaiting_income_var") is False and st["data"].get("income_var") is None
+        if which == "var_income_kept":        # ของเดิม: ตอบรายได้จริง ต้องไม่ถูกกัน
+            ok = True
+            for m in ("ค่าคอมประมาณ 10,000 ค่ะ", "13000ค่ะ ถ้าไม่ได้ยอดขาย", "ค่าคอม 10,000 ผ่อนรถ 5,000",
+                      "ประมาณ 8000"):
+                st = _st()
+                ok = ok and (_r182_guard(None, st, m) is False) and st.get("awaiting_income_var") is True
+            return ok
+        if which == "not_waiting_untouched":
+            st = {"data": {}, "signals": []}
+            return _r182_guard(None, st, "หนี้ 50,000") is False and "awaiting_income_var" not in st
+        return False
+    except Exception as _e:
+        print("[R182 SELFTEST ERROR] " + which + " " + str(_e))
+        return False
+
+
+try:
+    _R124_EXAM.extend([
+        ("RD1", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("debt_not_income",), ("truthy", ""),
+         "26 พ.ย. 12:46/17:14 UTC: 'หนี้สินผมรวมที่ต้องปิดตอนนี้คือ 930,000' ถูกเก็บเป็นรายได้ผันแปร -> N2 953,690"),
+        ("RD2", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("debt_installment",), ("truthy", ""),
+         "ตอบยอดผ่อน ตอนบอทถามรายได้ส่วนอื่น ต้องไม่ลงช่องรายได้"),
+        ("RD3", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("var_income_kept",), ("truthy", ""),
+         "ของเดิม: ค่าคอม/ยอดขาย/ตัวเลขเปล่า/มีทั้งรายได้+หนี้ = เก็บตามทางเดิม"),
+        ("RD4", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("not_waiting_untouched",), ("truthy", ""),
+         "ไม่ได้รอรายได้ผันแปร = ไม่แตะ"),
+        ("RD5", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("total_to_debt_total",), ("truthy", ""),
+         "Gift ทาง ก: 'หนี้…ที่ต้องปิด 930,000' -> ยอดหนี้รวม 930,000 · ค่าผ่อน/เดือน (ตัวตัดเกรด) ไม่ถูกแตะ"),
+        ("RD6", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("installment_not_total",), ("truthy", ""),
+         "ค่าผ่อนเดือนละ 12,000 ไม่ลงยอดหนี้รวม (บอทถามค่าผ่อนตามทางเดิม)"),
+        ("RD7", "หนี้ไม่ใช่รายได้ (r182)", "_r182_selftest", ("total_not_overwritten",), ("truthy", ""),
+         "มียอดหนี้รวมอยู่แล้ว ห้ามเขียนทับ"),
+    ])
+    print("[R182] ข้อสอบ 7 ข้อ · รวม " + str(len(_R124_EXAM)) + " ข้อ")
+except Exception as _e:
+    print("[R182 EXAM ERROR] " + str(_e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"WEC Bot v3.3 starting on port {port}")
